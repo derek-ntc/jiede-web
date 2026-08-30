@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}使用反馈{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>使用反馈</h1>
+      <p>查看所有用户提交的问题、建议和功能需求。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ feedbacks|length }}</strong>
+      <span>条反馈</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>提交时间</th>
+            <th>提交人</th>
+            <th>反馈内容</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for feedback in feedbacks %}
+            <tr class="{% if feedback.handled %}order-completed{% endif %}">
+              <td data-label="提交时间">{{ feedback.created_at | datetime }}</td>
+              <td data-label="提交人">{{ feedback.created_by or "-" }}</td>
+              <td data-label="反馈内容">{{ feedback.content }}</td>
+              <td data-label="状态">
+                {% if feedback.handled %}
+                  已处理{% if feedback.handled_by %} / {{ feedback.handled_by }}{% endif %}
+                  {% if feedback.handled_at %}<br>{{ feedback.handled_at | datetime }}{% endif %}
+                {% else %}
+                  未处理
+                {% endif %}
+              </td>
+              <td class="actions" data-label="操作">
+                {% if feedback.handled %}
+                  <span class="empty-text">已处理</span>
+                {% else %}
+                  <form method="post" action="{{ url_for('handle_feedback', feedback_id=feedback.id) }}">
+                    <button type="submit">已处理</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="5" class="empty">暂无使用反馈</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

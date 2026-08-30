@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}成品检验报告 - {{ plan.plan_no }}{% endblock %}
+
+{% block content %}
+  <div class="shipment-plan-preview inspection-report-preview">
+    <div class="preview-toolbar">
+      <a class="button secondary" href="{{ url_for('shipped_orders') }}">返回发货页面</a>
+      <a class="button secondary" href="{{ url_for('preview_shipment_plan', plan_id=plan.id) }}" target="_blank">打开计划单</a>
+      <button type="button" onclick="window.print()">打印</button>
+    </div>
+
+    <section class="panel shipment-plan-sheet inspection-report-sheet">
+      <div class="shipment-plan-preview-head">
+        <div>
+          <p class="preview-kicker">成品检验报告</p>
+          <h1>{{ report_no }}</h1>
+        </div>
+        <div class="preview-meta-grid">
+          <div>
+            <span>计划单号</span>
+            <strong>{{ plan.plan_no }}</strong>
+          </div>
+          <div>
+            <span>客户</span>
+            <strong>{{ plan.customer or "未指定客户" }}</strong>
+          </div>
+          <div>
+            <span>计划发货日期</span>
+            <strong>{{ plan.planned_ship_at or "-" }}</strong>
+          </div>
+          <div>
+            <span>生成日期</span>
+            <strong>{{ generated_at }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="inspection-report-summary">
+        <span>产品项数：<strong>{{ plan.item_count }}</strong></span>
+        <span>计划数量：<strong>{{ plan.total_planned_quantity }}</strong></span>
+        <span>预计箱数：<strong>{{ plan.total_boxes or "-" }}</strong></span>
+        <span>检验结论：□ 合格　□ 不合格　□ 让步接收</span>
+      </div>
+
+      <table class="inspection-report-table">
+        <thead>
+          <tr>
+            <th>序号</th>
+            <th>订单号</th>
+            <th>图号</th>
+            <th>产品名称</th>
+            <th>计划数量</th>
+            <th>检验项目</th>
+            <th>标准要求</th>
+            <th>方法/工具</th>
+            <th>结果</th>
+            <th>备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for section in inspection_sections %}
+            {% set product_index = loop.index %}
+            {% for requirement in section.requirements %}
+              <tr>
+                <td>{{ product_index if loop.first else "" }}</td>
+                <td>{{ section.order_no if loop.first else "" }}</td>
+                <td>{{ section.drawing_no if loop.first else "" }}</td>
+                <td>{{ section.product_name if loop.first else "" }}</td>
+                <td>{{ section.planned_quantity if loop.first else "" }}</td>
+                <td>{{ requirement.item_name or "" }}</td>
+                <td>{{ requirement.standard or "" }}</td>
+                <td>{{ requirement.method or "" }}</td>
+                <td class="inspection-result-cell">□ 合格　□ 不合格</td>
+                <td>{{ requirement.remark or "" }}</td>
+              </tr>
+            {% endfor %}
+          {% else %}
+            <tr>
+              <td colspan="10" class="empty">暂无产品明细</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="inspection-report-notes">
+        <div>
+          <strong>异常说明：</strong>
+        </div>
+        <div class="inspection-report-note-box"></div>
+      </div>
+
+      <div class="preview-sign-row">
+        <span>检验员：</span>
+        <span>仓库确认：</span>
+        <span>审核：</span>
+      </div>
+    </section>
+  </div>
+{% endblock %}

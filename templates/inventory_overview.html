@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}库存总览{% endblock %}
+{% block content %}
+<div class="inventory-page">
+  <section class="page-head">
+    <div>
+      <h1>库存总览</h1>
+      <p>复用现有产品资料，按产品和库位统计库存。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ products|length }}</strong>
+      <span>条产品</span>
+    </div>
+  </section>
+
+  <nav class="inventory-tabs">
+    <a class="active-nav-link" href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
+    <a href="{{ url_for('inventory_scan') }}">扫码查询</a>
+    <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
+    <a href="{{ url_for('inventory_outbound') }}">扫码出库</a>
+    <a href="{{ url_for('inventory_adjust') }}">库存调整</a>
+    <a href="{{ url_for('inventory_locations') }}">库位管理</a>
+    <a href="{{ url_for('inventory_transactions') }}">库存流水</a>
+  </nav>
+
+  <section class="panel inventory-panel">
+    <div class="section-head">
+      <h2>库存列表</h2>
+      <form class="search compact-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索产品名称、SKU、条码、库存编码">
+        <select name="status" onchange="this.form.submit()">
+          <option value="" {% if not status %}selected{% endif %}>全部库存</option>
+          <option value="low" {% if status == "low" %}selected{% endif %}>低库存</option>
+          <option value="zero" {% if status == "zero" %}selected{% endif %}>无库存</option>
+          <option value="positive" {% if status == "positive" %}selected{% endif %}>有库存</option>
+        </select>
+        <button type="submit">搜索</button>
+        <a class="button secondary" href="{{ url_for('export_inventory_overview', q=query, status=status) }}">导出Excel</a>
+      </form>
+    </div>
+
+    <form id="inventory-label-selection" method="post" action="{{ url_for('inventory_labels') }}" target="_blank"></form>
+    <div class="shipped-export-bar">
+      <span class="empty-text">勾选产品后可以批量打印二维码标签</span>
+      <button type="submit" form="inventory-label-selection">批量打印标签</button>
+    </div>
+
+    <div class="table-wrap inventory-table-wrap">
+      <table class="inventory-table">
+        <colgroup>
+          <col class="inventory-col-select">
+          <col class="inventory-col-image">
+          <col class="inventory-col-product">
+          <col class="inventory-col-code">
+          <col class="inventory-col-total">
+          <col class="inventory-col-locations">
+          <col class="inventory-col-minimum">
+          <col class="inventory-col-status">
+          <col class="inventory-col-adjust">
+          <col class="inventory-col-actions">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>选择</th>
+            <th>图片</th>
+            <th>产品</th>
+            <th>SKU/库存编码</th>
+            <th>总库存</th>
+            <th>各库位库存</th>
+            <th>最低库存</th>
+            <th>状态</th>
+            <th>库存调整</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for product in products %}
+            {% set total = product.total_stock|int %}
+            {% set min_stock = product.min_stock|int %}
+            <tr class="{% if status_label(total, min_stock) != '正常' %}inventory-warning-row{% endif %}">
+              <td data-label="选择"><input type="checkbox" name="manual_id" value="{{ product.id }}" form="inventory-label-selection"></td>
+              <td data-label="图片">
+                {% if product.filename and product.file_type == "image" %}
+                  <img class="purchase-thumb inventory-thumb" src="{{ url_for('preview_manual', filename=product.filename) }}" alt="{{ product.product_name }}">
+                {% else %}
+                  <span class="empty-text">无图</span>
+                {% endif %}
+              </td>
+              <td data-label="产品">
+                <strong>{{ product.product_name }}</strong>
+                <span class="empty-text">{{ product.drawing_no or "-" }}</span>
+              </td>
+              <td data-label="SKU/库存编码" title="{{ inventory_code(product) or '-' }}">{{ inventory_code(product) or "-" }}</td>
+              <td data-label="总库存"><strong>{{ total }}</strong></td>
+              <td data-label="各库位库存">
+                {% for item in locations_by_manual.get(product.id, []) %}
+                  <span class="inventory-location-pill">{{ item.name }}({{ item.code }})：{{ item.quantity }}</span>
+                {% else %}
+                  <span class="empty-text">暂无</span>
+                {% endfor %}
+              </td>
+              <td data-label="最低库存">{{ min_stock }}</td>
+              <td data-label="状态">{{ status_label(total, min_stock) }}</td>
+              <td data-label="库存调整">
+                <a class="button secondary compact-button" href="{{ url_for('inventory_adjust', manual_id=product.id) }}">调整</a>
+              </td>
+              <td class="actions" data-label="操作">
+                <div class="action-buttons">
+                  <a class="button secondary compact-button" href="{{ url_for('inventory_inbound', manual_id=product.id) }}">入库</a>
+                  <a class="button secondary compact-button" href="{{ url_for('inventory_outbound', manual_id=product.id) }}">出库</a>
+                  <a class="button secondary compact-button" href="{{ url_for('inventory_product_label', manual_id=product.id) }}" target="_blank">标签</a>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="10" class="empty">暂无产品资料</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}

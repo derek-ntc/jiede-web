@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}纸箱采购单预览{% endblock %}
+{% block content %}
+  <div class="shipment-plan-preview carton-purchase-order-preview">
+    <div class="preview-toolbar">
+      <a class="button secondary" href="{{ url_for('admin_carton_purchases') }}">返回纸箱采购</a>
+      <form method="post" action="{{ url_for('selected_carton_purchase_order_pdf') }}">
+        {% for item in records %}
+          <input type="hidden" name="record_id" value="{{ item.id }}">
+        {% endfor %}
+        <button type="submit" name="download" value="1">导出PDF</button>
+      </form>
+    </div>
+
+    <div class="shipment-plan-sheet carton-purchase-order-sheet">
+      <div class="shipment-plan-preview-head">
+        <div>
+          <p class="preview-kicker">杰德机械</p>
+          <h1>纸箱采购单预览</h1>
+        </div>
+        <div class="preview-meta-grid">
+          <div>
+            <span>下单时间</span>
+            <strong>{{ ordered_text }}</strong>
+          </div>
+          <div>
+            <span>供应商</span>
+            <strong>{{ supplier_text }}</strong>
+          </div>
+          <div>
+            <span>制单时间</span>
+            <strong>{{ generated_at }}</strong>
+          </div>
+          <div>
+            <span>产品项数</span>
+            <strong>{{ records|length }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="preview-summary-row">
+        <div>
+          <span>纸箱数量合计</span>
+          <strong>{{ total_quantity }}</strong>
+        </div>
+      </div>
+
+      <table class="shipment-plan-preview-table">
+        <colgroup>
+          <col class="carton-order-col-index">
+          <col class="carton-order-col-mark">
+          <col class="carton-order-col-size">
+          <col class="carton-order-col-quantity">
+          <col class="carton-order-col-remark">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>序号</th>
+            <th>麦头</th>
+            <th>尺寸mm</th>
+            <th>纸箱数量</th>
+            <th>备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in records %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>{{ item.print_mark or "-" }}</td>
+              <td>{{ item.carton_size or "-" }}</td>
+              <td>{{ item.quantity or 0 }}</td>
+              <td>{{ item.remark or "" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="preview-sign-row">
+        <span>采购确认：</span>
+        <span>供应商确认：</span>
+      </div>
+    </div>
+  </div>
+{% endblock %}

@@ -1,0 +1,36 @@
+<div class="assembly-component-editor" data-assembly-component-editor>
+  <div class="field-label-row">
+    <span class="field-label">所属组装件</span>
+    <button type="button" class="secondary compact-button" data-add-assembly-component-row>新增组装件</button>
+  </div>
+  <div class="table-wrap assembly-component-editor-wrap">
+    <table class="assembly-component-editor-table">
+      <thead>
+        <tr>
+          <th>组装件图号</th>
+          <th>每套用量</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody data-assembly-component-rows>
+        {% for component in assembly_components %}
+          <tr class="assembly-component-row">
+            <td data-label="组装件图号"><input type="text" name="assembly_drawing_no" value="{{ component.assembly_drawing_no }}"></td>
+            <td data-label="每套用量"><input type="number" name="assembly_quantity_per_set" min="1" step="1" value="{{ component.quantity_per_set }}"></td>
+            <td class="actions" data-label="操作"><button type="button" class="secondary compact-button" data-remove-assembly-component-row>删除</button></td>
+          </tr>
+        {% endfor %}
+        <tr class="assembly-component-row">
+          <td data-label="组装件图号"><input type="text" name="assembly_drawing_no"></td>
+          <td data-label="每套用量"><input type="number" name="assembly_quantity_per_set" min="1" step="1"></td>
+          <td class="actions" data-label="操作"><button type="button" class="secondary compact-button" data-remove-assembly-component-row>删除</button></td>
+        </tr>
+        <tr hidden data-empty-assembly-component-row>
+          <td data-label="组装件图号"><input type="text" name="assembly_drawing_no"></td>
+          <td data-label="每套用量"><input type="number" name="assembly_quantity_per_set" min="1" step="1"></td>
+          <td class="actions" data-label="操作"><button type="button" class="secondary compact-button" data-remove-assembly-component-row>删除</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

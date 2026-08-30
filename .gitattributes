@@ -1,0 +1,2 @@
+# Preserve vendored PDF.js build output exactly as distributed.
+static/vendor/pdfjs/*.mjs -whitespace

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}库存标签打印{% endblock %}
+{% block content %}
+<section class="preview-toolbar">
+  <a class="button secondary" href="{{ url_for('admin_inventory_overview') }}">返回库存</a>
+  <button onclick="window.print()">打印标签</button>
+</section>
+
+<section class="inventory-label-sheet">
+  {% for product in products %}
+    <article class="inventory-label-card">
+      <div>
+        <p class="inventory-label-field">图号</p>
+        <h2>{{ product.drawing_no or "-" }}</h2>
+        <p class="inventory-label-field">名称</p>
+        <h3>{{ product.product_name }}</h3>
+      </div>
+      <div class="inventory-label-qr" data-qr-code="{{ inventory_code(product) }}"></div>
+    </article>
+  {% endfor %}
+</section>
+{% endblock %}
+{% block scripts %}
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <script>
+    document.querySelectorAll("[data-qr-code]").forEach((box) => {
+      if (!box.dataset.qrCode || typeof QRCode === "undefined") return;
+      new QRCode(box, { text: box.dataset.qrCode, width: 110, height: 110 });
+    });
+  </script>
+{% endblock %}

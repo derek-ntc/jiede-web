@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% block title %}其他物品采购跟进{% endblock %}
+{% block content %}
+  {% macro sort_link(label, key) -%}
+    {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
+    <a class="sort-link{% if sort == key %} active{% endif %}" href="{{ url_for('admin_purchase_followups', q=query, status=status, show_completed='1' if show_completed else None, sort=key, direction=next_direction) }}">
+      {{ label }}{% if sort == key %}<span>{{ "↑" if direction == "asc" else "↓" }}</span>{% endif %}
+    </a>
+  {%- endmacro %}
+<div class="purchase-followup-page">
+  <section class="page-head">
+    <div>
+      <h1>其他物品采购跟进</h1>
+      <p>记录非产品类采购事项，跟进完成情况。</p>
+      <p class="purchase-pending-line">
+        <span>未填写采购时间：</span>
+        <strong class="purchase-pending-count" data-pending-purchase-at-count>{{ pending_purchase_at_count }}</strong>
+      </p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ purchase_followups|length }}</strong>
+      <span>{% if query or status %}条搜索结果{% else %}条记录{% endif %}</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>其他物品采购列表</h2>
+      <form class="search compact-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索采购物品、备注、入录人">
+        <select name="status" aria-label="采购状态筛选" onchange="this.form.submit()">
+          <option value="">状态：全部</option>
+          <option value="pending" {% if status == "pending" %}selected{% endif %}>未采购</option>
+          <option value="purchased" {% if status == "purchased" %}selected{% endif %}>已采购</option>
+        </select>
+        <label class="inline-checkbox filter-checkbox">
+          <input type="checkbox" name="show_completed" value="1" {% if show_completed %}checked{% endif %} onchange="this.form.submit()">
+          显示已完成
+        </label>
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="direction" value="{{ direction }}">
+        <button type="submit">搜索</button>
+        {% if query or status or show_completed %}
+          <a class="button secondary" href="{{ url_for('admin_purchase_followups') }}">清除</a>
+        {% endif %}
+      </form>
+    </div>
+    <div class="table-wrap">
+      <table class="purchase-followup-table">
+        <thead>
+          <tr>
+            <th>{{ sort_link("入录时间", "recorded_at") }}</th>
+            <th>{{ sort_link("采购物品", "item_name") }}</th>
+            <th>{{ sort_link("备注说明", "remark") }}</th>
+            <th>{{ sort_link("入录人", "recorded_by") }}</th>
+            <th>{{ sort_link("采购数量", "quantity") }}</th>
+            <th>{{ sort_link("图片", "image") }}</th>
+            <th>{{ sort_link("采购时间", "purchased_at") }}</th>
+            <th>操作</th>
+            <th>{{ sort_link("完成", "purchased") }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in purchase_followups %}
+            <tr class="{% if item.purchased %}order-completed{% endif %}">
+              <td data-label="入录时间">
+                <input form="purchase-followup-form-{{ item.id }}" type="date" name="recorded_at" value="{{ item.recorded_at }}" required>
+              </td>
+              <td data-label="采购物品">
+                <textarea class="purchase-item-textarea" form="purchase-followup-form-{{ item.id }}" name="item_name" rows="1" required>{{ item.item_name }}</textarea>
+              </td>
+              <td data-label="备注说明">
+                <textarea class="purchase-remark-textarea" form="purchase-followup-form-{{ item.id }}" name="remark" rows="2">{{ item.remark or "" }}</textarea>
+              </td>
+              <td data-label="入录人">{{ item.recorded_by or "-" }}</td>
+              <td data-label="采购数量">
+                <input form="purchase-followup-form-{{ item.id }}" type="number" name="quantity" min="1" step="1" value="{{ item.quantity }}" required>
+              </td>
+              <td data-label="图片">
+                <div class="purchase-image-cell" data-paste-image-zone>
+                  {% if item.image_filename %}
+                    <a href="{{ url_for('preview_manual', filename=item.image_filename) }}" target="_blank">
+                      <img class="purchase-thumb" src="{{ url_for('preview_manual', filename=item.image_filename) }}" alt="{{ item.image_original_filename or item.item_name }}">
+                    </a>
+                    <form method="post" action="{{ url_for('delete_purchase_followup_image', followup_id=item.id) }}" onsubmit="return confirm('确定删除这张图片吗？');">
+                      <button class="secondary" type="submit">删除图片</button>
+                    </form>
+                  {% endif %}
+                  <label class="file-button">
+                    <span>选择文件</span>
+                    <input form="purchase-followup-form-{{ item.id }}" type="file" name="image" accept="image/*" data-paste-image-input>
+                  </label>
+                </div>
+              </td>
+              <td data-label="采购时间">
+                <input class="{% if item.purchased_at %}purchase-date-filled{% endif %}" form="purchase-followup-form-{{ item.id }}" type="date" name="purchased_at" value="{{ item.purchased_at or '' }}">
+              </td>
+              <td class="actions" data-label="操作">
+                <div class="action-buttons">
+                  <form id="purchase-followup-form-{{ item.id }}" method="post" enctype="multipart/form-data" action="{{ url_for('edit_purchase_followup', followup_id=item.id) }}">
+                  </form>
+                  <button form="purchase-followup-form-{{ item.id }}" type="submit">保存</button>
+                  <form method="post" action="{{ url_for('copy_purchase_followup', followup_id=item.id) }}">
+                    <button class="secondary" type="submit">复制</button>
+                  </form>
+                  <form method="post" action="{{ url_for('delete_purchase_followup', followup_id=item.id) }}" onsubmit="return confirm('确定删除这条采购跟进记录吗？');">
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </div>
+              </td>
+              <td class="actions" data-label="完成">
+                {% if item.purchased %}
+                  <span class="empty-text">已完成</span>
+                {% else %}
+                  <button form="purchase-followup-form-{{ item.id }}" type="submit" name="complete" value="1">完成</button>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="9" class="empty">暂无采购跟进记录</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>新增采购跟进</h2>
+    <form method="post" action="{{ url_for('admin_purchase_followups') }}" enctype="multipart/form-data" class="grid-form">
+      <label>
+        入录时间
+        <input type="date" name="recorded_at" value="{{ default_recorded_at }}" required>
+      </label>
+      <label>
+        采购物品
+        <input type="text" name="item_name" required>
+      </label>
+      <label>
+        采购数量
+        <input type="number" name="quantity" min="1" step="1" required>
+      </label>
+      <label>
+        采购时间
+        <input type="date" name="purchased_at">
+      </label>
+      <label class="wide">
+        图片
+        <div class="purchase-image-cell purchase-image-input-zone" data-paste-image-zone>
+          <label class="file-button">
+            <span>选择文件</span>
+            <input type="file" name="image" accept="image/*" data-paste-image-input>
+          </label>
+        </div>
+      </label>
+      <label class="wide">
+        备注说明
+        <textarea name="remark" rows="3"></textarea>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">新增采购跟进</button>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (() => {
+      const copyButtons = document.querySelectorAll("[data-copy-text]");
+      copyButtons.forEach((button) => {
+        button.addEventListener("click", async () => {
+          const text = button.dataset.copyText || "";
+          if (!text) return;
+          try {
+            await navigator.clipboard.writeText(text);
+            const original = button.textContent;
+            button.textContent = "已复制";
+            window.setTimeout(() => {
+              button.textContent = original;
+            }, 1200);
+          } catch (error) {
+            window.alert("复制失败，请手动复制链接");
+          }
+        });
+      });
+    })();
+
+    (() => {
+      const zones = document.querySelectorAll("[data-paste-image-zone]");
+      zones.forEach((zone) => {
+        const input = zone.querySelector("[data-paste-image-input]");
+        if (!input) return;
+        zone.tabIndex = 0;
+        zone.addEventListener("paste", (event) => {
+          const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+          if (!files.length) return;
+          const transfer = new DataTransfer();
+          transfer.items.add(files[0]);
+          input.files = transfer.files;
+          zone.classList.add("has-pasted-image");
+          event.preventDefault();
+        });
+      });
+    })();
+
+    (() => {
+      const textareas = document.querySelectorAll(".purchase-item-textarea");
+      const resize = (textarea) => {
+        textarea.style.height = "auto";
+        textarea.style.height = `${textarea.scrollHeight}px`;
+      };
+      textareas.forEach((textarea) => {
+        resize(textarea);
+        textarea.addEventListener("input", () => resize(textarea));
+      });
+    })();
+
+    (() => {
+      const table = document.querySelector(".purchase-followup-table");
+      if (!table || window.matchMedia("(max-width: 760px)").matches) return;
+
+      const storageKey = "factory-web.purchase-followup-column-widths.v2";
+      const headers = Array.from(table.querySelectorAll("thead th"));
+      const savedWidths = JSON.parse(localStorage.getItem(storageKey) || "[]");
+
+      headers.forEach((header, index) => {
+        if (savedWidths[index]) {
+          header.style.width = `${savedWidths[index]}px`;
+        }
+
+        const grip = document.createElement("span");
+        grip.className = "column-resizer";
+        grip.setAttribute("aria-hidden", "true");
+        header.appendChild(grip);
+
+        grip.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const startX = event.clientX;
+          const startWidth = header.offsetWidth;
+          document.body.classList.add("is-resizing-column");
+
+          function resize(moveEvent) {
+            const nextWidth = Math.max(80, startWidth + moveEvent.clientX - startX);
+            header.style.width = `${nextWidth}px`;
+          }
+
+          function stopResize() {
+            document.removeEventListener("mousemove", resize);
+            document.removeEventListener("mouseup", stopResize);
+            document.body.classList.remove("is-resizing-column");
+            localStorage.setItem(
+              storageKey,
+              JSON.stringify(headers.map((item) => Math.round(item.offsetWidth)))
+            );
+          }
+
+          document.addEventListener("mousemove", resize);
+          document.addEventListener("mouseup", stopResize);
+        });
+      });
+    })();
+  </script>
+{% endblock %}

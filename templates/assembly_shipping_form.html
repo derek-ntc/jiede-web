@@ -1,0 +1,69 @@
+<form
+  method="post"
+  action="{{ url_for('create_assembly_shipment_from_shipped_page') }}"
+  class="grid-form assembly-shipment-form"
+  enctype="multipart/form-data"
+  data-assembly-shipment-form
+>
+  <label>
+    客户
+    <select name="customer" required data-assembly-customer>
+      <option value="">请选择客户</option>
+      {% for customer in customers %}
+        <option value="{{ customer }}">{{ customer }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    组装件图号
+    <select name="assembly_drawing_no" required disabled data-assembly-drawing>
+      <option value="">请先选择客户</option>
+    </select>
+  </label>
+  <label>
+    组装件套数
+    <input type="number" name="set_quantity" min="1" step="1" required data-assembly-set-quantity>
+  </label>
+  <label>
+    发货时间
+    <input type="date" name="shipped_at" value="{{ default_shipped_at }}" required>
+  </label>
+  <label>
+    发货图片
+    <input type="file" name="images" accept="image/*" multiple>
+  </label>
+  <label class="wide">
+    发货备注
+    <input type="text" name="logistics_no" placeholder="可选">
+  </label>
+
+  <div class="wide assembly-shipment-feedback">
+    <p class="empty-text" aria-live="polite" data-assembly-status>请选择客户、组装件图号和套数后预览。</p>
+    <div class="assembly-warning-summary" aria-live="polite" data-assembly-warning-summary></div>
+  </div>
+
+  <div class="wide table-wrap assembly-preview-wrap">
+    <table class="assembly-preview-table">
+      <thead>
+        <tr>
+          <th>配件图号</th>
+          <th>产品名称</th>
+          <th>每套用量</th>
+          <th>计算数量</th>
+          <th>实际发货数量</th>
+          <th>订单分配</th>
+          <th>库存状态</th>
+        </tr>
+      </thead>
+      <tbody data-assembly-preview>
+        <tr data-assembly-preview-empty>
+          <td colspan="7" class="empty">暂无组装发货预览</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="wide form-actions">
+    <button type="submit" disabled data-assembly-submit>保存组装发货</button>
+  </div>
+</form>

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}修改纸箱情况{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>修改纸箱情况</h1>
+      <p>{{ order.order_no }} / {{ order.drawing_no or "-" }} / {{ order.product_name or "-" }}</p>
+    </div>
+    <div class="form-actions">
+      <a class="button secondary" href="{{ url_for('admin_orders') }}">返回生产订单</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <form method="post" class="stack-form">
+      <label>
+        纸箱情况
+        <span class="inline-checkbox standalone-checkbox">
+          <input type="checkbox" name="carton_status" value="1" {% if order.carton_status %}checked{% endif %}>
+          已确认
+        </span>
+      </label>
+      <div class="form-actions">
+        <button type="submit">保存纸箱情况</button>
+        <a class="button secondary" href="{{ url_for('admin_orders') }}">取消</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

@@ -1,0 +1,469 @@
+{% extends "base.html" %}
+{% block title %}喷塑记录{% endblock %}
+{% block content %}
+  {% macro money(value) -%}
+    {{ "%.2f"|format(value or 0) }}
+  {%- endmacro %}
+  {% macro sort_link(label, key) -%}
+    {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
+    <a class="sort-link{% if sort == key %} active{% endif %}" href="{{ url_for('admin_powder_coating', q=query, date_type=date_type, start_date=start_date, end_date=end_date, show_completed='1' if show_completed else None, sort=key, direction=next_direction) }}">
+      {{ label }}{% if sort == key %}<span>{{ "↑" if direction == "asc" else "↓" }}</span>{% endif %}
+    </a>
+  {%- endmacro %}
+
+<div class="purchase-followup-page powder-coating-page">
+  <section class="page-head">
+    <div>
+      <h1>喷塑记录</h1>
+      <p>维护喷塑产品库，按送货和送来时间记录数量与金额。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ summary.record_count }}</strong>
+      <span>条搜索结果</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>新增喷塑记录</h2>
+      <button class="secondary" type="button" data-open-supplier-dialog>供应商管理</button>
+    </div>
+    <form method="post" action="{{ url_for('admin_powder_coating') }}" class="grid-form compact-grid-form powder-record-create-form" data-powder-record-create>
+      <label>
+        产品
+        <select name="product_id" required data-powder-product-select>
+          <option value="">请选择产品</option>
+          {% for product in products %}
+            <option value="{{ product.id }}" data-name="{{ product.product_name }}" data-drawing="{{ product.drawing_no or '' }}" data-price="{{ money(product.unit_price) }}" data-supplier="{{ product.supplier_name or '' }}">
+              {{ product.product_name }}{% if product.drawing_no %} / {{ product.drawing_no }}{% endif %} / {{ money(product.unit_price) }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        供应商
+        <select name="supplier_name">
+          <option value="">未选择供应商</option>
+          {% for supplier in suppliers %}
+            <option value="{{ supplier.name }}">{{ supplier.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        图号
+        <input type="text" data-powder-drawing-preview readonly>
+      </label>
+      <label>
+        单价
+        <input type="text" data-powder-price-preview readonly>
+      </label>
+      <label>
+        数量
+        <input type="number" name="quantity" min="1" step="1">
+      </label>
+      <label>
+        送货时间
+        <input type="date" name="delivered_at" value="{{ default_delivered_at }}" required>
+      </label>
+      <label>
+        送来时间
+        <input type="date" name="received_at">
+      </label>
+      <label class="powder-remark-field">
+        备注
+        <textarea name="remark" rows="2"></textarea>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit" {% if not products %}disabled{% endif %}>新增喷塑记录</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>喷塑记录列表</h2>
+      <form class="search compact-search powder-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索产品、图号、供应商、备注、入录人">
+        <select name="date_type" aria-label="时间类型">
+          <option value="delivered_at" {% if date_type == "delivered_at" %}selected{% endif %}>送货时间</option>
+          <option value="received_at" {% if date_type == "received_at" %}selected{% endif %}>送来时间</option>
+          <option value="created_at" {% if date_type == "created_at" %}selected{% endif %}>入录时间</option>
+        </select>
+        <input type="date" name="start_date" value="{{ start_date }}" aria-label="开始日期">
+        <input type="date" name="end_date" value="{{ end_date }}" aria-label="结束日期">
+        <label class="inline-checkbox filter-checkbox">
+          <input type="checkbox" name="show_completed" value="1" {% if show_completed %}checked{% endif %} onchange="this.form.submit()">
+          显示已完成
+        </label>
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="direction" value="{{ direction }}">
+        <button type="submit">搜索</button>
+        {% if query or start_date or end_date or date_type != "delivered_at" or show_completed %}
+          <a class="button secondary" href="{{ url_for('admin_powder_coating') }}">清除</a>
+        {% endif %}
+        <a class="button secondary" href="{{ url_for('export_powder_coating_statement', q=query, date_type=date_type, start_date=start_date, end_date=end_date, show_completed='1' if show_completed else None, sort=sort, direction=direction, format='pdf') }}">导出PDF</a>
+        <a class="button secondary" href="{{ url_for('export_powder_coating_statement', q=query, date_type=date_type, start_date=start_date, end_date=end_date, show_completed='1' if show_completed else None, sort=sort, direction=direction, format='xlsx') }}">导出Excel</a>
+      </form>
+    </div>
+
+    <div class="summary-strip">
+      <span>记录：<strong>{{ summary.record_count }}</strong></span>
+      <span>数量：<strong>{{ summary.total_quantity }}</strong></span>
+      <span>金额：<strong>{{ money(summary.total_amount) }}</strong></span>
+    </div>
+
+    <form id="powder-purchase-order-selection" method="post" action="{{ url_for('selected_powder_coating_purchase_order_pdf') }}" target="_blank"></form>
+    <div class="shipped-export-bar">
+      <span class="empty-text">勾选喷塑记录后可一起预览采购单</span>
+      <button type="submit" form="powder-purchase-order-selection">预览选中采购单</button>
+    </div>
+
+    <div class="table-wrap">
+      <table class="purchase-followup-table powder-record-table">
+        <thead>
+          <tr>
+            <th class="shipment-select-head">
+              <label class="shipment-select-all-label">
+                <input type="checkbox" data-powder-select-all>
+                <span>选择</span>
+              </label>
+            </th>
+            <th>图片</th>
+            <th>{{ sort_link("产品名称", "product_name") }}</th>
+            <th>{{ sort_link("图号", "drawing_no") }}</th>
+            <th>{{ sort_link("供应商", "supplier_name") }}</th>
+            <th>{{ sort_link("数量", "quantity") }}</th>
+            <th>{{ sort_link("单价", "unit_price") }}</th>
+            <th>{{ sort_link("金额", "total_price") }}</th>
+            <th>{{ sort_link("送货时间", "delivered_at") }}</th>
+            <th>{{ sort_link("送来时间", "received_at") }}</th>
+            <th>备注</th>
+            <th>{{ sort_link("入录人", "recorded_by") }}</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in records %}
+            <tr class="{% if item.completed %}order-completed{% endif %}">
+              <td class="shipment-select-cell" data-label="选择">
+                <input type="checkbox" class="shipment-select" name="record_id" value="{{ item.id }}" form="powder-purchase-order-selection">
+              </td>
+              <td data-label="图片">
+                {% if item.image_filename %}
+                  <a href="{{ url_for('preview_manual', filename=item.image_filename) }}" target="_blank">
+                    <img class="purchase-thumb" src="{{ url_for('preview_manual', filename=item.image_filename) }}" alt="{{ item.image_original_filename or item.product_name }}">
+                  </a>
+                {% else %}
+                  <span class="empty-text">无图</span>
+                {% endif %}
+              </td>
+              <td data-label="产品名称">
+                <input form="powder-record-form-{{ item.id }}" type="text" name="product_name" value="{{ item.product_name }}" required>
+              </td>
+              <td data-label="图号">
+                <input form="powder-record-form-{{ item.id }}" type="text" name="drawing_no" value="{{ item.drawing_no or '' }}">
+              </td>
+              <td data-label="供应商">
+                <select form="powder-record-form-{{ item.id }}" name="supplier_name">
+                  <option value="">未选择</option>
+                  {% for supplier in suppliers %}
+                    <option value="{{ supplier.name }}" {% if item.supplier_name == supplier.name %}selected{% endif %}>{{ supplier.name }}</option>
+                  {% endfor %}
+                  {% if item.supplier_name and item.supplier_name not in supplier_names %}
+                    <option value="{{ item.supplier_name }}" selected>{{ item.supplier_name }}</option>
+                  {% endif %}
+                </select>
+              </td>
+              <td data-label="数量">
+                <input form="powder-record-form-{{ item.id }}" type="number" name="quantity" min="1" step="1" value="{{ item.quantity if item.quantity else '' }}">
+              </td>
+              <td data-label="单价">
+                <input form="powder-record-form-{{ item.id }}" type="number" name="unit_price" min="0" step="0.01" value="{{ money(item.unit_price) }}">
+              </td>
+              <td data-label="金额">{{ money((item.quantity or 0) * (item.unit_price or 0)) }}</td>
+              <td data-label="送货时间">
+                <input form="powder-record-form-{{ item.id }}" type="date" name="delivered_at" value="{{ item.delivered_at }}" required>
+              </td>
+              <td data-label="送来时间">
+                <input form="powder-record-form-{{ item.id }}" type="date" name="received_at" value="{{ item.received_at or '' }}">
+              </td>
+              <td data-label="备注">
+                <textarea class="purchase-remark-textarea" form="powder-record-form-{{ item.id }}" name="remark" rows="2">{{ item.remark or "" }}</textarea>
+              </td>
+              <td data-label="入录人">{{ item.recorded_by or "-" }}</td>
+              <td class="actions" data-label="操作">
+                <div class="action-buttons">
+                  <form id="powder-record-form-{{ item.id }}" method="post" action="{{ url_for('edit_powder_coating_record', record_id=item.id) }}"></form>
+                  <button form="powder-record-form-{{ item.id }}" type="submit">保存修改</button>
+                  <form method="post" action="{{ url_for('copy_powder_coating_record', record_id=item.id) }}">
+                    <button class="secondary" type="submit">复制</button>
+                  </form>
+                  <form method="post" action="{{ url_for('toggle_powder_coating_completed', record_id=item.id) }}">
+                    {% if item.completed %}
+                      <button class="secondary" type="submit" name="completed" value="0">取消完成</button>
+                    {% else %}
+                      <button type="submit" name="completed" value="1">完成</button>
+                    {% endif %}
+                  </form>
+                  <form method="post" action="{{ url_for('delete_powder_coating_record', record_id=item.id) }}" onsubmit="return confirm('确定删除这条喷塑记录吗？');">
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="13" class="empty">暂无喷塑记录</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>喷塑产品库</h2>
+      <span class="empty-text">{{ products|length }} 个产品</span>
+    </div>
+    <form method="post" action="{{ url_for('create_powder_coating_product') }}" enctype="multipart/form-data" class="grid-form compact-grid-form powder-product-create-form">
+      <label>
+        产品名称
+        <input type="text" name="product_name" required>
+      </label>
+      <label>
+        图号
+        <input type="text" name="drawing_no">
+      </label>
+      <label>
+        供应商
+        <select name="supplier_name">
+          <option value="">未选择供应商</option>
+          {% for supplier in suppliers %}
+            <option value="{{ supplier.name }}">{{ supplier.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        单价
+        <input type="number" name="unit_price" min="0" step="0.01" value="0">
+      </label>
+      <label class="wide">
+        图片
+        <div class="purchase-image-cell purchase-image-input-zone" data-paste-image-zone>
+          <label class="file-button">
+            <span>选择文件</span>
+            <input type="file" name="image" accept="image/*" data-paste-image-input>
+          </label>
+        </div>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">加入产品库</button>
+      </div>
+    </form>
+
+    <div class="table-wrap powder-product-wrap">
+      <table class="powder-product-table">
+        <thead>
+          <tr>
+            <th>图片</th>
+            <th>产品名称</th>
+            <th>图号</th>
+            <th>供应商</th>
+            <th>单价</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for product in products %}
+            <tr>
+              <td data-label="图片">
+                <div class="purchase-image-cell" data-paste-image-zone>
+                  {% if product.image_filename %}
+                    <a href="{{ url_for('preview_manual', filename=product.image_filename) }}" target="_blank">
+                      <img class="purchase-thumb" src="{{ url_for('preview_manual', filename=product.image_filename) }}" alt="{{ product.image_original_filename or product.product_name }}">
+                    </a>
+                    <form method="post" action="{{ url_for('delete_powder_coating_product_image', product_id=product.id) }}" onsubmit="return confirm('确定删除这张图片吗？');">
+                      <button class="secondary" type="submit">删图</button>
+                    </form>
+                  {% endif %}
+                  <label class="file-button">
+                    <span>选择文件</span>
+                    <input form="powder-product-form-{{ product.id }}" type="file" name="image" accept="image/*" data-paste-image-input>
+                  </label>
+                </div>
+              </td>
+              <td data-label="产品名称">
+                <input form="powder-product-form-{{ product.id }}" type="text" name="product_name" value="{{ product.product_name }}" required>
+              </td>
+              <td data-label="图号">
+                <input form="powder-product-form-{{ product.id }}" type="text" name="drawing_no" value="{{ product.drawing_no or '' }}">
+              </td>
+              <td data-label="供应商">
+                <select form="powder-product-form-{{ product.id }}" name="supplier_name">
+                  <option value="">未选择</option>
+                  {% for supplier in suppliers %}
+                    <option value="{{ supplier.name }}" {% if product.supplier_name == supplier.name %}selected{% endif %}>{{ supplier.name }}</option>
+                  {% endfor %}
+                  {% if product.supplier_name and product.supplier_name not in supplier_names %}
+                    <option value="{{ product.supplier_name }}" selected>{{ product.supplier_name }}</option>
+                  {% endif %}
+                </select>
+              </td>
+              <td data-label="单价">
+                <input form="powder-product-form-{{ product.id }}" type="number" name="unit_price" min="0" step="0.01" value="{{ money(product.unit_price) }}">
+              </td>
+              <td class="actions" data-label="操作">
+                <div class="action-buttons">
+                  <form id="powder-product-form-{{ product.id }}" method="post" enctype="multipart/form-data" action="{{ url_for('edit_powder_coating_product', product_id=product.id) }}"></form>
+                  <button form="powder-product-form-{{ product.id }}" type="submit">保存</button>
+                  <form method="post" action="{{ url_for('copy_powder_coating_product', product_id=product.id) }}">
+                    <button class="secondary" type="submit">复制</button>
+                  </form>
+                  <form method="post" action="{{ url_for('delete_powder_coating_product', product_id=product.id) }}" onsubmit="return confirm('确定删除这个喷塑产品吗？已有记录的产品不能删除。');">
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="6" class="empty">暂无喷塑产品，请在上方加入产品库</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <dialog class="supplier-dialog" data-supplier-dialog>
+    <div class="dialog-head">
+      <h2>供应商管理</h2>
+      <button class="secondary" type="button" data-close-supplier-dialog>关闭</button>
+    </div>
+    <form method="post" action="{{ url_for('create_powder_coating_supplier') }}" class="supplier-create-form">
+      <label>
+        供应商
+        <input type="text" name="name" required>
+      </label>
+      <label>
+        联系人
+        <input type="text" name="contact">
+      </label>
+      <label>
+        电话
+        <input type="text" name="phone">
+      </label>
+      <label>
+        备注
+        <input type="text" name="remark">
+      </label>
+      <button type="submit">新增</button>
+    </form>
+    <div class="table-wrap supplier-dialog-table-wrap">
+      <table class="supplier-dialog-table">
+        <thead>
+          <tr>
+            <th>供应商</th>
+            <th>联系人</th>
+            <th>电话</th>
+            <th>备注</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for supplier in suppliers %}
+            <tr>
+              <td><input form="supplier-form-{{ supplier.id }}" type="text" name="name" value="{{ supplier.name }}" required></td>
+              <td><input form="supplier-form-{{ supplier.id }}" type="text" name="contact" value="{{ supplier.contact or '' }}"></td>
+              <td><input form="supplier-form-{{ supplier.id }}" type="text" name="phone" value="{{ supplier.phone or '' }}"></td>
+              <td><input form="supplier-form-{{ supplier.id }}" type="text" name="remark" value="{{ supplier.remark or '' }}"></td>
+              <td class="actions">
+                <div class="action-buttons">
+                  <form id="supplier-form-{{ supplier.id }}" method="post" action="{{ url_for('edit_powder_coating_supplier', supplier_id=supplier.id) }}"></form>
+                  <button form="supplier-form-{{ supplier.id }}" type="submit">保存</button>
+                  <form method="post" action="{{ url_for('delete_powder_coating_supplier', supplier_id=supplier.id) }}" onsubmit="return confirm('确定删除这个供应商吗？已有喷塑记录的供应商不能删除。');">
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="5" class="empty">暂无供应商</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </dialog>
+</div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const zones = document.querySelectorAll("[data-paste-image-zone]");
+      zones.forEach((zone) => {
+        const input = zone.querySelector("[data-paste-image-input]");
+        if (!input) return;
+        zone.tabIndex = 0;
+        zone.addEventListener("paste", (event) => {
+          const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+          if (!files.length) return;
+          const transfer = new DataTransfer();
+          transfer.items.add(files[0]);
+          input.files = transfer.files;
+          zone.classList.add("has-pasted-image");
+          event.preventDefault();
+        });
+      });
+    })();
+
+    (() => {
+      const form = document.querySelector("[data-powder-record-create]");
+      if (!form) return;
+      const select = form.querySelector("[data-powder-product-select]");
+      const drawing = form.querySelector("[data-powder-drawing-preview]");
+      const price = form.querySelector("[data-powder-price-preview]");
+      const supplier = form.querySelector("select[name='supplier_name']");
+      const sync = () => {
+        const option = select.selectedOptions[0];
+        drawing.value = option?.dataset.drawing || "";
+        price.value = option?.dataset.price || "";
+        if (supplier && option?.dataset.supplier) supplier.value = option.dataset.supplier;
+      };
+      select.addEventListener("change", sync);
+      sync();
+    })();
+
+    (() => {
+      const selectAll = document.querySelector("[data-powder-select-all]");
+      const checkboxes = Array.from(document.querySelectorAll("input[name='record_id'][form='powder-purchase-order-selection']"));
+      if (!selectAll) return;
+      selectAll.addEventListener("change", () => {
+        checkboxes.forEach((checkbox) => {
+          checkbox.checked = selectAll.checked;
+        });
+      });
+    })();
+
+    (() => {
+      const dialog = document.querySelector("[data-supplier-dialog]");
+      const openButton = document.querySelector("[data-open-supplier-dialog]");
+      const closeButton = document.querySelector("[data-close-supplier-dialog]");
+      if (!dialog || !openButton || !closeButton) return;
+      openButton.addEventListener("click", () => {
+        if (typeof dialog.showModal === "function") {
+          dialog.showModal();
+        } else {
+          dialog.setAttribute("open", "");
+        }
+      });
+      closeButton.addEventListener("click", () => dialog.close());
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    })();
+  </script>
+{% endblock %}

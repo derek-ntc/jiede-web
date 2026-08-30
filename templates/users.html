@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}账号管理{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>账号管理</h1>
+      <p>新增和删除用户，修改登录密码与后台权限。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ users|length }}</strong>
+      <span>个账号</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>修改管理员密码</h2>
+    <form method="post" action="{{ url_for('change_admin_password') }}" class="grid-form">
+      <label>
+        当前密码
+        <input type="password" name="current_password" autocomplete="current-password" required>
+      </label>
+      <label>
+        新密码
+        <input type="password" name="new_password" autocomplete="new-password" required>
+      </label>
+      <label>
+        确认新密码
+        <input type="password" name="confirm_password" autocomplete="new-password" required>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">修改密码</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>新增用户</h2>
+    <form method="post" action="{{ url_for('admin_users') }}" class="grid-form">
+      <label>
+        用户名
+        <input type="text" name="username" autocomplete="off" required>
+      </label>
+      <label>
+        初始密码
+        <input type="password" name="password" autocomplete="new-password" required>
+      </label>
+      <label>
+        用户权限
+        <select name="role" required>
+          <option value="operator">普通用户</option>
+          <option value="admin">管理员</option>
+        </select>
+      </label>
+      <div class="wide">
+        <span class="field-label">普通用户管理权限</span>
+        <div class="checkbox-grid">
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_customers" checked>
+            客户信息
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_common_info" checked>
+            常用信息
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_purchase_followups" checked>
+            其他采购
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_carton_purchases" checked>
+            纸箱/到货记录
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_warehouse_inventory" checked>
+            库存管理
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_production_followups">
+            生产跟进点击
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_create_products" checked>
+            新产品输入
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_edit_products" checked>
+            产品编辑
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_orders" checked>
+            生产订单管理
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_view_orders">
+            生产订单只读
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_shipped" checked>
+            发货管理
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_view_shipped">
+            发货只读
+          </label>
+        </div>
+      </div>
+      <div class="wide form-actions">
+        <button type="submit">新增用户</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>用户列表</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>用户名</th>
+            <th>权限</th>
+            <th>具体管理权限</th>
+            <th>新密码</th>
+            <th>创建时间</th>
+            <th>更新时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for user in users %}
+            <tr>
+              <td data-label="用户名">{{ user.username }}</td>
+              <td data-label="权限">
+                <form id="user-form-{{ user.id }}" method="post" action="{{ url_for('edit_user', user_id=user.id) }}" class="inline-edit-form">
+                  <select name="role" aria-label="用户权限">
+                    <option value="operator" {% if user.role == "operator" %}selected{% endif %}>普通用户</option>
+                    <option value="admin" {% if user.role == "admin" %}selected{% endif %}>管理员</option>
+                  </select>
+                </form>
+              </td>
+              <td data-label="具体管理权限">
+                <div class="checkbox-grid compact-checkboxes">
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_customers" {% if user.can_manage_customers %}checked{% endif %}>
+                    客户信息
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_common_info" {% if user.can_manage_common_info %}checked{% endif %}>
+                    常用信息
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_purchase_followups" {% if user.can_manage_purchase_followups %}checked{% endif %}>
+                    其他采购
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_carton_purchases" {% if user.can_manage_carton_purchases %}checked{% endif %}>
+                    纸箱/到货记录
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_warehouse_inventory" {% if user.can_manage_warehouse_inventory %}checked{% endif %}>
+                    库存管理
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_production_followups" {% if user.can_manage_production_followups %}checked{% endif %}>
+                    生产跟进点击
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_create_products" {% if user.can_create_products %}checked{% endif %}>
+                    新产品输入
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_edit_products" {% if user.can_edit_products %}checked{% endif %}>
+                    产品编辑
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_orders" {% if user.can_manage_orders %}checked{% endif %}>
+                    生产订单管理
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_orders" {% if user.can_view_orders or user.can_manage_orders %}checked{% endif %}>
+                    生产订单只读
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_shipped" {% if user.can_manage_shipped %}checked{% endif %}>
+                    发货管理
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_shipped" {% if user.can_view_shipped or user.can_manage_shipped %}checked{% endif %}>
+                    发货只读
+                  </label>
+                </div>
+              </td>
+              <td data-label="新密码">
+                <input form="user-form-{{ user.id }}" type="password" name="password" autocomplete="new-password" placeholder="留空则不修改">
+              </td>
+              <td data-label="创建时间">{{ user.created_at | datetime }}</td>
+              <td data-label="更新时间">{{ user.updated_at | datetime }}</td>
+              <td class="actions" data-label="操作">
+                <div class="action-buttons">
+                  <button form="user-form-{{ user.id }}" type="submit">保存</button>
+                  <form method="post" action="{{ url_for('delete_user', user_id=user.id) }}" onsubmit="return confirm('确定删除这个用户吗？');">
+                    <button class="danger" type="submit" {% if user.username == session.get("admin_username") %}disabled{% endif %}>删除</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="7" class="empty">暂无用户</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

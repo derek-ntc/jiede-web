@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+{% block title %}后台管理{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>后台管理</h1>
+      <p>选择模块处理客户资料和新产品录入。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ product_count }}</strong>
+      <span>条产品资料</span>
+    </div>
+  </section>
+
+  <section class="module-grid">
+    {% if can_manage_customers %}
+      <a class="module-card" href="{{ url_for('admin_customers') }}">
+        <strong>客户信息模块</strong>
+        <span>{{ customer_count }} 个客户，维护联系人、地址、邮箱和电话。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_common_info %}
+      <a class="module-card" href="{{ url_for('admin_common_info') }}">
+        <strong>常用信息模块</strong>
+        <span>{{ common_info_count }} 条资料，保存客户地址、开票资料和常用说明。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_purchase_followups %}
+      <a class="module-card" href="{{ url_for('admin_purchase_followups') }}">
+        <strong>其他采购跟进模块</strong>
+        <span>{{ purchase_followup_count }} 条记录，跟进采购物品、数量和采购状态。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_carton_purchases %}
+      <a class="module-card" href="{{ url_for('admin_carton_purchases') }}">
+        <strong>纸箱采购管理模块</strong>
+        <span>{{ carton_purchase_count }} 条记录，管理纸箱采购清单、尺寸、供应商和完成状态。</span>
+      </a>
+      <a class="module-card" href="{{ url_for('admin_arrival_records') }}">
+        <strong>到货记录模块</strong>
+        <span>{{ arrival_record_count }} 条记录，记录到货物品、规格、数量、单价和供应商。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_warehouse_inventory %}
+      <a class="module-card" href="{{ url_for('admin_inventory_overview') }}">
+        <strong>库存管理模块</strong>
+        <span>复用产品资料，支持扫码查询、入库、出库和库位库存。</span>
+      </a>
+    {% endif %}
+    {% if current_user_role == "admin" %}
+      <a class="module-card" href="{{ url_for('admin_feedbacks') }}">
+        <strong>使用反馈模块</strong>
+        <span>{{ feedback_count }} 条反馈，查看用户提交的问题和建议。</span>
+      </a>
+    {% endif %}
+    {% if can_create_products %}
+      <a class="module-card" href="{{ url_for('admin_index') }}#new-product">
+        <strong>新产品输入模块</strong>
+        <span>录入产品图号、名称、供应商、客户和技术资料。</span>
+      </a>
+    {% endif %}
+    <a class="module-card" href="{{ url_for('products_index') }}">
+      <strong>产品清单</strong>
+      <span>在产品清单里查看{% if can_edit_products %}、编辑和修改{% endif %}已有产品。</span>
+    </a>
+  </section>
+
+  {% if can_create_products %}
+    <section class="panel" id="new-product">
+      <h2>新产品输入</h2>
+      <form method="post" action="{{ url_for('upload_manual') }}" enctype="multipart/form-data" class="grid-form">
+        <label>
+          产品图号
+          <input type="text" name="drawing_no" required>
+        </label>
+        <label>
+          产品名称
+          <input type="text" name="product_name" required>
+        </label>
+        <label>
+          供应商
+          <input type="text" name="supplier" list="supplier-options" placeholder="选择或输入供应商">
+        </label>
+        <label>
+          客户
+          <select name="customer">
+            <option value="">未选择客户</option>
+            {% for customer in customers %}
+              <option value="{{ customer }}">{{ customer }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          一箱数量
+          <input type="text" name="pack_quantity" placeholder="例如 40PCS">
+        </label>
+        <label>
+          箱子尺寸
+          <input type="text" name="pack_carton_size" placeholder="例如 31x31x31.5CM">
+        </label>
+        <label>
+          一箱重量
+          <input type="text" name="pack_weight" placeholder="例如 12KG">
+        </label>
+        <label>
+          SKU
+          <input type="text" name="sku" placeholder="可扫码识别的产品编码">
+        </label>
+        <label>
+          条码
+          <input type="text" name="barcode" placeholder="已有条形码可填">
+        </label>
+        <label>
+          默认库位
+          <select name="default_location_id">
+            <option value="">未选择</option>
+            {% for location in inventory_locations %}
+              <option value="{{ location.id }}">{{ location.code }} / {{ location.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          最低库存
+          <input type="number" name="min_stock" min="0" step="1" value="0">
+        </label>
+        <label class="wide">
+          备注
+          <textarea name="remark" rows="3"></textarea>
+        </label>
+        <div class="wide">
+          {% include "product_materials_editor.html" %}
+        </div>
+        <label class="wide">
+          文件或图片
+          <span class="dropzone" data-dropzone>
+            <input type="file" name="uploads" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.txt,.zip,.rar,.7z" multiple>
+            <span class="dropzone-title">拖入文件到这里</span>
+            <span class="dropzone-hint">也可以点击选择文件，支持多个文件或图片</span>
+            <div class="dropzone-files" data-file-list data-empty-text="未选择文件，可直接上传资料">未选择文件，可直接上传资料</div>
+          </span>
+        </label>
+        <div class="wide">
+          <span class="field-label">作业指导书编辑</span>
+          {% include "editor.html" %}
+        </div>
+        <div class="wide">
+          {% include "inspection_requirements_editor.html" %}
+        </div>
+        <div class="wide form-actions">
+          <button type="submit">保存新产品</button>
+          {% if can_manage_customers %}
+            <a class="button secondary" href="{{ url_for('admin_customers') }}">维护客户信息</a>
+          {% endif %}
+        </div>
+        <datalist id="supplier-options">
+          {% for supplier in suppliers %}
+            <option value="{{ supplier }}"></option>
+          {% endfor %}
+        </datalist>
+      </form>
+    </section>
+  {% endif %}
+{% endblock %}
+{% block scripts %}
+  {% if can_create_products %}
+    <script src="{{ url_for('static', filename='editor.js', v=static_version) }}"></script>
+    <script>
+      document.querySelectorAll("[data-inspection-editor]").forEach((editor) => {
+        const rows = editor.querySelector("[data-inspection-rows]");
+        const template = editor.querySelector("[data-empty-inspection-row]");
+        const addButton = editor.querySelector("[data-add-inspection-row]");
+
+        function bindRemove(row) {
+          const button = row.querySelector("[data-remove-inspection-row]");
+          if (!button) return;
+          button.addEventListener("click", () => {
+            const visibleRows = Array.from(rows.querySelectorAll("tr")).filter((item) => !item.hidden);
+            if (visibleRows.length <= 1) {
+              row.querySelectorAll("input, textarea").forEach((input) => { input.value = ""; });
+              return;
+            }
+            row.remove();
+          });
+        }
+
+        rows.querySelectorAll("tr").forEach(bindRemove);
+        addButton?.addEventListener("click", () => {
+          const clone = template.cloneNode(true);
+          clone.hidden = false;
+          clone.removeAttribute("data-empty-inspection-row");
+          clone.querySelectorAll("input, textarea").forEach((input) => { input.value = ""; });
+          bindRemove(clone);
+          rows.appendChild(clone);
+        });
+      });
+
+      document.querySelectorAll("[data-product-material-editor]").forEach((editor) => {
+        const rows = editor.querySelector("[data-material-rows]");
+        const template = editor.querySelector("[data-empty-material-row]");
+        const addButton = editor.querySelector("[data-add-material-row]");
+
+        function bindHistorySelect(row) {
+          row.querySelectorAll("[data-material-history-select]").forEach((select) => {
+            select.addEventListener("change", () => {
+              const targetName = select.dataset.targetName;
+              const target = Array.from(row.querySelectorAll("input")).find((input) => input.name === targetName);
+              if (!target || !select.value) return;
+              target.value = select.value;
+              select.value = "";
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+            });
+          });
+        }
+
+        function bindRemove(row) {
+          const button = row.querySelector("[data-remove-material-row]");
+          if (!button) return;
+          button.addEventListener("click", () => {
+            const visibleRows = Array.from(rows.querySelectorAll("tr")).filter((item) => !item.hidden);
+            if (visibleRows.length <= 1) {
+              row.querySelectorAll("input").forEach((input) => { input.value = ""; });
+              return;
+            }
+            row.remove();
+          });
+        }
+
+        rows.querySelectorAll("tr").forEach((row) => {
+          bindRemove(row);
+          bindHistorySelect(row);
+        });
+        addButton?.addEventListener("click", () => {
+          const clone = template.cloneNode(true);
+          clone.hidden = false;
+          clone.removeAttribute("data-empty-material-row");
+          clone.querySelectorAll("input").forEach((input) => { input.value = ""; });
+          clone.querySelectorAll("select").forEach((select) => { select.value = ""; });
+          bindRemove(clone);
+          bindHistorySelect(clone);
+          rows.appendChild(clone);
+        });
+      });
+    </script>
+  {% endif %}
+{% endblock %}

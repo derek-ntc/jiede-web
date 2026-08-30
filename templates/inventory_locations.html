@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}库位管理{% endblock %}
+{% block content %}
+<div class="inventory-page">
+  <section class="page-head">
+    <div>
+      <h1>库位管理</h1>
+      <p>维护仓库库位，停用后不再用于新的出入库。</p>
+    </div>
+  </section>
+
+  <nav class="inventory-tabs">
+    <a href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
+    <a href="{{ url_for('inventory_scan') }}">扫码查询</a>
+    <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
+    <a href="{{ url_for('inventory_outbound') }}">扫码出库</a>
+    <a href="{{ url_for('inventory_adjust') }}">库存调整</a>
+    <a class="active-nav-link" href="{{ url_for('inventory_locations') }}">库位管理</a>
+    <a href="{{ url_for('inventory_transactions') }}">库存流水</a>
+  </nav>
+
+  <section class="panel">
+    <h2>新增库位</h2>
+    <form method="post" class="grid-form compact-grid-form">
+      <label>
+        库位名称
+        <input type="text" name="name" required>
+      </label>
+      <label>
+        库位编码
+        <input type="text" name="code" required>
+      </label>
+      <label class="inline-checkbox">
+        <input type="checkbox" name="enabled" value="1" checked>
+        启用
+      </label>
+      <label class="wide">
+        备注
+        <textarea name="remark" rows="2"></textarea>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">新增库位</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>库位列表</h2>
+    <div class="table-wrap">
+      <table class="inventory-table">
+        <thead>
+          <tr>
+            <th>库位名称</th>
+            <th>库位编码</th>
+            <th>备注</th>
+            <th>启用</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for location in locations %}
+            <tr>
+              <td><input form="location-form-{{ location.id }}" type="text" name="name" value="{{ location.name }}" required></td>
+              <td><input form="location-form-{{ location.id }}" type="text" name="code" value="{{ location.code }}" required></td>
+              <td><textarea form="location-form-{{ location.id }}" name="remark" rows="2">{{ location.remark or "" }}</textarea></td>
+              <td>
+                <label class="inline-checkbox">
+                  <input form="location-form-{{ location.id }}" type="checkbox" name="enabled" value="1" {% if location.enabled %}checked{% endif %}>
+                  启用
+                </label>
+              </td>
+              <td class="actions">
+                <form id="location-form-{{ location.id }}" method="post" action="{{ url_for('edit_inventory_location', location_id=location.id) }}"></form>
+                <button form="location-form-{{ location.id }}" type="submit">保存</button>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="empty">暂无库位</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}

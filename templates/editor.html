@@ -1,0 +1,21 @@
+<div class="editor-shell" data-editor data-max-upload-mb="{{ max_upload_mb }}" data-max-upload-bytes="{{ max_upload_bytes }}" data-max-form-mb="{{ max_form_mb }}" data-max-form-bytes="{{ max_form_bytes }}">
+  <div class="editor-toolbar" aria-label="作业指导书编辑工具栏">
+    <button type="button" data-command="bold"><strong>B</strong></button>
+    <button type="button" data-command="italic"><em>I</em></button>
+    <button type="button" data-command="underline"><u>U</u></button>
+    <button type="button" data-command="insertUnorderedList">项目符号</button>
+    <button type="button" data-command="insertOrderedList">编号</button>
+    <button type="button" data-command="justifyLeft">左对齐</button>
+    <button type="button" data-command="justifyCenter">居中</button>
+    <button type="button" data-command="justifyRight">右对齐</button>
+    <button type="button" data-action="heading">标题</button>
+    <button type="button" data-action="paragraph">正文</button>
+    <button type="button" data-action="link">链接</button>
+    <button type="button" data-action="image">插入图片</button>
+    <input type="file" data-editor-image-input accept="image/*" multiple hidden>
+    <button type="button" data-command="removeFormat">清除格式</button>
+  </div>
+  <div class="editor-note">图片会自动压缩后上传。单次上传上限 {{ max_upload_mb }}MB，编辑内容上限 {{ max_form_mb }}MB。</div>
+  <div class="rich-editor" contenteditable="true">{% if manual is defined and manual.description_html %}{{ manual.description_html | safe }}{% else %}<p>材质：</p><p>下料尺寸：</p>{% endif %}</div>
+  <textarea name="description_html" hidden></textarea>
+</div>

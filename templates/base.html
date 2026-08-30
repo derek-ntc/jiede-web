@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}杰德机械（生产管理）{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=static_version) }}">
+  </head>
+  <body class="page-{{ request.endpoint|default('') }}">
+    <header class="topbar">
+      <a class="brand" href="{% if session.get('admin_logged_in') %}{{ url_for('dashboard') }}{% else %}{{ url_for('admin_login') }}{% endif %}">杰德机械（生产管理）</a>
+      <nav>
+        {% if session.get("admin_logged_in") %}
+          <a class="{% if request.endpoint == 'dashboard' %}active-nav-link{% endif %}" href="{{ url_for('dashboard') }}">首页</a>
+          <a class="{% if request.endpoint in ['production_followups', 'complete_production_stage', 'production_followup_file', 'preview_production_process_card'] %}active-nav-link{% endif %}" href="{{ url_for('production_followups') }}">生产跟进</a>
+          {% if can_view_orders %}
+            <a class="primary-nav-link{% if request.endpoint in ['admin_orders', 'new_order', 'edit_order', 'edit_order_material', 'edit_order_carton'] %} active-nav-link{% endif %}" href="{{ url_for('admin_orders') }}">生产订单</a>
+          {% endif %}
+          {% if can_view_shipped %}
+            <a class="primary-nav-link{% if request.endpoint in ['shipped_orders', 'edit_shipment', 'preview_shipment_plan', 'preview_inspection_report'] %} active-nav-link{% endif %}" href="{{ url_for('shipped_orders') }}">发货</a>
+          {% endif %}
+          {% if can_manage_warehouse_inventory %}
+            <a class="primary-nav-link{% if request.endpoint and request.endpoint.startswith('inventory') or request.endpoint == 'admin_inventory_overview' %} active-nav-link{% endif %}" href="{{ url_for('admin_inventory_overview') }}">库存</a>
+          {% endif %}
+        {% endif %}
+        {% if session.get("admin_logged_in") %}
+          <a class="{% if request.endpoint in ['products_index', 'detail', 'edit_manual'] %}active-nav-link{% endif %}" href="{{ url_for('products_index') }}">产品列表</a>
+        {% endif %}
+        {% if can_manage_customers %}
+          <a class="{% if request.endpoint == 'admin_customers' %}active-nav-link{% endif %}" href="{{ url_for('admin_customers') }}">客户信息</a>
+        {% endif %}
+        {% if can_manage_common_info %}
+          <a class="{% if request.endpoint == 'admin_common_info' %}active-nav-link{% endif %}" href="{{ url_for('admin_common_info') }}">常用信息</a>
+        {% endif %}
+        {% if can_manage_purchase_followups or can_manage_carton_purchases %}
+          {% if can_manage_purchase_followups %}
+          <a class="{% if request.endpoint == 'admin_purchase_followups' %}active-nav-link{% endif %}" href="{{ url_for('admin_purchase_followups') }}">其他采购</a>
+          {% endif %}
+          {% if can_manage_carton_purchases %}
+          <a class="{% if request.endpoint and (request.endpoint == 'admin_carton_purchases' or request.endpoint.startswith('carton_purchase') or request.endpoint.startswith('selected_carton_purchase') or request.endpoint.startswith('create_carton') or request.endpoint.startswith('edit_carton') or request.endpoint.startswith('delete_carton') or request.endpoint.startswith('copy_carton') or request.endpoint.startswith('toggle_carton')) %}active-nav-link{% endif %}" href="{{ url_for('admin_carton_purchases') }}">纸箱采购</a>
+          <a class="{% if request.endpoint and (request.endpoint == 'admin_arrival_records' or request.endpoint.startswith('create_arrival') or request.endpoint.startswith('edit_arrival') or request.endpoint.startswith('delete_arrival') or request.endpoint.startswith('copy_arrival')) %}active-nav-link{% endif %}" href="{{ url_for('admin_arrival_records') }}">到货记录</a>
+          {% endif %}
+        {% endif %}
+        {% if current_user_role == "admin" %}
+          <a class="{% if request.endpoint == 'admin_users' %}active-nav-link{% endif %}" href="{{ url_for('admin_users') }}">账号</a>
+        {% endif %}
+        {% if can_access_admin_modules %}
+          <a class="{% if request.endpoint == 'admin_index' %}active-nav-link{% endif %}" href="{{ url_for('admin_index') }}">后台</a>
+        {% endif %}
+        {% if session.get("admin_logged_in") %}
+          <a href="{{ url_for('admin_logout') }}">退出</a>
+        {% endif %}
+      </nav>
+    </header>
+
+    <main class="container">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="messages">
+            {% for category, message in messages %}
+              <div class="message {{ category }}">{{ message }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </main>
+    <div class="pdf-preview-dialog" data-pdf-preview-dialog role="dialog" aria-modal="true" aria-labelledby="pdf-preview-title" hidden>
+      <button class="pdf-preview-backdrop" type="button" data-pdf-preview-close aria-label="关闭PDF预览"></button>
+      <section class="pdf-preview-panel">
+        <header class="pdf-preview-toolbar">
+          <h2 id="pdf-preview-title" data-pdf-preview-title>PDF预览</h2>
+          <div class="pdf-preview-actions">
+            <button class="button secondary" type="button" data-pdf-preview-zoom-out aria-label="缩小PDF">缩小</button>
+            <output class="pdf-preview-zoom" data-pdf-preview-zoom aria-live="polite">100%</output>
+            <button class="button secondary" type="button" data-pdf-preview-zoom-in aria-label="放大PDF">放大</button>
+            <button class="button" type="button" data-pdf-preview-print>打印PDF</button>
+            <button class="button secondary" type="button" data-pdf-preview-close>关闭</button>
+          </div>
+        </header>
+        <div class="pdf-preview-body">
+          <p class="pdf-preview-status" data-pdf-preview-status>正在加载PDF…</p>
+          <div class="pdf-preview-pages" data-pdf-preview-pages></div>
+        </div>
+      </section>
+    </div>
+    {% block scripts %}{% endblock %}
+    <script type="module" src="{{ url_for('static', filename='pdf-preview.js', v=static_version) }}"></script>
+  </body>
+</html>

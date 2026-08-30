@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}编辑产品订单{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>编辑产品订单</h1>
+      <p>订单号：{{ order.order_no }}</p>
+    </div>
+    <div class="form-actions">
+      <a class="button secondary" href="{{ url_for('admin_orders') }}">返回生产订单</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <form method="post" class="stack-form order-edit-form" data-order-edit>
+      <div class="grid-form">
+        <label>
+          产品图号
+          <select name="manual_id" data-product-select required>
+            {% for product in products %}
+              <option value="{{ product.id }}" data-customer="{{ product.customer or '' }}" {% if product.id == order.manual_id %}selected{% endif %}>
+                {{ product.drawing_no or "未填图号" }} - {{ product.product_name }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          客户名称
+          <input type="text" value="{{ order.product_customer or '-' }}" data-customer-display disabled>
+        </label>
+        <label>
+          客户邮箱
+          <input type="email" name="customer_email" value="{{ order.customer_email or '' }}" placeholder="客户收件邮箱">
+        </label>
+        <label>
+          订单号
+          <input type="text" name="order_no" value="{{ order.order_no }}" required>
+        </label>
+        <label>
+          下单时间
+          <input type="date" name="ordered_at" value="{{ order.ordered_at }}" required>
+        </label>
+        <label>
+          订单数量
+          <input type="number" name="quantity" min="1" step="1" value="{{ order.quantity }}" required>
+        </label>
+        <label>
+          计划发货时间
+          <input type="date" name="planned_ship_at" value="{{ order.planned_ship_at }}" required>
+        </label>
+        <label>
+          材料库存情况
+          <span class="inline-checkbox standalone-checkbox">
+            <input type="checkbox" name="material_stock_status" value="1" {% if order.material_stock_status %}checked{% endif %}>
+            已确认
+          </span>
+        </label>
+        <label>
+          备注
+          <textarea name="remark" rows="3" placeholder="订单备注">{{ order.remark or "" }}</textarea>
+        </label>
+        <label>
+          纸箱情况
+          <span class="inline-checkbox standalone-checkbox">
+            <input type="checkbox" name="carton_status" value="1" {% if order.carton_status %}checked{% endif %}>
+            已确认
+          </span>
+        </label>
+        <label>
+          最近发货
+          <span class="inline-checkbox standalone-checkbox">
+            <input type="checkbox" name="recent_ship_status" value="1" {% if order.recent_ship_status %}checked{% endif %}>
+            已确认
+          </span>
+        </label>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit">保存订单</button>
+        <a class="button secondary" href="{{ url_for('admin_orders') }}">取消</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (() => {
+      const form = document.querySelector("[data-order-edit]");
+      if (!form) return;
+
+      const select = form.querySelector("[data-product-select]");
+      const display = form.querySelector("[data-customer-display]");
+
+      function syncCustomer() {
+        display.value = select.selectedOptions[0]?.dataset.customer || "-";
+      }
+
+      select?.addEventListener("change", syncCustomer);
+      syncCustomer();
+    })();
+  </script>
+{% endblock %}

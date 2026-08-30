@@ -1,0 +1,37 @@
+<div class="inspection-requirements-editor" data-inspection-editor>
+  <div class="inspection-requirements-head">
+    <span class="field-label">检验要求</span>
+    <button class="secondary compact-button" type="button" data-add-inspection-row>增加检验项目</button>
+  </div>
+  <div class="table-wrap inspection-requirements-table-wrap">
+    <table class="inspection-requirements-table">
+      <thead>
+        <tr>
+          <th>检验项目</th>
+          <th>标准要求</th>
+          <th>方法/工具</th>
+          <th>备注</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody data-inspection-rows>
+        {% for requirement in inspection_requirements %}
+          <tr>
+            <td><input type="text" name="inspection_item_name" value="{{ requirement.item_name or '' }}" placeholder="例如：外观"></td>
+            <td><textarea name="inspection_standard" rows="2" placeholder="填写标准要求">{{ requirement.standard or '' }}</textarea></td>
+            <td><input type="text" name="inspection_method" value="{{ requirement.method or '' }}" placeholder="例如：目视、卡尺"></td>
+            <td><input type="text" name="inspection_remark" value="{{ requirement.remark or '' }}"></td>
+            <td><button class="danger compact-button" type="button" data-remove-inspection-row>删除</button></td>
+          </tr>
+        {% endfor %}
+        <tr {% if inspection_requirements %}hidden{% endif %} data-empty-inspection-row>
+          <td><input type="text" name="inspection_item_name" placeholder="例如：外观"></td>
+          <td><textarea name="inspection_standard" rows="2" placeholder="填写标准要求"></textarea></td>
+          <td><input type="text" name="inspection_method" placeholder="例如：目视、卡尺"></td>
+          <td><input type="text" name="inspection_remark"></td>
+          <td><button class="danger compact-button" type="button" data-remove-inspection-row>删除</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

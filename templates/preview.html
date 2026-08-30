@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}图纸预览 - {{ manual.product_name }}{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>{{ manual.product_name }}</h1>
+      <p>{{ manual.drawing_no or "未填写图号" }} · 共 {{ files|length }} 个文件</p>
+    </div>
+    <div class="form-actions">
+      <a class="button secondary" href="{{ url_for('products_index') }}">返回列表</a>
+      <a class="button secondary" href="{{ url_for('manual_detail', manual_id=manual.id) }}">详情</a>
+      {% if session.get("admin_logged_in") %}
+        <a class="button" href="{{ url_for('edit_manual', manual_id=manual.id) }}">编辑</a>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>图纸预览</h2>
+    <div class="attachment-stack">
+      {% for file in files %}
+        <div class="attachment-item">
+          <div class="attachment-head">
+            <strong>{{ loop.index }}. {{ file.original_filename }}</strong>
+            {% if file.filename.lower().endswith(".pdf") %}
+              <button class="button secondary" type="button" data-pdf-preview-url="{{ url_for('preview_manual', filename=file.filename) }}" data-pdf-preview-name="{{ file.original_filename }}">预览PDF</button>
+            {% else %}
+              <a class="button secondary" href="{{ url_for('preview_manual', filename=file.filename) }}" target="_blank">单独打开</a>
+            {% endif %}
+          </div>
+          {% if file.file_type == "image" %}
+            <a href="{{ url_for('preview_manual', filename=file.filename) }}" target="_blank">
+              <img class="detail-image" src="{{ url_for('preview_manual', filename=file.filename) }}" alt="{{ file.original_filename }}">
+            </a>
+          {% elif file.filename.lower().endswith(".pdf") %}
+            <div class="pdf-preview-placeholder">
+              点击“预览PDF”可悬浮查看、缩放或打印，不会自动下载。
+            </div>
+          {% else %}
+            <div class="file-box">
+              <span>该文件类型不能直接嵌入预览，请单独打开查看。</span>
+            </div>
+          {% endif %}
+        </div>
+      {% else %}
+        <p class="empty-text">暂无图纸文件</p>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,37 @@
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime databases, locks, uploads, and generated files
+*.db
+*.db-*
+data/*
+!data/.gitkeep
+manuals/*
+!manuals/.gitkeep
+uploads/
+tmp/
+
+# Local compatibility stub; production uses requirements.txt Pillow
+PIL/
+
+# Codex implementation artifacts and local reports
+.superpowers/
+task-*-report.md
+
+# OS and editor files
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

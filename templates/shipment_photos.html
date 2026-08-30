@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>上传发货图片</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=static_version) }}">
+  </head>
+  <body class="signature-public-page">
+    <main class="signature-public-wrap">
+      {% if invalid %}
+        <section class="signature-public-card">
+          <h1>上传链接无效</h1>
+          <p>请联系发货方重新生成发货图片上传链接。</p>
+        </section>
+      {% else %}
+        <section class="signature-public-card">
+          <h1>上传发货图片</h1>
+          {% if uploaded_count %}
+            <p class="signature-success-text">已上传 {{ uploaded_count }} 张图片。</p>
+          {% else %}
+            <p>请上传本次发货相关图片，支持一次选择多张。</p>
+          {% endif %}
+        </section>
+
+        <section class="signature-public-card">
+          <h2>发货信息</h2>
+          <dl class="signature-info-list">
+            <div>
+              <dt>订单号</dt>
+              <dd>{{ shipment.order_no or "-" }}</dd>
+            </div>
+            <div>
+              <dt>客户名称</dt>
+              <dd>{{ shipment.order_customer or shipment.product_customer or "-" }}</dd>
+            </div>
+            <div>
+              <dt>产品名称</dt>
+              <dd>{{ shipment.product_name or "-" }}</dd>
+            </div>
+            <div>
+              <dt>产品图号</dt>
+              <dd>{{ shipment.drawing_no or "-" }}</dd>
+            </div>
+            <div>
+              <dt>发货数量</dt>
+              <dd>{{ shipment.shipped_quantity }}</dd>
+            </div>
+            <div>
+              <dt>发货日期</dt>
+              <dd>{{ shipment.shipped_at or "-" }}</dd>
+            </div>
+            <div>
+              <dt>物流单号</dt>
+              <dd>{{ shipment.logistics_no or "-" }}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="signature-public-card">
+          <h2>选择图片</h2>
+          {% if error %}
+            <div class="signature-error">{{ error }}</div>
+          {% endif %}
+          <form method="post" enctype="multipart/form-data" class="stack-form shipment-public-upload-form">
+            <input type="file" name="images" accept="image/*" multiple required>
+            <button type="submit">上传图片</button>
+          </form>
+        </section>
+
+        <section class="signature-public-card">
+          <h2>已上传图片</h2>
+          {% if images %}
+            <div class="shipment-public-image-grid">
+              {% for image in images %}
+                <span title="{{ image.original_filename }}">
+                  <img src="{{ url_for('shipment_photo_public_image', token=shipment.photo_upload_token, filename=image.filename) }}" alt="{{ image.original_filename }}">
+                </span>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="empty-text">暂无图片</p>
+          {% endif %}
+        </section>
+      {% endif %}
+    </main>
+  </body>
+</html>

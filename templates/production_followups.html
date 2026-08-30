@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}生产跟进{% endblock %}
+{% block content %}
+<div class="production-followup-page">
+  <section class="page-head">
+    <div>
+      <h1>生产跟进</h1>
+      <p>跟进激光、折弯、焊接的生产完成情况。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ followups|length }}</strong>
+      <span>条跟进</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>新增跟进</h2>
+    <form method="post" enctype="multipart/form-data" class="grid-form production-followup-form">
+      <div class="production-followup-inputs">
+        <label>
+          下单时间
+          <input type="date" name="ordered_at" value="{{ today }}" required>
+        </label>
+        <label>
+          产品图号
+          <input type="text" name="drawing_no" required>
+        </label>
+        <label>
+          产品名称
+          <input type="text" name="product_name" required>
+        </label>
+      </div>
+      <div class="production-followup-upload-area">
+        <label class="file-button production-drawing-upload">
+          <span>上传图纸</span>
+          <input type="file" name="drawings" multiple data-production-drawing-input>
+        </label>
+        <div class="selected-production-drawings" data-selected-production-drawings hidden>
+          <strong>已选择图纸</strong>
+          <ul></ul>
+        </div>
+        <div class="form-actions">
+          <button type="submit">保存</button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>生产跟进表</h2>
+      <form class="search compact-search production-followup-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索批次号、下单时间、图号、产品名称、图纸文件" data-auto-submit-search>
+        <button type="submit">搜索</button>
+        {% if query %}
+          <a class="button secondary" href="{{ url_for('production_followups') }}">清除</a>
+        {% endif %}
+      </form>
+    </div>
+    <div class="table-wrap production-followup-table-wrap">
+      <table class="production-followup-table">
+        <colgroup>
+          <col style="width: 150px;">
+          <col style="width: 120px;">
+          <col style="width: 170px;">
+          <col style="width: 240px;">
+          <col style="width: 260px;">
+          <col style="width: 120px;">
+          <col style="width: 120px;">
+          <col style="width: 120px;">
+          <col style="width: 120px;">
+          <col style="width: 110px;">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>批次号</th>
+            <th>下单时间</th>
+            <th>产品图号</th>
+            <th>产品名称</th>
+            <th>图纸</th>
+            <th>激光</th>
+            <th>折弯</th>
+            <th>焊接</th>
+            <th>工艺卡片</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in followups %}
+            {% set row = item.row %}
+            <tr class="{% if row.laser_completed_at and row.bending_completed_at and row.welding_completed_at %}order-completed{% endif %}">
+              <td data-label="批次号">{{ row.batch_no }}</td>
+              <td data-label="下单时间">{{ row.ordered_at }}</td>
+              <td data-label="产品图号">{{ row.drawing_no }}</td>
+              <td data-label="产品名称">{{ row.product_name }}</td>
+              <td data-label="图纸">
+                <div class="production-file-list">
+                  {% for file in item.files %}
+                    {% if file.filename.lower().endswith(".pdf") %}
+                      <button class="pdf-preview-trigger" type="button" data-pdf-preview-url="{{ url_for('production_followup_file', file_id=file.id) }}" data-pdf-preview-name="{{ file.original_filename }}">{{ file.original_filename }}</button>
+                    {% else %}
+                      <a href="{{ url_for('production_followup_file', file_id=file.id) }}" target="_blank">{{ file.original_filename }}</a>
+                    {% endif %}
+                  {% else %}
+                    <span class="empty-text">未上传</span>
+                  {% endfor %}
+                </div>
+              </td>
+              {% for stage in ["laser", "bending", "welding"] %}
+                {% set completed_at = row[stage ~ "_completed_at"] %}
+                <td data-label="{{ stage_labels[stage] }}">
+                  {% if completed_at %}
+                    {% if can_manage_production_followups and stage_can_revert(row, stage) %}
+                      <form method="post" action="{{ url_for('complete_production_stage', followup_id=row.id, stage=stage) }}" onsubmit="return confirm('确定把{{ stage_labels[stage] }}改回未完成吗？');">
+                        <button class="production-stage-button is-complete" type="submit">完成</button>
+                      </form>
+                    {% else %}
+                      <button class="production-stage-button is-complete" type="button" disabled>完成</button>
+                    {% endif %}
+                  {% elif can_manage_production_followups and stage_can_complete(row, stage) %}
+                    <form method="post" action="{{ url_for('complete_production_stage', followup_id=row.id, stage=stage) }}">
+                      <button class="production-stage-button" type="submit">{{ stage_labels[stage] }}</button>
+                    </form>
+                  {% else %}
+                    <button class="production-stage-button secondary" type="button" disabled>
+                      {% if stage_can_complete(row, stage) %}待操作{% else %}{{ stage_waiting_text(row, stage) }}{% endif %}
+                    </button>
+                  {% endif %}
+                </td>
+              {% endfor %}
+              <td data-label="工艺卡片">
+                <a class="button secondary compact-button" href="{{ url_for('preview_production_process_card', followup_id=row.id) }}" target="_blank">预览</a>
+              </td>
+              <td data-label="操作">
+                {% if can_manage_production_followups %}
+                  <form method="post" action="{{ url_for('delete_production_followup', followup_id=row.id) }}" onsubmit="return confirm('确定删除这条生产跟进记录吗？');">
+                    <button class="danger compact-button" type="submit">删除</button>
+                  </form>
+                {% else %}
+                  <span class="empty-text">无权限</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="10" class="empty">暂无生产跟进</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (() => {
+      const search = document.querySelector('input[data-auto-submit-search]');
+      if (!search) return;
+      const form = search.form;
+      let timer = null;
+
+      search.addEventListener("input", () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => form.submit(), 300);
+      });
+    })();
+
+    (() => {
+      const input = document.querySelector("[data-production-drawing-input]");
+      const panel = document.querySelector("[data-selected-production-drawings]");
+      if (!input || !panel) return;
+
+      const list = panel.querySelector("ul");
+
+      const syncInputFiles = (files) => {
+        const transfer = new DataTransfer();
+        files.forEach((file) => transfer.items.add(file));
+        input.files = transfer.files;
+      };
+
+      const renderSelectedFiles = () => {
+        const files = Array.from(input.files || []);
+        list.innerHTML = "";
+        panel.hidden = files.length === 0;
+
+        files.forEach((file, index) => {
+          const item = document.createElement("li");
+          const name = document.createElement("span");
+          const removeButton = document.createElement("button");
+
+          name.textContent = file.name;
+          removeButton.type = "button";
+          removeButton.textContent = "删除";
+          removeButton.addEventListener("click", () => {
+            syncInputFiles(files.filter((_, fileIndex) => fileIndex !== index));
+            renderSelectedFiles();
+          });
+
+          item.append(name, removeButton);
+          list.append(item);
+        });
+      };
+
+      input.addEventListener("change", renderSelectedFiles);
+    })();
+  </script>
+{% endblock %}

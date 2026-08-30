@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}修改发货记录{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>修改发货记录</h1>
+      <p>{{ shipment.order_no }} / {{ shipment.drawing_no or "-" }} / {{ shipment.product_name or "-" }}</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <form method="post" class="grid-form">
+      <label>
+        发货时间
+        <input type="date" name="shipped_at" value="{{ shipment.shipped_at }}" required>
+      </label>
+      <label>
+        发货数量
+        <input type="number" name="shipped_quantity" min="1" step="1" value="{{ shipment.shipped_quantity }}" required>
+      </label>
+      <label class="wide">
+        物流单号
+        <input type="text" name="logistics_no" value="{{ shipment.logistics_no or '' }}" placeholder="可选">
+      </label>
+      <label>
+        客户名称
+        <input type="text" value="{{ shipment.order_customer or shipment.product_customer or '-' }}" disabled>
+      </label>
+      <label>
+        供应商
+        <input type="text" value="{{ shipment.supplier or '-' }}" disabled>
+      </label>
+      <label>
+        订单下单时间
+        <input type="text" value="{{ shipment.ordered_at or '-' }}" disabled>
+      </label>
+      <label>
+        订单计划发货时间
+        <input type="text" value="{{ shipment.planned_ship_at or '-' }}" disabled>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">保存修改</button>
+        <a class="button secondary" href="{{ url_for('shipped_orders') }}">返回发货列表</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

@@ -1,0 +1,138 @@
+<div class="product-material-editor" data-product-material-editor>
+  <div class="field-label-row">
+    <span class="field-label">材料信息</span>
+    <button type="button" class="secondary compact-button" data-add-material-row>新增材料</button>
+  </div>
+  <div class="table-wrap product-material-editor-wrap">
+    <table class="product-material-editor-table">
+      <thead>
+        <tr>
+          <th>材质</th>
+          <th>材料厚度</th>
+          <th>表面类型</th>
+          <th>供应商</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody data-material-rows>
+        {% set material_rows = materials if materials is defined and materials else [none] %}
+        {% for material in material_rows %}
+          <tr>
+            <td data-label="材质">
+              <div class="material-history-field">
+                <input type="text" name="material" value="{{ material.material if material else '' }}">
+                <select aria-label="选择历史材质" data-material-history-select data-target-name="material">
+                  <option value="">历史</option>
+                  {% if material_options is defined %}
+                    {% for option in material_options.materials %}
+                      <option value="{{ option }}">{{ option }}</option>
+                    {% endfor %}
+                  {% endif %}
+                </select>
+              </div>
+            </td>
+            <td data-label="材料厚度">
+              <div class="material-history-field">
+                <input type="text" name="material_thickness" value="{{ material.thickness if material else '' }}">
+                <select aria-label="选择历史材料厚度" data-material-history-select data-target-name="material_thickness">
+                  <option value="">历史</option>
+                  {% if material_options is defined %}
+                    {% for option in material_options.thicknesses %}
+                      <option value="{{ option }}">{{ option }}</option>
+                    {% endfor %}
+                  {% endif %}
+                </select>
+              </div>
+            </td>
+            <td data-label="表面类型">
+              <div class="material-history-field">
+                <input type="text" name="surface_type" value="{{ material.surface_type if material else '' }}">
+                <select aria-label="选择历史表面类型" data-material-history-select data-target-name="surface_type">
+                  <option value="">历史</option>
+                  {% if material_options is defined %}
+                    {% for option in material_options.surface_types %}
+                      <option value="{{ option }}">{{ option }}</option>
+                    {% endfor %}
+                  {% endif %}
+                </select>
+              </div>
+            </td>
+            <td data-label="供应商">
+              <div class="material-history-field">
+                <input type="text" name="material_supplier" value="{{ material.supplier if material else '' }}">
+                <select aria-label="选择历史供应商" data-material-history-select data-target-name="material_supplier">
+                  <option value="">历史</option>
+                  {% if material_options is defined %}
+                    {% for option in material_options.suppliers %}
+                      <option value="{{ option }}">{{ option }}</option>
+                    {% endfor %}
+                  {% endif %}
+                </select>
+              </div>
+            </td>
+            <td class="actions" data-label="操作">
+              <button type="button" class="secondary compact-button" data-remove-material-row>删除</button>
+            </td>
+          </tr>
+        {% endfor %}
+        <tr hidden data-empty-material-row>
+          <td data-label="材质">
+            <div class="material-history-field">
+              <input type="text" name="material">
+              <select aria-label="选择历史材质" data-material-history-select data-target-name="material">
+                <option value="">历史</option>
+                {% if material_options is defined %}
+                  {% for option in material_options.materials %}
+                    <option value="{{ option }}">{{ option }}</option>
+                  {% endfor %}
+                {% endif %}
+              </select>
+            </div>
+          </td>
+          <td data-label="材料厚度">
+            <div class="material-history-field">
+              <input type="text" name="material_thickness">
+              <select aria-label="选择历史材料厚度" data-material-history-select data-target-name="material_thickness">
+                <option value="">历史</option>
+                {% if material_options is defined %}
+                  {% for option in material_options.thicknesses %}
+                    <option value="{{ option }}">{{ option }}</option>
+                  {% endfor %}
+                {% endif %}
+              </select>
+            </div>
+          </td>
+          <td data-label="表面类型">
+            <div class="material-history-field">
+              <input type="text" name="surface_type">
+              <select aria-label="选择历史表面类型" data-material-history-select data-target-name="surface_type">
+                <option value="">历史</option>
+                {% if material_options is defined %}
+                  {% for option in material_options.surface_types %}
+                    <option value="{{ option }}">{{ option }}</option>
+                  {% endfor %}
+                {% endif %}
+              </select>
+            </div>
+          </td>
+          <td data-label="供应商">
+            <div class="material-history-field">
+              <input type="text" name="material_supplier">
+              <select aria-label="选择历史供应商" data-material-history-select data-target-name="material_supplier">
+                <option value="">历史</option>
+                {% if material_options is defined %}
+                  {% for option in material_options.suppliers %}
+                    <option value="{{ option }}">{{ option }}</option>
+                  {% endfor %}
+                {% endif %}
+              </select>
+            </div>
+          </td>
+          <td class="actions" data-label="操作">
+            <button type="button" class="secondary compact-button" data-remove-material-row>删除</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

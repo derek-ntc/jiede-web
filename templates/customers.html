@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}客户信息管理{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>客户信息管理</h1>
+      <p>维护客户联系人、地址、邮箱和电话等资料。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ customers|length }}</strong>
+      <span>{% if query %}条搜索结果{% else %}个客户{% endif %}</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>新增客户</h2>
+    <form method="post" action="{{ url_for('admin_customers') }}" class="grid-form">
+      <label>
+        客户名称
+        <input type="text" name="name" required>
+      </label>
+      <label>
+        联系人
+        <input type="text" name="contact">
+      </label>
+      <label>
+        邮箱
+        <input type="email" name="email">
+      </label>
+      <label>
+        电话
+        <input type="text" name="phone">
+      </label>
+      <label class="wide">
+        地址
+        <input type="text" name="address">
+      </label>
+      <label class="wide">
+        备注
+        <textarea name="remark" rows="3"></textarea>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">新增客户</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>客户列表</h2>
+      <form class="search compact-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索客户、联系人、地址、邮箱、电话">
+        <button type="submit">搜索</button>
+        {% if query %}
+          <a class="button secondary" href="{{ url_for('admin_customers') }}">清除</a>
+        {% endif %}
+      </form>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>客户名称</th>
+            <th>联系人</th>
+            <th>地址</th>
+            <th>邮箱</th>
+            <th>电话</th>
+            <th>备注</th>
+            <th>更新时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for customer in customers %}
+            <tr>
+              <td data-label="客户名称">
+                <input form="customer-form-{{ customer.id }}" type="text" name="name" value="{{ customer.name }}" required>
+              </td>
+              <td data-label="联系人">
+                <input form="customer-form-{{ customer.id }}" type="text" name="contact" value="{{ customer.contact or '' }}">
+              </td>
+              <td data-label="地址">
+                <input form="customer-form-{{ customer.id }}" type="text" name="address" value="{{ customer.address or '' }}">
+              </td>
+              <td data-label="邮箱">
+                <input form="customer-form-{{ customer.id }}" type="email" name="email" value="{{ customer.email or '' }}">
+              </td>
+              <td data-label="电话">
+                <input form="customer-form-{{ customer.id }}" type="text" name="phone" value="{{ customer.phone or '' }}">
+              </td>
+              <td data-label="备注">
+                <input form="customer-form-{{ customer.id }}" type="text" name="remark" value="{{ customer.remark or '' }}">
+              </td>
+              <td data-label="更新时间">{{ customer.updated_at | datetime }}</td>
+              <td class="actions" data-label="操作">
+                <div class="action-buttons">
+                  <form id="customer-form-{{ customer.id }}" method="post" action="{{ url_for('edit_customer', customer_id=customer.id) }}"></form>
+                  <button form="customer-form-{{ customer.id }}" type="submit">保存</button>
+                  <form method="post" action="{{ url_for('delete_customer', customer_id=customer.id) }}" onsubmit="return confirm('确定删除这个客户信息吗？');">
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="8" class="empty">暂无客户信息</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

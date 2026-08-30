@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}修改材料库存情况{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>修改材料库存情况</h1>
+      <p>{{ order.order_no }} / {{ order.drawing_no or "-" }} / {{ order.product_name or "-" }}</p>
+    </div>
+    <div class="form-actions">
+      <a class="button secondary" href="{{ url_for('admin_orders') }}">返回生产订单</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <form method="post" class="stack-form">
+      <label>
+        材料库存情况
+        <span class="inline-checkbox standalone-checkbox">
+          <input type="checkbox" name="material_stock_status" value="1" {% if order.material_stock_status %}checked{% endif %}>
+          已确认
+        </span>
+      </label>
+      <div class="form-actions">
+        <button type="submit">保存材料库存情况</button>
+        <a class="button secondary" href="{{ url_for('admin_orders') }}">取消</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

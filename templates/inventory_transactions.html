@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}库存流水{% endblock %}
+{% block content %}
+<div class="inventory-page">
+  <section class="page-head">
+    <div>
+      <h1>库存流水</h1>
+      <p>每次库存变化都会生成流水记录，第一版不提供删除。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ transactions|length }}</strong>
+      <span>条流水</span>
+    </div>
+  </section>
+
+  <nav class="inventory-tabs">
+    <a href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
+    <a href="{{ url_for('inventory_scan') }}">扫码查询</a>
+    <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
+    <a href="{{ url_for('inventory_outbound') }}">扫码出库</a>
+    <a href="{{ url_for('inventory_adjust') }}">库存调整</a>
+    <a href="{{ url_for('inventory_locations') }}">库位管理</a>
+    <a class="active-nav-link" href="{{ url_for('inventory_transactions') }}">库存流水</a>
+  </nav>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>流水列表</h2>
+      <form class="search compact-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索流水号、产品、订单、备注、操作人">
+        <button type="submit">搜索</button>
+      </form>
+    </div>
+    <div class="table-wrap">
+      <table class="inventory-table">
+        <thead>
+          <tr>
+            <th>流水单号</th>
+            <th>类型</th>
+            <th>产品</th>
+            <th>数量</th>
+            <th>原库位</th>
+            <th>目标库位</th>
+            <th>关联订单</th>
+            <th>操作人</th>
+            <th>备注</th>
+            <th>创建时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in transactions %}
+            <tr>
+              <td>{{ item.transaction_no }}</td>
+              <td>{{ item.type }}</td>
+              <td>{{ item.product_name }}<br><span class="empty-text">{{ item.drawing_no or item.sku or item.qr_code or "-" }}</span></td>
+              <td>{{ item.quantity }}</td>
+              <td>{{ item.from_location_name or "-" }}</td>
+              <td>{{ item.to_location_name or "-" }}</td>
+              <td>{{ item.related_order_type or "-" }} {{ item.related_order_no or item.related_order_id or "" }}</td>
+              <td>{{ item.operator or "-" }}</td>
+              <td>{{ item.remark or "" }}</td>
+              <td>{{ item.created_at|datetime }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="10" class="empty">暂无库存流水</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}导入产品订单{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>导入产品订单</h1>
+      <p>Excel 只需要两列：图号和数量。产品名称、客户、供应商会按系统产品资料自动匹配。</p>
+    </div>
+    <div class="form-actions">
+      <a class="button" href="{{ url_for('download_order_import_template') }}">下载Excel模板</a>
+      <a class="button secondary" href="{{ url_for('admin_orders') }}">返回生产订单</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <form method="post" enctype="multipart/form-data" class="stack-form">
+      <div class="grid-form">
+        <label>
+          订单号
+          <input type="text" name="order_no" required>
+        </label>
+        <label>
+          下单时间
+          <input type="date" name="ordered_at" required>
+        </label>
+        <label>
+          默认计划发货时间
+          <input type="date" name="planned_ship_at">
+        </label>
+      </div>
+
+      <label>
+        订单 Excel
+        <input type="file" name="order_file" accept=".xlsx,.xlsm" required>
+      </label>
+
+      <div class="hint-box">
+        <strong>表格格式</strong>
+        <span>第一行可以写表头：图号、数量；也可以不写表头，系统会按前两列读取。</span>
+        <span>如果每个产品发货时间不同，可以增加“计划发货时间”列；没有这一列时使用上面的默认计划发货时间。</span>
+        <span>支持 .xlsx 和 .xlsm 文件。图号必须与产品资料里的产品图号一致。</span>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit">导入订单</button>
+        <a class="button secondary" href="{{ url_for('download_order_import_template') }}">下载Excel模板</a>
+        <a class="button secondary" href="{{ url_for('new_order') }}">手动新增订单</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

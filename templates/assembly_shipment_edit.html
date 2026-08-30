@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}修改组装发货{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>修改组装发货</h1>
+      <p>{{ batch.customer }} / {{ batch.assembly_drawing_no }} / {{ batch.set_quantity }} 套</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('shipped_orders') }}">返回发货记录</a>
+  </section>
+
+  <section class="panel">
+    <form
+      method="post"
+      action="{{ url_for('edit_assembly_shipment', batch_id=batch.id) }}"
+      class="grid-form assembly-shipment-form"
+      enctype="multipart/form-data"
+      data-assembly-shipment-form
+      data-assembly-edit-form
+      data-assembly-preview-url="{{ url_for('edit_assembly_shipment', batch_id=batch.id) }}"
+    >
+      <input type="hidden" name="customer" value="{{ batch.customer }}" data-assembly-customer>
+      <input type="hidden" name="assembly_drawing_no" value="{{ batch.assembly_drawing_no }}" data-assembly-drawing>
+      <input type="hidden" name="set_quantity" value="{{ batch.set_quantity }}" data-assembly-set-quantity>
+      <script type="application/json" data-assembly-initial-preview>{{ preview|tojson }}</script>
+
+      <label>
+        客户
+        <input type="text" value="{{ batch.customer }}" readonly>
+      </label>
+      <label>
+        组装件图号
+        <input type="text" value="{{ batch.assembly_drawing_no }}" readonly>
+      </label>
+      <label>
+        组装件套数
+        <input type="text" value="{{ batch.set_quantity }} 套" readonly>
+      </label>
+      <label>
+        发货时间
+        <input type="date" name="shipped_at" value="{{ batch.shipped_at }}" required>
+      </label>
+      <label>
+        新增发货图片
+        <input type="file" name="images" accept="image/*" multiple>
+      </label>
+      <label class="wide">
+        发货备注
+        <input type="text" name="logistics_no" value="{{ batch.logistics_no }}" placeholder="可选">
+      </label>
+
+      {% if batch.images %}
+        <div class="wide assembly-history-images" aria-label="现有组装发货图片">
+          {% for image in batch.images %}
+            <a href="{{ url_for('shipment_image', filename=image.filename) }}" target="_blank" rel="noopener">
+              <img src="{{ url_for('shipment_image', filename=image.filename) }}" alt="{{ image.original_filename or '组装发货图片' }}">
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="wide assembly-shipment-feedback">
+        <p class="empty-text" aria-live="polite" data-assembly-status>修改数量后会按当前订单和库存重新预览。</p>
+        <div class="assembly-warning-summary" aria-live="polite" data-assembly-warning-summary></div>
+      </div>
+
+      <div class="wide table-wrap assembly-preview-wrap">
+        <table class="assembly-preview-table">
+          <thead>
+            <tr>
+              <th>配件图号</th>
+              <th>产品名称</th>
+              <th>每套用量</th>
+              <th>计算数量</th>
+              <th>实际发货数量</th>
+              <th>订单分配</th>
+              <th>库存状态</th>
+            </tr>
+          </thead>
+          <tbody data-assembly-preview></tbody>
+        </table>
+      </div>
+
+      <div class="wide form-actions">
+        <button type="submit" data-assembly-submit>更新组装发货</button>
+      </div>
+    </form>
+  </section>
+{% endblock %}
+{% block scripts %}
+  <script src="{{ url_for('static', filename='assembly_shipping.js', v=static_version) }}"></script>
+{% endblock %}

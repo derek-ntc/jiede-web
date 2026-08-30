@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}工艺跟进卡片 - {{ followup.row.batch_no }}{% endblock %}
+{% block content %}
+{% set row = followup.row %}
+<section class="preview-toolbar">
+  <a class="button secondary" href="{{ url_for('production_followups') }}">返回生产跟进</a>
+  <button type="button" onclick="window.print()">打印</button>
+</section>
+
+<section class="process-card-preview">
+  <div class="process-card-sheet">
+    {% for copy_index in [1, 2] %}
+      <article class="process-card">
+        <header class="process-card-head">
+          <div>
+            <h1>工艺跟进卡片</h1>
+            <p>杰德机械（生产管理）</p>
+          </div>
+          <div class="process-card-batch">
+            <span>批次号</span>
+            <strong>{{ row.batch_no or "-" }}</strong>
+          </div>
+        </header>
+
+        <dl class="process-card-info">
+          <div>
+            <dt>下单时间</dt>
+            <dd>{{ row.ordered_at or "-" }}</dd>
+          </div>
+          <div>
+            <dt>产品图号</dt>
+            <dd>{{ row.drawing_no or "-" }}</dd>
+          </div>
+          <div>
+            <dt>产品名称</dt>
+            <dd>{{ row.product_name or "-" }}</dd>
+          </div>
+          <div>
+            <dt>生成日期</dt>
+            <dd>{{ generated_at }}</dd>
+          </div>
+        </dl>
+
+        <table class="process-card-stage-table">
+          <thead>
+            <tr>
+              <th>工序</th>
+              <th>状态</th>
+              <th>完成时间</th>
+              <th>操作人/备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for stage in ["laser", "bending", "welding"] %}
+              {% set completed_at = row[stage ~ "_completed_at"] %}
+              <tr>
+                <td>{{ stage_labels[stage] }}</td>
+                <td>
+                  <span class="process-stage-check{% if completed_at %} is-checked{% endif %}" aria-label="{{ '完成' if completed_at else '待完成' }}">
+                    {% if completed_at %}✓{% endif %}
+                  </span>
+                </td>
+                <td>{{ completed_at|datetime if completed_at else "" }}</td>
+                <td></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+
+        <section class="process-card-files">
+          <h2>图纸文件</h2>
+          <ul>
+            {% for file in followup.files %}
+              <li>{{ file.original_filename }}</li>
+            {% else %}
+              <li>未上传</li>
+            {% endfor %}
+          </ul>
+        </section>
+
+        <footer class="process-card-footer">
+          <span>生产确认：</span>
+          <span>质量确认：</span>
+          <span>备注：</span>
+        </footer>
+      </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

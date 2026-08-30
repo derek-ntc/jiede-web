@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>客户签收确认</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=static_version) }}">
+  </head>
+  <body class="signature-public-page">
+    <main class="signature-public-wrap">
+      {% if invalid %}
+        <section class="signature-public-card">
+          <h1>{% if expired %}签字链接已过期{% else %}签字链接无效{% endif %}</h1>
+          <p>{% if expired %}该签字链接有效期为 7 天，请联系发货方重新生成链接。{% else %}请联系发货方重新确认链接。{% endif %}</p>
+        </section>
+      {% else %}
+        <section class="signature-public-card">
+          <h1>发货签收确认</h1>
+          {% if signed or shipment.signature_status == '已签收' %}
+            <p class="signature-success-text">该发货单已确认签收，感谢确认。</p>
+            <dl class="signature-info-list">
+              <div>
+                <dt>签收时间</dt>
+                <dd>{{ shipment.signed_at|datetime }}</dd>
+              </div>
+              <div>
+                <dt>发货单号</dt>
+                <dd>{{ shipment.order_no or "-" }}</dd>
+              </div>
+              <div>
+                <dt>客户名称</dt>
+                <dd>{{ shipment.order_customer or shipment.product_customer or "-" }}</dd>
+              </div>
+            </dl>
+          {% else %}
+            <p>请核对发货信息，并在下方手写签名确认。</p>
+          {% endif %}
+        </section>
+
+        <section class="signature-public-card">
+          <h2>发货信息</h2>
+          <dl class="signature-info-list">
+            <div>
+              <dt>出库单号 / 发货单号</dt>
+              <dd>{{ shipment.order_no or "-" }}</dd>
+            </div>
+            <div>
+              <dt>客户名称</dt>
+              <dd>{{ shipment.order_customer or shipment.product_customer or "-" }}</dd>
+            </div>
+            <div>
+              <dt>产品名称</dt>
+              <dd>{{ shipment.product_name or "-" }}</dd>
+            </div>
+            <div>
+              <dt>产品图号</dt>
+              <dd>{{ shipment.drawing_no or "-" }}</dd>
+            </div>
+            <div>
+              <dt>数量</dt>
+              <dd>{{ shipment.shipped_quantity }}</dd>
+            </div>
+            <div>
+              <dt>发货日期</dt>
+              <dd>{{ shipment.shipped_at or "-" }}</dd>
+            </div>
+            <div>
+              <dt>物流单号</dt>
+              <dd>{{ shipment.logistics_no or "-" }}</dd>
+            </div>
+            <div>
+              <dt>备注信息</dt>
+              <dd>{{ shipment.order_remark or shipment.product_remark or "-" }}</dd>
+            </div>
+          </dl>
+        </section>
+
+        {% if not signed and shipment.signature_status != '已签收' %}
+          <section class="signature-public-card">
+            <h2>手写签名</h2>
+            {% if error %}
+              <div class="signature-error">{{ error }}</div>
+            {% endif %}
+            <form method="post" data-signature-form>
+              <div class="signature-pad-wrap">
+                <canvas class="signature-pad" width="720" height="320" aria-label="手写签名区域"></canvas>
+              </div>
+              <input type="hidden" name="signature_data" data-signature-data>
+              <div class="signature-actions">
+                <button type="button" class="secondary" data-clear-signature>清除签名</button>
+                <button type="submit">确认签收并提交</button>
+              </div>
+            </form>
+          </section>
+        {% endif %}
+      {% endif %}
+    </main>
+
+    <script>
+      (() => {
+        const form = document.querySelector("[data-signature-form]");
+        if (!form) return;
+
+        const canvas = form.querySelector(".signature-pad");
+        const input = form.querySelector("[data-signature-data]");
+        const clearButton = form.querySelector("[data-clear-signature]");
+        const context = canvas.getContext("2d");
+        let drawing = false;
+        let hasSignature = false;
+
+        function resizeCanvas() {
+          const ratio = Math.max(window.devicePixelRatio || 1, 1);
+          const rect = canvas.getBoundingClientRect();
+          canvas.width = Math.floor(rect.width * ratio);
+          canvas.height = Math.floor(rect.height * ratio);
+          context.setTransform(ratio, 0, 0, ratio, 0, 0);
+          context.lineWidth = 3;
+          context.lineCap = "round";
+          context.lineJoin = "round";
+          context.strokeStyle = "#1f2933";
+        }
+
+        function point(event) {
+          const rect = canvas.getBoundingClientRect();
+          const source = event.touches ? event.touches[0] : event;
+          return {
+            x: source.clientX - rect.left,
+            y: source.clientY - rect.top,
+          };
+        }
+
+        function start(event) {
+          event.preventDefault();
+          drawing = true;
+          hasSignature = true;
+          const current = point(event);
+          context.beginPath();
+          context.moveTo(current.x, current.y);
+        }
+
+        function move(event) {
+          if (!drawing) return;
+          event.preventDefault();
+          const current = point(event);
+          context.lineTo(current.x, current.y);
+          context.stroke();
+        }
+
+        function stop(event) {
+          if (!drawing) return;
+          event.preventDefault();
+          drawing = false;
+        }
+
+        function clear() {
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          hasSignature = false;
+          input.value = "";
+        }
+
+        resizeCanvas();
+        window.addEventListener("resize", resizeCanvas);
+        canvas.addEventListener("mousedown", start);
+        canvas.addEventListener("mousemove", move);
+        canvas.addEventListener("mouseup", stop);
+        canvas.addEventListener("mouseleave", stop);
+        canvas.addEventListener("touchstart", start, { passive: false });
+        canvas.addEventListener("touchmove", move, { passive: false });
+        canvas.addEventListener("touchend", stop, { passive: false });
+        clearButton.addEventListener("click", clear);
+
+        form.addEventListener("submit", (event) => {
+          if (!hasSignature) {
+            event.preventDefault();
+            alert("请先手写签名");
+            return;
+          }
+          input.value = canvas.toDataURL("image/png");
+        });
+      })();
+    </script>
+  </body>
+</html>

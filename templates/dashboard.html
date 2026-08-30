@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block title %}首页总览{% endblock %}
+{% block content %}
+<div class="dashboard-page">
+  <section class="page-head">
+    <div>
+      <h1>首页总览</h1>
+      <p>查看产品、订单和发货的关键数据，并进入各个模块。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ stats.orders }}</strong>
+      <span>生产订单</span>
+    </div>
+  </section>
+
+  <section class="overview-grid">
+    <a class="overview-card" href="{{ url_for('products_index') }}">
+      <span>产品资料</span>
+      <strong>{{ stats.products }}</strong>
+    </a>
+    <a class="overview-card" href="{{ url_for('production_followups') }}">
+      <span>生产跟进</span>
+      <strong>{{ stats.production_followups }}</strong>
+    </a>
+    {% if can_view_orders %}
+      <a class="overview-card" href="{{ url_for('admin_orders') }}">
+        <span>生产订单</span>
+        <strong>{{ stats.orders }}</strong>
+      </a>
+      <a class="overview-card" href="{{ url_for('admin_orders') }}">
+        <span>未发数量</span>
+        <strong>{{ stats.unshipped }}</strong>
+      </a>
+    {% endif %}
+    {% if can_view_shipped %}
+      <a class="overview-card" href="{{ url_for('shipped_orders') }}">
+        <span>已发数量</span>
+        <strong>{{ stats.shipped }}</strong>
+      </a>
+    {% endif %}
+    {% if can_manage_customers %}
+      <a class="overview-card" href="{{ url_for('admin_customers') }}">
+        <span>客户信息</span>
+        <strong>{{ stats.customers }}</strong>
+      </a>
+    {% endif %}
+    {% if can_manage_common_info %}
+      <a class="overview-card" href="{{ url_for('admin_common_info') }}">
+        <span>常用信息</span>
+        <strong>{{ stats.common_infos }}</strong>
+      </a>
+    {% endif %}
+    {% if can_manage_purchase_followups %}
+      <a class="overview-card" href="{{ url_for('admin_purchase_followups') }}">
+        <span>其他采购</span>
+        <strong>{{ stats.purchase_followups }}</strong>
+        <span class="purchase-pending-line">
+          <span class="purchase-pending-highlight">待采购几条</span>
+          <span class="purchase-pending-count">{{ stats.purchase_followups_pending_purchase_at }} 条</span>
+        </span>
+      </a>
+    {% endif %}
+    {% if can_manage_carton_purchases %}
+      <a class="overview-card" href="{{ url_for('admin_carton_purchases') }}">
+        <span>纸箱采购管理</span>
+        <strong>{{ stats.carton_purchases }}</strong>
+      </a>
+      <a class="overview-card" href="{{ url_for('admin_arrival_records') }}">
+        <span>到货记录</span>
+        <strong>{{ stats.arrival_records }}</strong>
+      </a>
+    {% endif %}
+    {% if can_manage_warehouse_inventory %}
+      <a class="overview-card" href="{{ url_for('admin_inventory_overview') }}">
+        <span>库存管理</span>
+        <strong>{{ stats.products }}</strong>
+      </a>
+    {% endif %}
+  </section>
+
+  <section class="module-grid">
+    {% if can_view_orders %}
+      <a class="module-card" href="{{ url_for('admin_orders') }}">
+        <strong>生产订单</strong>
+        <span>查看、录入和修改订单发货情况。</span>
+      </a>
+    {% endif %}
+    <a class="module-card" href="{{ url_for('production_followups') }}">
+      <strong>生产跟进</strong>
+      <span>记录图纸文件和激光、折弯、焊接完成情况。</span>
+    </a>
+    {% if can_view_shipped %}
+      <a class="module-card" href="{{ url_for('shipped_orders') }}">
+        <strong>发货</strong>
+        <span>查看已发货记录并导出送货单。</span>
+      </a>
+    {% endif %}
+    <a class="module-card" href="{{ url_for('products_index') }}">
+      <strong>产品清单</strong>
+      <span>查看产品资料{% if can_edit_products %}，并直接编辑或删除{% endif %}。</span>
+    </a>
+    {% if can_create_products %}
+      <a class="module-card" href="{{ url_for('admin_index') }}#new-product">
+        <strong>新产品输入</strong>
+        <span>录入新产品资料并上传技术文件。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_customers %}
+      <a class="module-card" href="{{ url_for('admin_customers') }}">
+        <strong>客户信息</strong>
+        <span>维护客户联系人、地址、邮箱和电话。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_common_info %}
+      <a class="module-card" href="{{ url_for('admin_common_info') }}">
+        <strong>常用信息</strong>
+        <span>保存客户地址、开票资料和常用说明。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_purchase_followups %}
+      <a class="module-card" href="{{ url_for('admin_purchase_followups') }}">
+        <strong>其他采购</strong>
+        <span>跟进其他物品采购事项和采购状态，<span class="purchase-pending-highlight">待填采购时间 {{ stats.purchase_followups_pending_purchase_at }} 条</span>。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_carton_purchases %}
+      <a class="module-card" href="{{ url_for('admin_carton_purchases') }}">
+        <strong>纸箱采购管理</strong>
+        <span>按生产订单生成纸箱采购清单，并跟进数量、尺寸、供应商和完成状态。</span>
+      </a>
+      <a class="module-card" href="{{ url_for('admin_arrival_records') }}">
+        <strong>到货记录</strong>
+        <span>记录到货日期、物品名称、规格、数量、单价和供应商。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_warehouse_inventory %}
+      <a class="module-card" href="{{ url_for('admin_inventory_overview') }}">
+        <strong>库存管理</strong>
+        <span>扫码查询、入库、出库，按产品和库位统计库存。</span>
+      </a>
+    {% endif %}
+  </section>
+
+  {% if can_view_orders or can_view_shipped %}
+    <section class="dashboard-split">
+      {% if can_view_orders %}
+      <div class="panel">
+        <h2>最近订单</h2>
+        <div class="mini-list">
+          {% for order in recent_orders %}
+            <a href="{{ url_for('admin_orders', q=order.order_no) }}">
+              <strong>{{ order.order_no }}</strong>
+              <span>{{ order.drawing_no or "-" }} / {{ order.product_name or "-" }} / {{ order.quantity }}</span>
+            </a>
+          {% else %}
+            <p class="empty-text">暂无订单</p>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+      {% if can_view_shipped %}
+      <div class="panel">
+        <h2>最近发货</h2>
+        <div class="mini-list">
+          {% for shipment in recent_shipments %}
+            <a href="{{ url_for('shipped_orders', q=shipment.order_no) }}">
+              <strong>{{ shipment.order_no }}</strong>
+              <span>{{ shipment.shipped_at }} / {{ shipment.drawing_no or "-" }} / {{ shipment.shipped_quantity }}</span>
+            </a>
+          {% else %}
+            <p class="empty-text">暂无发货记录</p>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  <section class="panel feedback-panel">
+    <h2>使用反馈</h2>
+    <form method="post" action="{{ url_for('submit_feedback') }}" class="stack-form">
+      <label>
+        反馈内容
+        <textarea name="content" rows="4" placeholder="填写使用中遇到的问题、建议或需要增加的功能" required></textarea>
+      </label>
+      <div class="form-actions">
+        <button type="submit">提交反馈</button>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}

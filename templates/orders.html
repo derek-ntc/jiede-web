@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+{% block title %}生产订单{% endblock %}
+{% block content %}
+  {% macro sort_link(label, key) -%}
+    {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
+    <a class="sort-link{% if sort == key %} active{% endif %}" href="{{ url_for('admin_orders', q=query, customer=selected_customer, sort=key, direction=next_direction) }}">
+      {{ label }}{% if sort == key %}<span>{{ "↑" if direction == "asc" else "↓" }}</span>{% endif %}
+    </a>
+  {%- endmacro %}
+  <div class="order-page">
+  <section class="page-head">
+    <div>
+      <h1>生产订单</h1>
+      <p>查看订单产品明细、发货数量和发货时间。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ orders|length }}</strong>
+      <span>{% if query or selected_customer %}条搜索结果{% else %}条订单明细{% endif %}</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <div class="section-title-actions">
+        <h2>生产订单</h2>
+        {% if can_manage_orders %}
+          <a class="button" href="{{ url_for('new_order') }}">新增订单</a>
+        {% endif %}
+      </div>
+      <div class="section-actions">
+        <form class="search compact-search" method="get">
+          <input type="search" name="q" value="{{ query }}" placeholder="搜索订单号、图号、产品名称、客户、供应商、库存、备注、纸箱、最近发货" data-auto-submit-search>
+          <select name="customer" aria-label="客户筛选" onchange="this.form.submit()">
+            <option value="">客户：全部</option>
+            {% for customer in customers %}
+              <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
+            {% endfor %}
+          </select>
+          <input type="hidden" name="sort" value="{{ sort }}">
+          <input type="hidden" name="direction" value="{{ direction }}">
+          <button type="submit">搜索</button>
+          {% if query or selected_customer %}
+            <a class="button secondary" href="{{ url_for('admin_orders') }}">清除</a>
+          {% endif %}
+        </form>
+        {% if can_manage_orders %}
+          <a class="button secondary" href="{{ url_for('import_orders') }}">Excel导入订单</a>
+        {% endif %}
+        {% if can_view_shipped %}
+          <a class="button secondary" href="{{ url_for('shipped_orders') }}">发货</a>
+        {% endif %}
+      </div>
+    </div>
+    <div class="table-scrollbar-top" data-table-scrollbar-top aria-hidden="true">
+      <div class="table-scrollbar-top-inner" data-table-scrollbar-top-inner></div>
+    </div>
+    <div class="table-sticky-head" data-table-sticky-head aria-hidden="true">
+      <table class="order-table order-table-sticky"></table>
+    </div>
+    {% if can_manage_orders %}
+      <form id="shipment-plan-form" class="shipped-export-form" method="post" action="{{ url_for('create_shipment_plan_from_orders') }}">
+        <div class="shipped-export-bar">
+          <span class="empty-text">勾选生产订单后生成计划发货清单</span>
+          <label class="inline-date-field">
+            计划发货日期
+            <input type="date" name="planned_ship_at" value="{{ today }}">
+          </label>
+          <button type="submit">生成计划发货清单</button>
+          <button type="submit" class="secondary" formaction="{{ url_for('create_carton_purchases_from_orders') }}">生成纸箱采购清单</button>
+        </div>
+      </form>
+    {% endif %}
+    <div class="table-wrap order-table-wrap" data-scroll-sync>
+      <table class="order-table">
+        <colgroup>
+          {% if can_manage_orders %}<col style="width: 48px;">{% endif %}
+          <col style="width: 92px;">
+          <col style="width: 84px;">
+          <col style="width: 96px;">
+          <col style="width: 128px;">
+          <col style="width: 92px;">
+          <col style="width: 62px;">
+          <col style="width: 64px;">
+          <col style="width: 62px;">
+          <col style="width: 88px;">
+          <col style="width: 70px;">
+          <col style="width: 58px;">
+          <col style="width: 86px;">
+          <col style="width: 58px;">
+          <col style="width: 88px;">
+          <col style="width: 120px;">
+          <col style="width: 128px;">
+        </colgroup>
+        <thead>
+          <tr>
+            {% if can_manage_orders %}
+              <th class="shipment-select-head">
+                <label class="shipment-select-all-label">
+                  <input type="checkbox" data-order-select-all>
+                  <span>选择</span>
+                </label>
+              </th>
+            {% endif %}
+            <th>{{ sort_link("订单号", "order_no") }}</th>
+            <th>{{ sort_link("下单", "ordered_at") }}</th>
+            <th>{{ sort_link("图号", "drawing_no") }}</th>
+            <th>{{ sort_link("产品", "product_name") }}</th>
+            <th>{{ sort_link("客户", "customer") }}</th>
+            <th>{{ sort_link("订单", "quantity") }}</th>
+            <th>{{ sort_link("已发", "shipped_quantity") }}</th>
+            <th>{{ sort_link("未发", "unshipped_quantity") }}</th>
+            <th>{{ sort_link("计划", "planned_ship_at") }}</th>
+            <th>{{ sort_link("库存", "material_stock_status") }}</th>
+            <th>{{ sort_link("纸箱", "carton_status") }}</th>
+            <th>{{ sort_link("入库", "inventory_status") }}</th>
+            <th>{{ sort_link("近发", "recent_ship_status") }}</th>
+            <th>{{ sort_link("发货", "shipped_at") }}</th>
+            <th>{{ sort_link("备注", "remark") }}</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for order in orders %}
+            <tr class="{% if order.unshipped_quantity|int == 0 %}order-completed{% endif %}">
+              {% if can_manage_orders %}
+                <td class="shipment-select-cell" data-label="选择">
+                  {% if order.unshipped_quantity|int > 0 %}
+                    <input type="checkbox" class="shipment-select" name="order_id" value="{{ order.id }}" form="shipment-plan-form">
+                  {% else %}
+                    <span class="empty-text">已完</span>
+                  {% endif %}
+                </td>
+              {% endif %}
+              <td data-label="订单号">{{ order.order_no }}</td>
+              <td data-label="下单时间">{{ order.ordered_at }}</td>
+              <td data-label="产品图号">
+                <a href="{{ url_for('manual_detail', manual_id=order.manual_id) }}">{{ order.drawing_no or "-" }}</a>
+              </td>
+              <td data-label="产品名称">{{ order.product_name }}</td>
+              <td data-label="客户名称">{{ order.customer or order.product_customer or "-" }}</td>
+              <td data-label="订单数量">{{ order.quantity }}</td>
+              <td data-label="已发货数量">{{ order.shipped_quantity_total or 0 }}</td>
+              <td data-label="未发数量">{{ order.unshipped_quantity }}</td>
+              <td
+                data-label="计划发货时间"
+                class="{% if order.planned_ship_at <= today %}due-overdue{% elif order.planned_ship_at <= warning_until %}due-warning{% endif %}"
+              >
+                {{ order.planned_ship_at }}
+              </td>
+              <td data-label="材料库存情况">
+                <span class="inventory-stock-cell" aria-label="库存数量">
+                  <strong>{{ order.material_inventory_total or 0 }}</strong>
+                </span>
+              </td>
+              <td data-label="纸箱情况">
+                {% if can_manage_orders %}
+                  <form class="status-toggle-form" method="post" action="{{ url_for('toggle_order_carton_status', order_id=order.id) }}">
+                    <input type="hidden" name="checked" value="{% if order.carton_status %}1{% endif %}">
+                    <input class="status-checkbox" type="checkbox" {% if order.carton_status %}checked{% endif %} aria-label="纸箱情况" onchange="this.form.checked.value = this.checked ? '1' : ''; this.form.submit();">
+                  </form>
+                {% else %}
+                  <input class="status-checkbox" type="checkbox" {% if order.carton_status %}checked{% endif %} disabled aria-label="纸箱情况">
+                {% endif %}
+              </td>
+              <td data-label="入库状态">
+                {{ order.inventory_status or "未入库" }}
+                {% if order.inventory_received_quantity %}
+                  <span class="empty-text">({{ order.inventory_received_quantity }}/{{ order.quantity }})</span>
+                {% endif %}
+              </td>
+              <td data-label="最近发货">
+                {% if can_manage_orders %}
+                  <form class="status-toggle-form" method="post" action="{{ url_for('toggle_order_recent_ship_status', order_id=order.id) }}">
+                    <input type="hidden" name="checked" value="{% if order.recent_ship_status %}1{% endif %}">
+                    <input class="status-checkbox" type="checkbox" {% if order.recent_ship_status %}checked{% endif %} aria-label="最近发货" onchange="this.form.checked.value = this.checked ? '1' : ''; this.form.submit();">
+                  </form>
+                {% else %}
+                  <input class="status-checkbox" type="checkbox" {% if order.recent_ship_status %}checked{% endif %} disabled aria-label="最近发货">
+                {% endif %}
+              </td>
+              <td data-label="发货时间">{{ order.shipped_at_display or "-" }}</td>
+              <td data-label="备注">{{ order.remark or "-" }}</td>
+              <td class="actions" data-label="操作">
+                {% if can_manage_orders %}
+                  <div class="action-buttons">
+                    <a class="button" href="{{ url_for('edit_order', order_id=order.id) }}">修改</a>
+                    {% if can_manage_warehouse_inventory %}
+                      <a class="button secondary" href="{{ url_for('inventory_inbound', order_id=order.id, manual_id=order.manual_id, order_no=order.order_no) }}">成品入库</a>
+                    {% endif %}
+                    <form method="post" action="{{ url_for('delete_order', order_id=order.id) }}" onsubmit="return confirm('确定删除这条产品订单明细吗？');">
+                      <button class="danger" type="submit">删除</button>
+                    </form>
+                  </div>
+                {% else %}
+                  <span class="empty-text">只读</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="{% if can_manage_orders %}17{% else %}16{% endif %}" class="empty">暂无产品订单</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (() => {
+      const search = document.querySelector('input[data-auto-submit-search]');
+      if (!search) return;
+      const form = search.form;
+      let timer = null;
+
+      search.addEventListener("input", () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => form.submit(), 300);
+      });
+    })();
+
+    (() => {
+      const selectAll = document.querySelector("[data-order-select-all]");
+      const checkboxes = Array.from(document.querySelectorAll("input[name='order_id'][form='shipment-plan-form']"));
+      if (!selectAll) return;
+      selectAll.addEventListener("change", () => {
+        checkboxes.forEach((checkbox) => {
+          checkbox.checked = selectAll.checked;
+        });
+      });
+    })();
+
+    (() => {
+      const wrap = document.querySelector(".order-table-wrap");
+      const table = document.querySelector(".order-table");
+      const stickyHead = document.querySelector("[data-table-sticky-head]");
+      const topScrollbar = document.querySelector("[data-table-scrollbar-top]");
+      if (!wrap || !table || window.matchMedia("(max-width: 760px)").matches) return;
+
+      const mainHeaders = Array.from(table.querySelectorAll("thead th"));
+      const storageKey = "factory-web.order-column-widths.v2";
+      const savedWidths = JSON.parse(localStorage.getItem(storageKey) || "[]");
+      const mainCols = Array.from(table.querySelectorAll("col"));
+      const sampleRows = Array.from(table.querySelectorAll("tbody tr")).slice(0, 50);
+      const maxAutoWidths = [
+        {% if can_manage_orders %}48,{% endif %}
+        104, 88, 104, 142, 104, 66, 68, 66, 92, 74, 60, 92, 60, 92, 132, 132
+      ];
+
+      if (stickyHead) {
+        stickyHead.remove();
+      }
+      if (topScrollbar) {
+        topScrollbar.remove();
+      }
+
+      const autoFitWidths = () => {
+        mainHeaders.forEach((header, index) => {
+          let width = header.scrollWidth + 28;
+          sampleRows.forEach((row) => {
+            const cell = row.children[index];
+            if (!cell) return;
+            width = Math.max(width, cell.scrollWidth + 24);
+          });
+            const minWidth = index === 0 && document.querySelector("[data-order-select-all]") ? 44 : 56;
+            const nextWidth = `${Math.max(minWidth, Math.min(width, maxAutoWidths[index] || 140))}px`;
+          header.style.width = nextWidth;
+          if (mainCols[index]) {
+            mainCols[index].style.width = nextWidth;
+          }
+        });
+      };
+
+      const syncHeaderWidths = () => {
+        mainHeaders.forEach((header, index) => {
+          const width = `${Math.round(header.offsetWidth)}px`;
+          if (mainCols[index]) {
+            mainCols[index].style.width = width;
+          }
+        });
+      };
+
+      const syncScrollbarState = () => {
+        syncHeaderWidths();
+      });
+
+      window.addEventListener("resize", syncScrollbarState);
+      if (typeof ResizeObserver !== "undefined") {
+        const observer = new ResizeObserver(syncScrollbarState);
+        observer.observe(table);
+        observer.observe(wrap);
+      }
+
+      if (!savedWidths.length) {
+        autoFitWidths();
+      }
+
+      mainHeaders.forEach((header, index) => {
+        if (savedWidths[index]) {
+          const width = `${savedWidths[index]}px`;
+          header.style.width = width;
+          if (mainCols[index]) {
+            mainCols[index].style.width = width;
+          }
+        }
+
+        const grip = document.createElement("span");
+        grip.className = "column-resizer";
+        grip.setAttribute("aria-hidden", "true");
+        header.appendChild(grip);
+
+        grip.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const startX = event.clientX;
+          const startWidth = header.offsetWidth;
+          document.body.classList.add("is-resizing-column");
+
+          function resize(moveEvent) {
+            const nextWidth = Math.max(48, startWidth + moveEvent.clientX - startX);
+            header.style.width = `${nextWidth}px`;
+          }
+
+          function stopResize() {
+            document.removeEventListener("mousemove", resize);
+            document.removeEventListener("mouseup", stopResize);
+            document.body.classList.remove("is-resizing-column");
+            syncScrollbarState();
+            localStorage.setItem(
+              storageKey,
+              JSON.stringify(mainHeaders.map((item) => Math.round(item.offsetWidth)))
+            );
+          }
+
+          document.addEventListener("mousemove", resize);
+          document.addEventListener("mouseup", stopResize);
+        });
+      });
+
+      syncScrollbarState();
+    })();
+  </script>
+{% endblock %}

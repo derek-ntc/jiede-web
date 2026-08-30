@@ -1,0 +1,9 @@
+services:
+  jiede-web:
+    build: .
+    container_name: jiede-web
+    ports:
+      - "8006:8006"
+    volumes:
+      - .:/app
+    restart: unless-stopped

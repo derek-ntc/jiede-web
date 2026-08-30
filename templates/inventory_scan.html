@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}扫码查询{% endblock %}
+{% block content %}
+<div class="inventory-page inventory-mobile-page">
+  <section class="page-head">
+    <div>
+      <h1>扫码查询</h1>
+      <p>手机浏览器 HTTPS 下可调用摄像头扫码，也可以手动输入 SKU 查询。</p>
+    </div>
+  </section>
+
+  <nav class="inventory-tabs">
+    <a href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
+    <a class="active-nav-link" href="{{ url_for('inventory_scan') }}">扫码查询</a>
+    <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
+    <a href="{{ url_for('inventory_outbound') }}">扫码出库</a>
+    <a href="{{ url_for('inventory_adjust') }}">库存调整</a>
+    <a href="{{ url_for('inventory_locations') }}">库位管理</a>
+    <a href="{{ url_for('inventory_transactions') }}">库存流水</a>
+  </nav>
+
+  <section class="panel scanner-panel">
+    <div id="inventory-reader"></div>
+    <div class="mobile-action-row">
+      <button type="button" data-start-scan>打开摄像头扫码</button>
+      <button class="secondary" type="button" data-stop-scan>停止扫码</button>
+    </div>
+    <form class="inventory-code-form" data-inventory-lookup-form>
+      <input type="search" name="code" placeholder="输入 SKU / 条码 / 库存编码" autocomplete="off">
+      <button type="submit">查询库存</button>
+    </form>
+  </section>
+
+  <section class="panel inventory-scan-result" data-inventory-result hidden>
+    <div class="inventory-result-head">
+      <img data-result-image alt="">
+      <div>
+        <h2 data-result-name></h2>
+        <p data-result-code></p>
+        <p data-result-spec></p>
+      </div>
+    </div>
+    <div class="summary-strip">
+      <span>当前库存：<strong data-result-stock>0</strong></span>
+      <span>最低库存：<strong data-result-min-stock>0</strong></span>
+    </div>
+    <div data-result-locations class="inventory-location-list"></div>
+    <div class="mobile-action-row">
+      <a class="button" data-result-inbound href="#">入库</a>
+      <a class="button secondary" data-result-outbound href="#">出库</a>
+      <a class="button secondary" data-result-flow href="{{ url_for('inventory_transactions') }}">查看流水</a>
+    </div>
+    <h3>最近库存流水</h3>
+    <div class="mini-list" data-result-transactions></div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+  <script src="https://unpkg.com/html5-qrcode" defer></script>
+  <script src="{{ url_for('static', filename='inventory.js', v=static_version) }}" defer></script>
+{% endblock %}

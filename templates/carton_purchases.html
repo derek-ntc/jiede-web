@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}纸箱采购管理{% endblock %}
+{% block content %}
+  {% macro sort_link(label, key) -%}
+    {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
+    <a class="sort-link{% if sort == key %} active{% endif %}" href="{{ url_for('admin_carton_purchases', q=query, date_type=date_type, start_date=start_date, end_date=end_date, show_completed='1' if show_completed else None, sort=key, direction=next_direction) }}">
+      {{ label }}{% if sort == key %}<span>{{ "↑" if direction == "asc" else "↓" }}</span>{% endif %}
+    </a>
+  {%- endmacro %}
+
+  <div class="purchase-followup-page carton-purchase-page">
+    <section class="page-head">
+      <div>
+        <h1>纸箱采购管理</h1>
+        <p>从生产订单生成纸箱采购清单，管理麦头、数量和纸箱尺寸。</p>
+      </div>
+      <div class="head-stat">
+        <strong>{{ summary.record_count }}</strong>
+        <span>条记录</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>纸箱采购清单</h2>
+        <form class="search compact-search carton-search" method="get">
+          <input type="search" name="q" value="{{ query }}" placeholder="搜索麦头、尺寸、供应商、备注、录入人">
+          <select name="date_type" aria-label="时间类型">
+            <option value="ordered_at" {% if date_type == "ordered_at" %}selected{% endif %}>下单时间</option>
+            <option value="received_at" {% if date_type == "received_at" %}selected{% endif %}>到货时间</option>
+            <option value="created_at" {% if date_type == "created_at" %}selected{% endif %}>生成时间</option>
+          </select>
+          <input type="date" name="start_date" value="{{ start_date }}" aria-label="开始日期">
+          <input type="date" name="end_date" value="{{ end_date }}" aria-label="结束日期">
+          <label class="inline-checkbox filter-checkbox">
+            <input type="checkbox" name="show_completed" value="1" {% if show_completed %}checked{% endif %} onchange="this.form.submit()">
+            显示已完成
+          </label>
+          <input type="hidden" name="sort" value="{{ sort }}">
+          <input type="hidden" name="direction" value="{{ direction }}">
+          <button type="submit">搜索</button>
+          {% if query or start_date or end_date or date_type != "ordered_at" or show_completed %}
+            <a class="button secondary" href="{{ url_for('admin_carton_purchases') }}">清除</a>
+          {% endif %}
+        </form>
+      </div>
+
+      <div class="summary-strip">
+        <span>记录：<strong>{{ summary.record_count }}</strong></span>
+        <span>纸箱数量：<strong>{{ summary.total_quantity }}</strong></span>
+      </div>
+
+      <form id="carton-purchase-order-selection" method="post" action="{{ url_for('selected_carton_purchase_order_pdf') }}" target="_blank"></form>
+      <div class="shipped-export-bar">
+        <span class="empty-text">勾选纸箱采购记录后可生成采购单预览</span>
+        <button type="submit" form="carton-purchase-order-selection">预览采购单</button>
+        <button class="secondary" type="submit" form="carton-purchase-order-selection" name="download" value="1">导出PDF</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="purchase-followup-table carton-purchase-table simple-carton-purchase-table">
+          <thead>
+            <tr>
+              <th class="shipment-select-head">
+                <label class="shipment-select-all-label">
+                  <input type="checkbox" data-carton-select-all>
+                  <span>选择</span>
+                </label>
+              </th>
+              <th>{{ sort_link("下单时间", "ordered_at") }}</th>
+              <th>{{ sort_link("麦头", "print_mark") }}</th>
+              <th>{{ sort_link("纸箱数量", "quantity") }}</th>
+              <th>长mm</th>
+              <th>宽mm</th>
+              <th>高mm</th>
+              <th>{{ sort_link("到货时间", "received_at") }}</th>
+              <th>{{ sort_link("备注", "remark") }}</th>
+              <th>{{ sort_link("录入人", "recorded_by") }}</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in records %}
+              <tr class="{% if item.completed %}order-completed{% endif %}">
+                <td class="shipment-select-cell" data-label="选择">
+                  <input type="checkbox" class="shipment-select" name="record_id" value="{{ item.id }}" form="carton-purchase-order-selection">
+                </td>
+                <td data-label="下单时间">
+                  <input form="carton-form-{{ item.id }}" type="date" name="ordered_at" value="{{ item.ordered_at }}" required>
+                </td>
+                <td data-label="麦头">
+                  <input form="carton-form-{{ item.id }}" type="text" name="print_mark" value="{{ item.print_mark }}" required>
+                </td>
+                <td data-label="纸箱数量">
+                  <input form="carton-form-{{ item.id }}" type="number" name="quantity" min="1" step="1" value="{{ item.quantity }}" required>
+                </td>
+                <td data-label="长mm">
+                  <input form="carton-form-{{ item.id }}" type="number" name="carton_length" min="0" step="1" value="{{ item.carton_length or '' }}" required>
+                </td>
+                <td data-label="宽mm">
+                  <input form="carton-form-{{ item.id }}" type="number" name="carton_width" min="0" step="1" value="{{ item.carton_width or '' }}" required>
+                </td>
+                <td data-label="高mm">
+                  <input form="carton-form-{{ item.id }}" type="number" name="carton_height" min="0" step="1" value="{{ item.carton_height or '' }}" required>
+                </td>
+                <td data-label="到货时间">
+                  <input form="carton-form-{{ item.id }}" type="date" name="received_at" value="{{ item.received_at or '' }}">
+                </td>
+                <td data-label="备注">
+                  <textarea class="purchase-remark-textarea" form="carton-form-{{ item.id }}" name="remark" rows="2">{{ item.remark or "" }}</textarea>
+                </td>
+                <td data-label="录入人">{{ item.recorded_by or "-" }}</td>
+                <td data-label="状态">{{ "已完成" if item.completed else "未完成" }}</td>
+                <td class="actions" data-label="操作">
+                  <div class="action-buttons">
+                    <form id="carton-form-{{ item.id }}" method="post" action="{{ url_for('edit_carton_purchase', record_id=item.id) }}">
+                      <input type="hidden" name="supplier_name" value="{{ item.supplier_name or '' }}">
+                      <input type="hidden" name="board_type" value="{{ item.board_type or '' }}">
+                      <input type="hidden" name="unit_price" value="{{ item.unit_price or 0 }}">
+                    </form>
+                    <button form="carton-form-{{ item.id }}" type="submit">保存</button>
+                    <form method="post" action="{{ url_for('toggle_carton_purchase_completed', record_id=item.id) }}">
+                      {% if item.completed %}
+                        <button class="secondary" type="submit" name="completed" value="0">取消完成</button>
+                      {% else %}
+                        <button type="submit" name="completed" value="1">完成</button>
+                      {% endif %}
+                    </form>
+                    <form method="post" action="{{ url_for('delete_carton_purchase', record_id=item.id) }}" onsubmit="return confirm('确定删除这条纸箱采购记录吗？');">
+                      <button class="danger" type="submit">删除</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="12" class="empty">暂无纸箱采购记录，请先在生产订单页面勾选产品并生成纸箱采购清单</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    (function () {
+      const selectAll = document.querySelector("[data-carton-select-all]");
+      const checkboxes = Array.from(document.querySelectorAll("input[name='record_id'][form='carton-purchase-order-selection']"));
+      if (!selectAll || !checkboxes.length) {
+        return;
+      }
+      selectAll.addEventListener("change", () => {
+        checkboxes.forEach((checkbox) => {
+          checkbox.checked = selectAll.checked;
+        });
+      });
+      checkboxes.forEach((checkbox) => {
+        checkbox.addEventListener("change", () => {
+          selectAll.checked = checkboxes.every((item) => item.checked);
+          selectAll.indeterminate = checkboxes.some((item) => item.checked) && !selectAll.checked;
+        });
+      });
+    })();
+  </script>
+{% endblock %}
