@@ -18,6 +18,16 @@
         发货数量
         <input type="number" name="shipped_quantity" min="1" step="1" value="{{ shipment.shipped_quantity }}" required>
       </label>
+      {% if can_view_prices %}
+        <label>
+          发货单价
+          <input type="text" value="{% if shipment.unit_price_minor is not none %}{{ shipment.unit_price_minor | money_minor(shipment.currency) }} {{ shipment.currency }}{% else %}未记录价格{% endif %}" disabled>
+        </label>
+        <label>
+          发货金额
+          <input type="text" value="{% if shipment.line_total_minor is not none %}{{ shipment.line_total_minor | money_minor(shipment.currency) }} {{ shipment.currency }}{% else %}-{% endif %}" disabled>
+        </label>
+      {% endif %}
       <label class="wide">
         物流单号
         <input type="text" name="logistics_no" value="{{ shipment.logistics_no or '' }}" placeholder="可选">

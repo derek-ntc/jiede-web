@@ -85,6 +85,10 @@
                       <th>每套用量</th>
                       <th>计算数量</th>
                       <th>实际数量</th>
+                      {% if can_view_prices %}
+                        <th>发货单价</th>
+                        <th>发货金额</th>
+                      {% endif %}
                       <th>订单分配</th>
                       <th>库存结果</th>
                     </tr>
@@ -97,6 +101,34 @@
                         <td data-label="每套用量">{{ item.quantity_per_set }}</td>
                         <td data-label="计算数量">{{ item.calculated_quantity }}</td>
                         <td data-label="实际数量">{{ item.shipped_quantity }}</td>
+                        {% if can_view_prices %}
+                          <td data-label="发货单价" class="shipment-price-cell">
+                            {% if item.unit_price_minor is not none %}
+                              <strong>{{ item.unit_price_minor | money_minor(item.currency) }} {{ item.currency }}</strong>
+                              <span class="status-pill success">已记录价格</span>
+                            {% else %}
+                              <span class="status-pill muted">未记录价格</span>
+                              {% if can_manage_shipped %}
+                                <form class="shipment-price-form" method="post" action="{{ url_for('backfill_shipment_price', source_type='assembly_item', source_id=item.id) }}">
+                                  <input type="text" name="unit_price" inputmode="decimal" placeholder="单价" required aria-label="{{ item.drawing_no }} 发货单价">
+                                  <select name="currency" aria-label="{{ item.drawing_no }} 币种">
+                                    {% for currency in ('CNY', 'USD', 'EUR', 'HKD', 'GBP', 'JPY') %}
+                                      <option value="{{ currency }}">{{ currency }}</option>
+                                    {% endfor %}
+                                  </select>
+                                  <button class="secondary compact-button" type="submit">补录</button>
+                                </form>
+                              {% endif %}
+                            {% endif %}
+                          </td>
+                          <td data-label="发货金额">
+                            {% if item.line_total_minor is not none %}
+                              <strong>{{ item.line_total_minor | money_minor(item.currency) }} {{ item.currency }}</strong>
+                            {% else %}
+                              <span>-</span>
+                            {% endif %}
+                          </td>
+                        {% endif %}
                         <td data-label="订单分配">
                           <div class="assembly-allocation-list">
                             {% for allocation in item.allocations %}
@@ -144,6 +176,10 @@
             <th>产品图号</th>
             <th>发货产品</th>
             <th>发货数量</th>
+            {% if can_view_prices %}
+              <th>发货单价</th>
+              <th>发货金额</th>
+            {% endif %}
             <th>订单号</th>
             <th>客户名称</th>
             <th>订单下单时间</th>
@@ -173,6 +209,34 @@
               </td>
               <td data-label="发货产品">{{ shipment.product_name or "-" }}</td>
               <td data-label="发货数量">{{ shipment.shipped_quantity }}</td>
+              {% if can_view_prices %}
+                <td data-label="发货单价" class="shipment-price-cell">
+                  {% if shipment.unit_price_minor is not none %}
+                    <strong>{{ shipment.unit_price_minor | money_minor(shipment.currency) }} {{ shipment.currency }}</strong>
+                    <span class="status-pill success">已记录价格</span>
+                  {% else %}
+                    <span class="status-pill muted">未记录价格</span>
+                    {% if can_manage_shipped %}
+                      <form class="shipment-price-form" method="post" action="{{ url_for('backfill_shipment_price', source_type='ordinary', source_id=shipment.id) }}">
+                        <input type="text" name="unit_price" inputmode="decimal" placeholder="单价" required aria-label="{{ shipment.drawing_no }} 发货单价">
+                        <select name="currency" aria-label="{{ shipment.drawing_no }} 币种">
+                          {% for currency in ('CNY', 'USD', 'EUR', 'HKD', 'GBP', 'JPY') %}
+                            <option value="{{ currency }}">{{ currency }}</option>
+                          {% endfor %}
+                        </select>
+                        <button class="secondary compact-button" type="submit">补录</button>
+                      </form>
+                    {% endif %}
+                  {% endif %}
+                </td>
+                <td data-label="发货金额">
+                  {% if shipment.line_total_minor is not none %}
+                    <strong>{{ shipment.line_total_minor | money_minor(shipment.currency) }} {{ shipment.currency }}</strong>
+                  {% else %}
+                    <span>-</span>
+                  {% endif %}
+                </td>
+              {% endif %}
               <td data-label="订单号">{{ shipment.order_no or "-" }}</td>
               <td data-label="客户名称">{{ shipment.order_customer or shipment.product_customer or "-" }}</td>
               <td data-label="订单下单时间">{{ shipment.ordered_at or "-" }}</td>
@@ -304,7 +368,7 @@
             </tr>
           {% else %}
             <tr>
-              <td colspan="13" class="empty">暂无发货记录</td>
+              <td colspan="{{ 15 if can_view_prices else 13 }}" class="empty">暂无发货记录</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -633,13 +697,13 @@
       const table = document.querySelector(".shipped-order-table");
       if (!table || window.matchMedia("(max-width: 760px)").matches) return;
 
-      const storageKey = "factory-web.shipped-order-column-widths-v4";
+      const storageKey = "factory-web.shipped-order-column-widths-v5";
       const headers = Array.from(table.querySelectorAll("thead th"));
       const savedWidths = JSON.parse(localStorage.getItem(storageKey) || "[]");
       const sampleRows = Array.from(table.querySelectorAll("tbody tr")).slice(0, 40);
 
       const autoFitWidths = () => {
-        const maxAutoWidths = [108, 124, 148, 92, 124, 148, 118, 126, 150, 150, 96, 72, 68];
+        const maxAutoWidths = {{ ([108, 124, 148, 92, 148, 126, 124, 148, 118, 126, 150, 150, 96, 72, 68] if can_view_prices else [108, 124, 148, 92, 124, 148, 118, 126, 150, 150, 96, 72, 68]) | tojson }};
         headers.forEach((header, index) => {
           let width = header.scrollWidth + 26;
           sampleRows.forEach((row) => {

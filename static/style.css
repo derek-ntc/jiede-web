@@ -3411,9 +3411,34 @@ tr:last-child td {
   min-height: 34px;
 }
 
-.shipped-order-table th:nth-child(13),
-.shipped-order-table td:nth-child(13) {
+.shipped-order-table th:last-child,
+.shipped-order-table td:last-child {
   width: 68px;
+}
+
+.shipment-price-cell {
+  min-width: 138px;
+}
+
+.shipment-price-cell > strong,
+.shipment-price-cell > .status-pill {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.shipment-price-form {
+  display: grid;
+  grid-template-columns: minmax(68px, 1fr) 72px auto;
+  gap: 5px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.shipment-price-form input,
+.shipment-price-form select {
+  min-width: 0;
+  padding: 6px;
+  font-size: 12px;
 }
 
 .shipment-edit-cell {

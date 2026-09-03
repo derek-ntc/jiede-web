@@ -3389,8 +3389,18 @@ def order_shipment_summary_subquery(include_assembly=False, conn=None):
     """
 
 
-def get_shipped_orders_query():
-    return """
+def get_shipped_orders_query(include_prices=False):
+    price_columns = ""
+    if include_prices:
+        price_columns = """,
+            product_order_shipments.unit_price_minor,
+            product_order_shipments.currency,
+            product_order_shipments.price_recorded_by,
+            product_order_shipments.price_recorded_at,
+            product_order_shipments.unit_price_minor
+                * product_order_shipments.shipped_quantity AS line_total_minor
+        """
+    return f"""
         SELECT
             product_order_shipments.id,
             product_order_shipments.order_id,
@@ -3419,6 +3429,7 @@ def get_shipped_orders_query():
             manuals.remark AS product_remark,
             manuals.customer AS product_customer,
             manuals.supplier AS supplier
+            {price_columns}
         FROM product_order_shipments
         LEFT JOIN product_orders ON product_orders.id = product_order_shipments.order_id
         LEFT JOIN manuals ON manuals.id = product_orders.manual_id
@@ -4924,8 +4935,10 @@ def build_shipment_plan_workbook(plan):
     return workbook
 
 
-def fetch_shipped_orders(conn, query="", selected_customer="", shipped_at=""):
-    sql = get_shipped_orders_query()
+def fetch_shipped_orders(
+    conn, query="", selected_customer="", shipped_at="", include_prices=False
+):
+    sql = get_shipped_orders_query(include_prices=include_prices)
     params = []
     conditions = []
 
@@ -4968,7 +4981,9 @@ def fetch_shipped_orders(conn, query="", selected_customer="", shipped_at=""):
     return conn.execute(sql, params).fetchall()
 
 
-def _fetch_assembly_shipment_batches_by_ids(conn, batch_ids, batches=None):
+def _fetch_assembly_shipment_batches_by_ids(
+    conn, batch_ids, batches=None, include_prices=False
+):
     batch_ids = [int(batch_id) for batch_id in batch_ids]
     if not batch_ids:
         return []
@@ -4976,7 +4991,8 @@ def _fetch_assembly_shipment_batches_by_ids(conn, batch_ids, batches=None):
     if batches is None:
         batches = conn.execute(
             f"""
-            SELECT *
+            SELECT id, customer, assembly_drawing_no, set_quantity, shipped_at,
+                   logistics_no, created_by, created_at, updated_at
             FROM assembly_shipment_batches
             WHERE id IN ({placeholders})
             ORDER BY shipped_at DESC, id DESC
@@ -4984,11 +5000,21 @@ def _fetch_assembly_shipment_batches_by_ids(conn, batch_ids, batches=None):
             batch_ids,
         ).fetchall()
     batches = [dict(row) for row in batches]
+    item_price_columns = ""
+    if include_prices:
+        item_price_columns = """,
+                unit_price_minor, currency, price_recorded_by, price_recorded_at,
+                unit_price_minor * shipped_quantity AS line_total_minor
+        """
     items = [
         dict(row)
         for row in conn.execute(
             f"""
-            SELECT *
+            SELECT id, batch_id, manual_id, drawing_no, product_name,
+                   quantity_per_set, calculated_quantity, shipped_quantity,
+                   inventory_deducted_quantity, inventory_shortage_quantity,
+                   created_at, updated_at
+                   {item_price_columns}
             FROM assembly_shipment_items
             WHERE batch_id IN ({placeholders})
             ORDER BY batch_id ASC, id ASC
@@ -5003,7 +5029,11 @@ def _fetch_assembly_shipment_batches_by_ids(conn, batch_ids, batches=None):
             dict(row)
             for row in conn.execute(
                 f"""
-                SELECT assembly_shipment_allocations.*,
+                SELECT assembly_shipment_allocations.id,
+                       assembly_shipment_allocations.item_id,
+                       assembly_shipment_allocations.order_id,
+                       assembly_shipment_allocations.quantity,
+                       assembly_shipment_allocations.created_at,
                        COALESCE(product_orders.order_no, '') AS order_no
                 FROM assembly_shipment_allocations
                 JOIN assembly_shipment_items
@@ -5021,7 +5051,8 @@ def _fetch_assembly_shipment_batches_by_ids(conn, batch_ids, batches=None):
         dict(row)
         for row in conn.execute(
             f"""
-            SELECT *
+            SELECT id, batch_id, filename, original_filename, content_type,
+                   file_size, uploaded_at, uploaded_ip, uploaded_user_agent
             FROM assembly_shipment_images
             WHERE batch_id IN ({placeholders})
             ORDER BY batch_id ASC, uploaded_at DESC, id DESC
@@ -5052,9 +5083,13 @@ def _fetch_assembly_shipment_batches_by_ids(conn, batch_ids, batches=None):
 
 
 def fetch_assembly_shipment_batches(
-    conn, query="", selected_customer="", shipped_at=""
+    conn, query="", selected_customer="", shipped_at="", include_prices=False
 ):
-    sql = "SELECT assembly_shipment_batches.* FROM assembly_shipment_batches"
+    sql = """
+        SELECT id, customer, assembly_drawing_no, set_quantity, shipped_at,
+               logistics_no, created_by, created_at, updated_at
+        FROM assembly_shipment_batches
+    """
     params = []
     conditions = []
     if query:
@@ -5090,26 +5125,29 @@ def fetch_assembly_shipment_batches(
     batch_rows = conn.execute(sql, params).fetchall()
     batch_ids = [row["id"] for row in batch_rows]
     return _fetch_assembly_shipment_batches_by_ids(
-        conn, batch_ids, batches=batch_rows
+        conn,
+        batch_ids,
+        batches=batch_rows,
+        include_prices=include_prices,
     )
 
 
-def fetch_shipped_orders_by_ids(conn, shipment_ids):
+def fetch_shipped_orders_by_ids(conn, shipment_ids, include_prices=False):
     if not shipment_ids:
         return []
     placeholders = ",".join("?" for _ in shipment_ids)
     sql = f"""
-        {get_shipped_orders_query()}
+        {get_shipped_orders_query(include_prices=include_prices)}
         WHERE product_order_shipments.id IN ({placeholders})
         ORDER BY product_order_shipments.shipped_at DESC, product_order_shipments.id DESC
     """
     return conn.execute(sql, shipment_ids).fetchall()
 
 
-def fetch_shipment_by_id(conn, shipment_id):
+def fetch_shipment_by_id(conn, shipment_id, include_prices=False):
     return conn.execute(
         f"""
-        {get_shipped_orders_query()}
+        {get_shipped_orders_query(include_prices=include_prices)}
         WHERE product_order_shipments.id = ?
         """,
         (shipment_id,),
@@ -10863,6 +10901,7 @@ def shipped_orders():
     query = request.args.get("q", "").strip()
     selected_customer = request.args.get("customer", "").strip()
     shipped_at = request.args.get("shipped_at", "").strip()
+    include_prices = user_can_view_prices()
 
     with get_db() as conn:
         shipped_orders = fetch_shipped_orders(
@@ -10870,6 +10909,7 @@ def shipped_orders():
             query=query,
             selected_customer=selected_customer,
             shipped_at=shipped_at,
+            include_prices=include_prices,
         )
         shipped_orders = attach_shipment_images(conn, shipped_orders)
         assembly_batches = fetch_assembly_shipment_batches(
@@ -10877,6 +10917,7 @@ def shipped_orders():
             query=query,
             selected_customer=selected_customer,
             shipped_at=shipped_at,
+            include_prices=include_prices,
         )
         customers = get_shipment_customer_options(conn)
         unshipped_orders = get_unshipped_order_options(conn)
@@ -11125,7 +11166,11 @@ def edit_assembly_shipment(batch_id):
         overrides = _parse_assembly_shipment_item_overrides(request.form)
         with get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            batches = _fetch_assembly_shipment_batches_by_ids(conn, [batch_id])
+            batches = _fetch_assembly_shipment_batches_by_ids(
+                conn,
+                [batch_id],
+                include_prices=True,
+            )
             if not batches:
                 abort(404)
             batch = batches[0]
@@ -11810,11 +11855,82 @@ def upload_shipment_images_admin(shipment_id):
     return redirect(url_for("shipped_orders"))
 
 
+@app.route(
+    "/admin/shipped-orders/prices/<source_type>/<int:source_id>",
+    methods=["POST"],
+)
+@permission_required("shipped_manage")
+def backfill_shipment_price(source_type, source_id):
+    if not user_can_view_prices():
+        flash("当前账号没有权限查看或补录价格", "error")
+        return redirect(url_for("shipped_orders"))
+
+    sources = {
+        "ordinary": ("product_order_shipments", "发货记录"),
+        "assembly_item": ("assembly_shipment_items", "组装发货配件"),
+    }
+    source = sources.get(source_type)
+    if source is None:
+        flash("价格补录来源无效", "error")
+        return redirect(url_for("shipped_orders"))
+
+    try:
+        currency = normalize_currency(request.form.get("currency", "CNY"))
+        unit_price_minor = parse_money_minor(
+            request.form.get("unit_price", ""),
+            currency,
+        )
+        if unit_price_minor is None:
+            raise ValueError("请填写发货单价")
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("shipped_orders"))
+
+    table_name, source_label = source
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            f"SELECT id, unit_price_minor FROM {table_name} WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        if row is None:
+            flash(f"{source_label}不存在", "error")
+            return redirect(url_for("shipped_orders"))
+        if row["unit_price_minor"] is not None:
+            flash(f"{source_label}已经记录价格，不能覆盖", "error")
+            return redirect(url_for("shipped_orders"))
+        conn.execute(
+            f"""
+            UPDATE {table_name}
+            SET unit_price_minor = ?,
+                currency = ?,
+                price_recorded_by = ?,
+                price_recorded_at = ?
+            WHERE id = ? AND unit_price_minor IS NULL
+            """,
+            (
+                unit_price_minor,
+                currency,
+                current_admin_username(),
+                now,
+                source_id,
+            ),
+        )
+
+    flash("历史发货价格已补录", "success")
+    return redirect(url_for("shipped_orders"))
+
+
 @app.route("/admin/shipped-orders/<int:shipment_id>/edit", methods=["GET", "POST"])
 @permission_required("shipped_manage")
 def edit_shipment(shipment_id):
     with get_db() as conn:
-        shipment = fetch_shipment_by_id(conn, shipment_id)
+        shipment = fetch_shipment_by_id(
+            conn,
+            shipment_id,
+            include_prices=user_can_view_prices(),
+        )
         if shipment is None:
             flash("发货记录不存在", "error")
             return redirect(url_for("shipped_orders"))

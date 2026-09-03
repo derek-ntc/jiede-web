@@ -373,6 +373,359 @@ class ShipmentPriceSnapshotTests(unittest.TestCase):
         )
 
 
+class ShipmentPriceTestCase(unittest.TestCase):
+    def setUp(self):
+        self.original_db_path = app.DB_PATH
+        self.original_database_ready = app.DATABASE_READY
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        self.tmpdir = tempfile.TemporaryDirectory()
+        app.DB_PATH = Path(self.tmpdir.name) / "manuals.db"
+        app.DATABASE_READY = False
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        app.init_db()
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            self.create_user(conn, "viewer", can_view_shipped=1)
+            self.create_user(
+                conn,
+                "price-viewer",
+                can_view_shipped=1,
+                can_view_prices=1,
+            )
+            self.create_user(conn, "shipper", can_manage_shipped=1)
+            self.create_user(
+                conn,
+                "price-shipper",
+                can_manage_shipped=1,
+                can_view_prices=1,
+            )
+            self.manual_id = conn.execute(
+                """
+                INSERT INTO manuals (
+                    drawing_no, product_name, customer, model, category, version,
+                    filename, original_filename, unit_price_minor, currency,
+                    created_at, updated_at
+                ) VALUES ('PRICE-100', '价格测试产品', '客户甲', '', '', '', '', '',
+                          9999, 'USD', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+            self.order_id = conn.execute(
+                """
+                INSERT INTO product_orders (
+                    manual_id, order_no, ordered_at, quantity, customer,
+                    planned_ship_at, created_at, updated_at
+                ) VALUES (?, 'SO-PRICE-100', '2026-09-01', 20, '客户甲',
+                          '2026-09-05', ?, ?)
+                """,
+                (self.manual_id, now, now),
+            ).lastrowid
+            self.priced_shipment_id = conn.execute(
+                """
+                INSERT INTO product_order_shipments (
+                    order_id, shipped_quantity, shipped_at, created_at,
+                    unit_price_minor, currency, price_recorded_by, price_recorded_at
+                ) VALUES (?, 2, '2026-09-02', ?, 850, 'CNY', 'seed', ?)
+                """,
+                (self.order_id, now, now),
+            ).lastrowid
+            self.unpriced_shipment_id = conn.execute(
+                """
+                INSERT INTO product_order_shipments (
+                    order_id, shipped_quantity, shipped_at, created_at
+                ) VALUES (?, 3, '2026-09-03', ?)
+                """,
+                (self.order_id, now),
+            ).lastrowid
+            self.batch_id = conn.execute(
+                """
+                INSERT INTO assembly_shipment_batches (
+                    customer, assembly_drawing_no, set_quantity, shipped_at,
+                    logistics_no, created_by, created_at, updated_at
+                ) VALUES ('客户甲', 'ASM-PRICE', 3, '2026-09-03', '', 'seed', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+            self.priced_assembly_item_id = conn.execute(
+                """
+                INSERT INTO assembly_shipment_items (
+                    batch_id, manual_id, drawing_no, product_name,
+                    quantity_per_set, calculated_quantity, shipped_quantity,
+                    inventory_deducted_quantity, inventory_shortage_quantity,
+                    unit_price_minor, currency, price_recorded_by, price_recorded_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'PRICE-100', '价格测试产品', 1, 3, 3, 0, 3,
+                          425, 'CNY', 'seed', ?, ?, ?)
+                """,
+                (self.batch_id, self.manual_id, now, now, now),
+            ).lastrowid
+            self.unpriced_assembly_item_id = conn.execute(
+                """
+                INSERT INTO assembly_shipment_items (
+                    batch_id, manual_id, drawing_no, product_name,
+                    quantity_per_set, calculated_quantity, shipped_quantity,
+                    inventory_deducted_quantity, inventory_shortage_quantity,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'PRICE-NULL', '未定价配件', 1, 3, 3, 0, 3, ?, ?)
+                """,
+                (self.batch_id, self.manual_id, now, now),
+            ).lastrowid
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.DB_PATH = self.original_db_path
+        app.DATABASE_READY = self.original_database_ready
+        app.app.config.update(
+            TESTING=self.original_testing,
+            SECRET_KEY=self.original_secret_key,
+        )
+        self.tmpdir.cleanup()
+
+    def create_user(
+        self,
+        conn,
+        username,
+        can_manage_shipped=0,
+        can_view_shipped=0,
+        can_view_prices=0,
+    ):
+        now = "2026-09-03T10:00:00"
+        conn.execute(
+            """
+            INSERT INTO users (
+                username, password_hash, role, active,
+                can_manage_shipped, can_view_shipped, can_view_prices,
+                created_at, updated_at
+            ) VALUES (?, 'hash', 'operator', 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                username,
+                can_manage_shipped,
+                can_view_shipped,
+                can_view_prices,
+                now,
+                now,
+            ),
+        )
+
+    def login_as(self, username):
+        with self.client.session_transaction() as session:
+            session.clear()
+            session["admin_logged_in"] = True
+            session["admin_username"] = username
+            session["admin_role"] = "operator"
+
+    def capture_request_sql(self, request):
+        statements = []
+        sqlite_connect = app.sqlite3.connect
+
+        def traced_connect(*args, **kwargs):
+            conn = sqlite_connect(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(app.sqlite3, "connect", side_effect=traced_connect):
+            response = request()
+        return response, statements
+
+
+class ShipmentPriceVisibilityTests(ShipmentPriceTestCase):
+    def test_price_reader_sees_snapshot_prices_totals_and_missing_state(self):
+        self.login_as("price-viewer")
+
+        response = self.client.get("/admin/shipped-orders")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("发货单价", html)
+        self.assertIn("发货金额", html)
+        self.assertIn("8.50 CNY", html)
+        self.assertIn("17.00 CNY", html)
+        self.assertIn("4.25 CNY", html)
+        self.assertIn("12.75 CNY", html)
+        self.assertIn("未记录价格", html)
+        self.assertNotIn("/admin/shipped-orders/prices/", html)
+
+        self.login_as("price-shipper")
+        manager_html = self.client.get("/admin/shipped-orders").get_data(as_text=True)
+        self.assertIn(
+            f"/admin/shipped-orders/prices/ordinary/{self.unpriced_shipment_id}",
+            manager_html,
+        )
+        self.assertIn(
+            f"/admin/shipped-orders/prices/assembly_item/{self.unpriced_assembly_item_id}",
+            manager_html,
+        )
+
+    def test_unauthorized_page_neither_selects_nor_renders_price_data(self):
+        self.login_as("viewer")
+
+        response, statements = self.capture_request_sql(
+            lambda: self.client.get("/admin/shipped-orders")
+        )
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        price_selects = [
+            " ".join(statement.lower().split())
+            for statement in statements
+            if statement.lstrip().lower().startswith("select")
+        ]
+        self.assertTrue(price_selects)
+        for statement in price_selects:
+            self.assertNotIn("unit_price_minor", statement)
+            self.assertNotRegex(statement, r"\bcurrency\b")
+            self.assertNotIn("finance_", statement)
+        self.assertNotIn("发货单价", html)
+        self.assertNotIn("发货金额", html)
+        self.assertNotIn("8.50 CNY", html)
+        self.assertNotIn("未记录价格", html)
+
+    def test_public_signature_and_photo_pages_keep_price_columns_out_of_queries(self):
+        signature_token = "signature_token_1234567890"
+        photo_token = "photo_token_123456789012345"
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE product_order_shipments
+                SET signature_token = ?, signature_expires_at = '2099-09-03T10:00:00',
+                    photo_upload_token = ?
+                WHERE id = ?
+                """,
+                (signature_token, photo_token, self.priced_shipment_id),
+            )
+        with self.client.session_transaction() as session:
+            session.clear()
+
+        for path in (f"/sign/{signature_token}", f"/shipment-photos/{photo_token}"):
+            with self.subTest(path=path):
+                response, statements = self.capture_request_sql(
+                    lambda path=path: self.client.get(path)
+                )
+                self.assertEqual(response.status_code, 200)
+                html = response.get_data(as_text=True)
+                for statement in statements:
+                    normalized = " ".join(statement.lower().split())
+                    if normalized.startswith("select"):
+                        self.assertNotIn("unit_price_minor", normalized)
+                        self.assertNotRegex(normalized, r"\bcurrency\b")
+                        self.assertNotIn("finance_", normalized)
+                self.assertNotIn("8.50 CNY", html)
+
+
+class ShipmentPriceBackfillTests(ShipmentPriceTestCase):
+    def post_price(self, username, source_type, source_id, unit_price, currency="CNY"):
+        self.login_as(username)
+        return self.client.post(
+            f"/admin/shipped-orders/prices/{source_type}/{source_id}",
+            data={"unit_price": unit_price, "currency": currency},
+        )
+
+    def test_backfill_requires_both_price_visibility_and_shipment_management(self):
+        for username in ("price-viewer", "shipper"):
+            with self.subTest(username=username):
+                response = self.post_price(
+                    username,
+                    "ordinary",
+                    self.unpriced_shipment_id,
+                    "8.50",
+                )
+                self.assertEqual(response.status_code, 302)
+                with app.get_db() as conn:
+                    row = conn.execute(
+                        "SELECT unit_price_minor FROM product_order_shipments WHERE id = ?",
+                        (self.unpriced_shipment_id,),
+                    ).fetchone()
+                self.assertIsNone(row["unit_price_minor"])
+
+    def test_backfills_ordinary_and_zero_assembly_prices_with_audit_only(self):
+        response = self.post_price(
+            "price-shipper",
+            "ordinary",
+            self.unpriced_shipment_id,
+            "8.50",
+        )
+        self.assertEqual(response.status_code, 302)
+        response = self.post_price(
+            "price-shipper",
+            "assembly_item",
+            self.unpriced_assembly_item_id,
+            "0",
+            "JPY",
+        )
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            shipment = conn.execute(
+                "SELECT * FROM product_order_shipments WHERE id = ?",
+                (self.unpriced_shipment_id,),
+            ).fetchone()
+            item = conn.execute(
+                "SELECT * FROM assembly_shipment_items WHERE id = ?",
+                (self.unpriced_assembly_item_id,),
+            ).fetchone()
+            manual = conn.execute(
+                "SELECT unit_price_minor, currency FROM manuals WHERE id = ?",
+                (self.manual_id,),
+            ).fetchone()
+
+        self.assertEqual(
+            (
+                shipment["unit_price_minor"],
+                shipment["currency"],
+                shipment["price_recorded_by"],
+                bool(shipment["price_recorded_at"]),
+                shipment["shipped_quantity"],
+            ),
+            (850, "CNY", "price-shipper", True, 3),
+        )
+        self.assertEqual(
+            (
+                item["unit_price_minor"],
+                item["currency"],
+                item["price_recorded_by"],
+                bool(item["price_recorded_at"]),
+                item["shipped_quantity"],
+            ),
+            (0, "JPY", "price-shipper", True, 3),
+        )
+        self.assertEqual(
+            (manual["unit_price_minor"], manual["currency"]),
+            (9999, "USD"),
+        )
+
+    def test_invalid_unknown_and_existing_prices_are_not_overwritten(self):
+        cases = (
+            ("ordinary", self.unpriced_shipment_id, "-0.01", "CNY"),
+            ("ordinary", self.unpriced_shipment_id, "1.00", "XYZ"),
+            ("unknown", self.unpriced_shipment_id, "1.00", "CNY"),
+            ("ordinary", self.priced_shipment_id, "1.00", "CNY"),
+        )
+        for source_type, source_id, unit_price, currency in cases:
+            with self.subTest(source_type=source_type, unit_price=unit_price, currency=currency):
+                response = self.post_price(
+                    "price-shipper",
+                    source_type,
+                    source_id,
+                    unit_price,
+                    currency,
+                )
+                self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            unpriced = conn.execute(
+                "SELECT unit_price_minor FROM product_order_shipments WHERE id = ?",
+                (self.unpriced_shipment_id,),
+            ).fetchone()
+            priced = conn.execute(
+                "SELECT unit_price_minor, currency FROM product_order_shipments WHERE id = ?",
+                (self.priced_shipment_id,),
+            ).fetchone()
+        self.assertIsNone(unpriced["unit_price_minor"])
+        self.assertEqual((priced["unit_price_minor"], priced["currency"]), (850, "CNY"))
+
+
 class ProductPageTestCase(unittest.TestCase):
     def setUp(self):
         self.original_db_path = app.DB_PATH
