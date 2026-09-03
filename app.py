@@ -5386,7 +5386,7 @@ def _load_finance_sources(
     conn,
     source_refs,
     *,
-    expected_customer="",
+    expected_customer_id=None,
     expected_currency="",
     allowed_invoice_id=None,
     require_nonempty=True,
@@ -5414,11 +5414,25 @@ def _load_finance_sources(
         sources.append(source)
 
     customer_names = {str(source["customer_name"] or "").strip() for source in sources}
+    customer_ids = set()
+    if customer_names:
+        placeholders = ",".join("?" for _ in customer_names)
+        rows = conn.execute(
+            f"SELECT id, name FROM customers WHERE name IN ({placeholders})",
+            tuple(customer_names),
+        ).fetchall()
+        customer_ids_by_name = {str(row["name"]): int(row["id"]) for row in rows}
+        customer_ids = {customer_ids_by_name.get(name) for name in customer_names}
     currencies = {source["currency"] for source in sources}
     if (
-        len(customer_names) > 1
+        len(customer_ids) > 1
+        or None in customer_ids
         or len(currencies) > 1
-        or (sources and expected_customer and customer_names != {expected_customer})
+        or (
+            sources
+            and expected_customer_id is not None
+            and customer_ids != {int(expected_customer_id)}
+        )
         or (sources and expected_currency and currencies != {expected_currency})
     ):
         raise ValueError("只能合并同一客户、同一币种的发货记录")
@@ -5499,7 +5513,7 @@ def create_finance_invoice(conn, customer_id, source_refs, created_by):
         _refs, sources = _load_finance_sources(
             conn,
             source_refs,
-            expected_customer=snapshot["customer_name"],
+            expected_customer_id=customer_id,
         )
         currency = sources[0]["currency"]
         now = datetime.utcnow().isoformat(timespec="seconds")
@@ -5553,7 +5567,7 @@ def replace_pending_invoice_items(
         refs, sources = _load_finance_sources(
             conn,
             source_refs,
-            expected_customer=invoice["customer_name"],
+            expected_customer_id=invoice["customer_id"],
             expected_currency=invoice["currency"],
             allowed_invoice_id=invoice_id,
             require_nonempty=False,
@@ -7996,14 +8010,6 @@ def edit_customer(customer_id):
                     "UPDATE assembly_shipment_batches SET customer = ? WHERE customer = ?",
                     (name, previous_name),
                 )
-                conn.execute(
-                    """
-                    UPDATE finance_invoices
-                    SET customer_name = ?, updated_by = ?, updated_at = ?
-                    WHERE customer_id = ? AND status = 'pending'
-                    """,
-                    (name, current_admin_username(), now, customer_id),
-                )
     except sqlite3.IntegrityError:
         flash("该客户名称已存在", "error")
         return redirect(url_for("admin_customers"))
@@ -8223,11 +8229,16 @@ def finance_invoice_detail(invoice_id):
         items = fetch_finance_invoice_items(conn, invoice_id)
         available_sources = []
         if invoice["status"] == "pending":
-            available_sources = fetch_available_finance_sources(
-                conn,
-                invoice["customer_name"],
-                invoice["currency"],
-            )
+            current_customer = conn.execute(
+                "SELECT name FROM customers WHERE id = ?",
+                (invoice["customer_id"],),
+            ).fetchone()
+            if current_customer:
+                available_sources = fetch_available_finance_sources(
+                    conn,
+                    current_customer["name"],
+                    invoice["currency"],
+                )
     return render_template(
         "finance_invoice_detail.html",
         invoice=invoice,

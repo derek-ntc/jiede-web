@@ -313,6 +313,19 @@ class CustomerBillingTests(unittest.TestCase):
             new_sources = app.fetch_available_finance_sources(
                 conn, "客户甲（新名称）", "CNY"
             )
+            try:
+                app.replace_pending_invoice_items(
+                    conn,
+                    pending_invoice_id,
+                    [("ordinary", ordinary_id)],
+                    "finance-manager",
+                )
+            except ValueError as error:
+                self.fail(f"客户改名后仍应能维护原待开票单：{error}")
+            pending_item_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM finance_invoice_items WHERE invoice_id = ?",
+                (pending_invoice_id,),
+            ).fetchone()["c"]
             app.sync_product_customers(conn)
             customer_names = {
                 row["name"] for row in conn.execute("SELECT name FROM customers")
@@ -320,7 +333,8 @@ class CustomerBillingTests(unittest.TestCase):
 
         self.assertEqual(set(live_names.values()), {"客户甲（新名称）"})
         self.assertEqual(invoice_names[issued_invoice_id], "客户甲")
-        self.assertEqual(invoice_names[pending_invoice_id], "客户甲（新名称）")
+        self.assertEqual(invoice_names[pending_invoice_id], "客户甲")
+        self.assertEqual(pending_item_count, 1)
         self.assertEqual(
             {(source["source_type"], source["source_id"]) for source in new_sources},
             {("ordinary", ordinary_id), ("assembly_item", assembly_item_id)},
