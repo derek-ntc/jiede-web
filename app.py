@@ -367,6 +367,8 @@ def upload_limits():
         "can_manage_orders": user_has_permission("orders_manage"),
         "can_view_shipped": user_has_permission("shipped_view"),
         "can_manage_shipped": user_has_permission("shipped_manage"),
+        "can_view_prices": user_can_view_prices(),
+        "can_manage_finance": user_has_permission("finance_manage"),
         "can_access_admin_modules": user_can_access_admin_modules(),
         "shipment_signature_url": shipment_signature_url,
         "shipment_photo_upload_url": shipment_photo_upload_url,
@@ -1815,6 +1817,7 @@ def user_can_access_admin_modules():
         user_has_permission("warehouse_inventory"),
         user_has_permission("product_create"),
         user_has_permission("product_edit"),
+        user_has_permission("finance_manage"),
     ])
 
 
@@ -1921,7 +1924,15 @@ def user_has_permission(permission):
         return bool(user["can_view_shipped"] or user["can_manage_shipped"])
     if permission == "shipped_manage":
         return bool(user["can_manage_shipped"])
+    if permission == "price_view":
+        return bool(user["can_view_prices"])
+    if permission == "finance_manage":
+        return bool(user["can_manage_finance"])
     return False
+
+
+def user_can_view_prices():
+    return user_has_permission("price_view") or user_has_permission("finance_manage")
 
 
 def get_suppliers():
@@ -6420,6 +6431,8 @@ def admin_users():
         can_manage_production_followups = 1 if role == "admin" or request.form.get("can_manage_production_followups") else 0
         can_create_products = 1 if role == "admin" or request.form.get("can_create_products") else 0
         can_edit_products = 1 if role == "admin" or request.form.get("can_edit_products") else 0
+        can_view_prices = 1 if role == "admin" or request.form.get("can_view_prices") else 0
+        can_manage_finance = 1 if role == "admin" or request.form.get("can_manage_finance") else 0
 
         if role not in {"admin", "operator"}:
             flash("请选择有效的用户权限", "error")
@@ -6441,9 +6454,10 @@ def admin_users():
                         can_manage_purchase_followups, can_manage_powder_coating,
                         can_manage_carton_purchases, can_manage_warehouse_inventory,
                         can_manage_production_followups, can_create_products, can_edit_products,
+                        can_view_prices, can_manage_finance,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         username,
@@ -6463,6 +6477,8 @@ def admin_users():
                         can_manage_production_followups,
                         can_create_products,
                         can_edit_products,
+                        can_view_prices,
+                        can_manage_finance,
                         now,
                         now,
                     ),
@@ -6504,6 +6520,8 @@ def edit_user(user_id):
     can_manage_production_followups = 1 if role == "admin" or request.form.get("can_manage_production_followups") else 0
     can_create_products = 1 if role == "admin" or request.form.get("can_create_products") else 0
     can_edit_products = 1 if role == "admin" or request.form.get("can_edit_products") else 0
+    can_view_prices = 1 if role == "admin" or request.form.get("can_view_prices") else 0
+    can_manage_finance = 1 if role == "admin" or request.form.get("can_manage_finance") else 0
 
     if role not in {"admin", "operator"}:
         flash("请选择有效的用户权限", "error")
@@ -6534,6 +6552,7 @@ def edit_user(user_id):
                     can_manage_purchase_followups = ?, can_manage_powder_coating = ?,
                     can_manage_carton_purchases = ?, can_manage_warehouse_inventory = ?,
                     can_manage_production_followups = ?, can_create_products = ?, can_edit_products = ?,
+                    can_view_prices = ?, can_manage_finance = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -6554,6 +6573,8 @@ def edit_user(user_id):
                     can_manage_production_followups,
                     can_create_products,
                     can_edit_products,
+                    can_view_prices,
+                    can_manage_finance,
                     now,
                     user_id,
                 ),
@@ -6568,6 +6589,7 @@ def edit_user(user_id):
                     can_manage_purchase_followups = ?, can_manage_powder_coating = ?,
                     can_manage_carton_purchases = ?, can_manage_warehouse_inventory = ?,
                     can_manage_production_followups = ?, can_create_products = ?, can_edit_products = ?,
+                    can_view_prices = ?, can_manage_finance = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -6587,6 +6609,8 @@ def edit_user(user_id):
                     can_manage_production_followups,
                     can_create_products,
                     can_edit_products,
+                    can_view_prices,
+                    can_manage_finance,
                     now,
                     user_id,
                 ),

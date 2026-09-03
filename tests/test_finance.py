@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import app
+from flask import get_flashed_messages, session
 
 
 class FinanceMigrationTests(unittest.TestCase):
@@ -88,3 +89,78 @@ class FinanceMigrationTests(unittest.TestCase):
                 )
 
         app.init_db()
+
+
+class FinancePermissionTests(unittest.TestCase):
+    def setUp(self):
+        self.original_db_path = app.DB_PATH
+        self.original_database_ready = app.DATABASE_READY
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        self.tmpdir = tempfile.TemporaryDirectory()
+        app.DB_PATH = Path(self.tmpdir.name) / "manuals.db"
+        app.DATABASE_READY = False
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        app.init_db()
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, created_at, updated_at,
+                    can_manage_products, can_manage_orders, can_view_orders,
+                    can_manage_shipped, can_view_shipped, can_manage_customers,
+                    can_manage_common_info, can_manage_purchase_followups,
+                    can_manage_powder_coating, can_manage_carton_purchases,
+                    can_manage_warehouse_inventory, can_manage_production_followups,
+                    can_create_products, can_edit_products, can_view_prices, can_manage_finance
+                ) VALUES ('plain', 'hash', 'operator', ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                """,
+                (now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, created_at, updated_at,
+                    can_manage_products, can_manage_orders, can_view_orders,
+                    can_manage_shipped, can_view_shipped, can_manage_customers,
+                    can_manage_common_info, can_manage_purchase_followups,
+                    can_manage_powder_coating, can_manage_carton_purchases,
+                    can_manage_warehouse_inventory, can_manage_production_followups,
+                    can_create_products, can_edit_products, can_view_prices, can_manage_finance
+                ) VALUES ('finance', 'hash', 'operator', ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+                """,
+                (now, now),
+            )
+
+    def tearDown(self):
+        app.DB_PATH = self.original_db_path
+        app.DATABASE_READY = self.original_database_ready
+        app.app.config.update(TESTING=self.original_testing, SECRET_KEY=self.original_secret_key)
+        self.tmpdir.cleanup()
+
+    def test_finance_permission_required_redirects_unauthorized_operator(self):
+        @app.permission_required("finance_manage")
+        def finance_view():
+            return "finance"
+
+        with app.app.test_request_context("/finance"):
+            session["admin_logged_in"] = True
+            session["admin_username"] = "plain"
+            response = finance_view()
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/admin")
+            self.assertIn(
+                ("error", "当前账号没有权限访问该模块"),
+                get_flashed_messages(with_categories=True),
+            )
+
+    def test_finance_permission_required_allows_finance_operator(self):
+        @app.permission_required("finance_manage")
+        def finance_view():
+            return "finance"
+
+        with app.app.test_request_context("/finance"):
+            session["admin_logged_in"] = True
+            session["admin_username"] = "finance"
+            self.assertEqual(finance_view(), "finance")

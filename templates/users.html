@@ -102,6 +102,14 @@
             <input type="checkbox" name="can_view_shipped">
             发货只读
           </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_view_prices">
+            价格查看
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_finance">
+            财务管理
+          </label>
         </div>
       </div>
       <div class="wide form-actions">
@@ -186,6 +194,14 @@
                   <label class="checkbox-field">
                     <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_shipped" {% if user.can_view_shipped or user.can_manage_shipped %}checked{% endif %}>
                     发货只读
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_prices" {% if user.can_view_prices %}checked{% endif %}>
+                    价格查看
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_finance" {% if user.can_manage_finance %}checked{% endif %}>
+                    财务管理
                   </label>
                 </div>
               </td>
