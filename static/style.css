@@ -903,15 +903,15 @@ table {
 }
 
 .product-table-wrap {
-  min-width: min(1842px, 100%);
+  min-width: min(1688px, 100%);
   max-height: calc(100vh - 250px);
   overscroll-behavior: contain;
 }
 
 .product-table {
   width: max-content;
-  min-width: 1842px;
-  table-layout: auto;
+  min-width: 1688px;
+  table-layout: fixed;
 }
 
 .product-table thead th {
@@ -946,47 +946,48 @@ table {
   line-height: 1.2;
 }
 
-.product-table th:nth-child(1),
-.product-table td:nth-child(1) {
-  min-width: 170px;
+.product-table .shipment-select-head,
+.product-table .shipment-select-cell {
+  width: 48px;
+  min-width: 48px;
+  text-align: center;
 }
 
-.product-table th:nth-child(2),
-.product-table td:nth-child(2) {
-  min-width: 280px;
+.product-table .shipment-select-all-label {
+  gap: 2px;
+  font-size: 11px;
 }
 
-.product-table th:nth-child(3),
-.product-table td:nth-child(3),
-.product-table th:nth-child(4),
-.product-table td:nth-child(4) {
-  min-width: 180px;
+.product-assembly-list {
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
 }
 
-.product-table th:nth-child(5),
-.product-table td:nth-child(5) {
-  min-width: 132px;
+.product-assembly-batch-bar {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
 }
 
-.product-table th:nth-child(6),
-.product-table td:nth-child(6) {
-  min-width: 260px;
+.product-assembly-batch-bar .inline-date-field {
+  font-size: 13px;
 }
 
-.product-table th:nth-child(7),
-.product-table td:nth-child(7) {
-  min-width: 360px;
+.product-assembly-batch-bar input[type="text"] {
+  width: 190px;
 }
 
-.product-table th:nth-child(8),
-.product-table td:nth-child(8) {
-  min-width: 280px;
+.product-assembly-batch-bar input[type="number"] {
+  width: 110px;
 }
 
 .product-material-list {
   display: grid;
   gap: 4px;
-  min-width: 320px;
+  min-width: 0;
 }
 
 .product-material-line {
@@ -4271,6 +4272,19 @@ label {
     align-items: stretch;
   }
 
+  .product-assembly-batch-bar .inline-date-field {
+    display: grid;
+    grid-template-columns: 108px minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .product-assembly-batch-bar input[type="text"],
+  .product-assembly-batch-bar input[type="number"],
+  .product-assembly-batch-bar button {
+    width: 100%;
+    min-width: 0;
+  }
+
   .shipment-create-form {
     grid-template-columns: 1fr;
   }
@@ -4359,7 +4373,20 @@ label {
   }
 
   .product-table {
+    width: 100%;
     min-width: 0;
+  }
+
+  .product-table .shipment-select-cell {
+    display: grid;
+    grid-template-columns: 86px minmax(0, 1fr);
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+  }
+
+  .product-table .shipment-select-cell input {
+    justify-self: start;
   }
 
   .section-actions {

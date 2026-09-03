@@ -107,6 +107,7 @@ INSPECTION_REPORTS_DIR = UPLOADS_DIR / "inspection-reports"
 PRODUCTION_DRAWINGS_DIR = UPLOADS_DIR / "production-drawings"
 DB_PATH = DATA_DIR / "manuals.db"
 DATABASE_READY = False
+MAX_ORDER_QUANTITY = 2_147_483_647
 SIGNATURE_LINK_TTL = timedelta(days=7)
 PRODUCTION_STAGE_LABELS = {
     "laser": "激光",
@@ -347,6 +348,8 @@ def upload_limits():
             (BASE_DIR / "static" / "style.css").stat().st_mtime,
             (BASE_DIR / "static" / "editor.js").stat().st_mtime,
             (BASE_DIR / "static" / "inventory.js").stat().st_mtime if (BASE_DIR / "static" / "inventory.js").exists() else 0,
+            (BASE_DIR / "static" / "order_entry.js").stat().st_mtime if (BASE_DIR / "static" / "order_entry.js").exists() else 0,
+            (BASE_DIR / "static" / "product_list.js").stat().st_mtime if (BASE_DIR / "static" / "product_list.js").exists() else 0,
         )),
         "current_user_role": current_user_role(),
         "current_admin_username": current_admin_username(),
@@ -739,6 +742,8 @@ def ensure_order_table(conn):
             ordered_at TEXT NOT NULL,
             quantity INTEGER NOT NULL,
             customer TEXT NOT NULL DEFAULT '',
+            assembly_drawing_no TEXT NOT NULL DEFAULT '',
+            assembly_set_quantity INTEGER NOT NULL DEFAULT 0,
             planned_ship_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -762,6 +767,8 @@ def ensure_order_table(conn):
         "recent_ship_status": "ALTER TABLE product_orders ADD COLUMN recent_ship_status TEXT NOT NULL DEFAULT ''",
         "inventory_received_quantity": "ALTER TABLE product_orders ADD COLUMN inventory_received_quantity INTEGER NOT NULL DEFAULT 0",
         "inventory_status": "ALTER TABLE product_orders ADD COLUMN inventory_status TEXT NOT NULL DEFAULT '未入库'",
+        "assembly_drawing_no": "ALTER TABLE product_orders ADD COLUMN assembly_drawing_no TEXT NOT NULL DEFAULT ''",
+        "assembly_set_quantity": "ALTER TABLE product_orders ADD COLUMN assembly_set_quantity INTEGER NOT NULL DEFAULT 0",
     }
     for column, statement in migrations.items():
         if column not in existing:
@@ -2871,6 +2878,26 @@ def get_product_assembly_components(conn, manual_id):
     ).fetchall()
 
 
+def get_product_assembly_components_map(conn, manual_ids):
+    manual_ids = [manual_id for manual_id in dict.fromkeys(manual_ids) if manual_id]
+    if not manual_ids:
+        return {}
+    placeholders = ",".join("?" for _ in manual_ids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM product_assembly_components
+        WHERE manual_id IN ({placeholders})
+        ORDER BY manual_id ASC, sort_order ASC, id ASC
+        """,
+        manual_ids,
+    ).fetchall()
+    result = {manual_id: [] for manual_id in manual_ids}
+    for row in rows:
+        result.setdefault(row["manual_id"], []).append(row)
+    return result
+
+
 def get_product_materials(conn, manual_id):
     return conn.execute(
         """
@@ -3020,6 +3047,8 @@ def parse_import_quantity(value):
         quantity = int(text)
     if quantity <= 0:
         raise ValueError
+    if quantity > MAX_ORDER_QUANTITY:
+        raise OverflowError
     return quantity
 
 
@@ -3088,6 +3117,11 @@ def parse_order_import_workbook(upload):
             continue
         try:
             quantity = parse_import_quantity(raw_quantity)
+        except OverflowError:
+            errors.append(
+                f"第 {row_number} 行数量不能超过 {MAX_ORDER_QUANTITY}"
+            )
+            continue
         except (TypeError, ValueError):
             errors.append(f"第 {row_number} 行数量必须是大于 0 的整数")
             continue
@@ -3138,7 +3172,18 @@ def match_order_import_items(conn, import_rows):
         existing["quantity"] += item["quantity"]
         existing["rows"].append(item["row_number"])
 
-    return list(items_by_manual_id.values()), errors
+    items = []
+    for item in items_by_manual_id.values():
+        if item["quantity"] > MAX_ORDER_QUANTITY:
+            rows = "、".join(str(row_number) for row_number in item["rows"])
+            errors.append(
+                f"第 {rows} 行图号 {item['manual']['drawing_no']} "
+                f"合计数量不能超过 {MAX_ORDER_QUANTITY}"
+            )
+            continue
+        items.append(item)
+
+    return items, errors
 
 
 def get_order_shipments(conn, order_id):
@@ -5559,7 +5604,7 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
             [
                 shipped_order_signature_flowable(shipped_orders, small_style),
                 Paragraph("制单：__________________", small_style),
-                Paragraph("发货公司：宁波市江北利万管件有限公司", small_style),
+                Paragraph("发货公司：宁波市杰德机械科技有限公司", small_style),
             ]
         ],
         colWidths=[82 * mm, 54 * mm, doc.width - 136 * mm],
@@ -5646,6 +5691,12 @@ def products_index():
                 OR manuals.remark LIKE ?
                 OR EXISTS (
                     SELECT 1
+                    FROM product_assembly_components
+                    WHERE product_assembly_components.manual_id = manuals.id
+                      AND product_assembly_components.assembly_drawing_no LIKE ?
+                )
+                OR EXISTS (
+                    SELECT 1
                     FROM product_materials
                     WHERE product_materials.manual_id = manuals.id
                       AND (
@@ -5659,7 +5710,7 @@ def products_index():
             """
         )
         like = f"%{query}%"
-        params.extend([like, like, like, like, like, like, like, like, like, like, like, like])
+        params.extend([like, like, like, like, like, like, like, like, like, like, like, like, like])
     if selected_supplier:
         conditions.append("manuals.supplier = ?")
         params.append(selected_supplier)
@@ -5674,6 +5725,9 @@ def products_index():
         ensure_all_product_inventory_codes(conn)
         manuals = conn.execute(sql, params).fetchall()
         materials_by_manual = get_product_materials_map(conn, [manual["id"] for manual in manuals])
+        assembly_components_by_manual = get_product_assembly_components_map(
+            conn, [manual["id"] for manual in manuals]
+        )
         suppliers = [row["supplier"] for row in get_suppliers_with_conn(conn)]
         customers = [row["customer"] for row in get_customers_with_conn(conn)]
 
@@ -5681,6 +5735,7 @@ def products_index():
         "index.html",
         manuals=manuals,
         materials_by_manual=materials_by_manual,
+        assembly_components_by_manual=assembly_components_by_manual,
         suppliers=suppliers,
         customers=customers,
         query=query,
@@ -5689,6 +5744,141 @@ def products_index():
         sort=sort,
         direction=direction,
     )
+
+
+@app.route("/admin/products/assembly-components/batch", methods=["POST"])
+@permission_required("product_edit")
+def batch_set_product_assembly_components():
+    redirect_args = {
+        "q": request.form.get("return_q", "").strip(),
+        "supplier": request.form.get("return_supplier", "").strip(),
+        "customer": request.form.get("return_customer", "").strip(),
+        "sort": request.form.get("return_sort", "").strip(),
+        "direction": request.form.get("return_direction", "").strip(),
+    }
+
+    manual_ids = []
+    try:
+        for value in request.form.getlist("manual_id"):
+            manual_id = int(str(value).strip())
+            if manual_id <= 0:
+                raise ValueError
+            manual_ids.append(manual_id)
+    except (TypeError, ValueError):
+        flash("请选择有效的产品", "error")
+        return redirect(url_for("products_index", **redirect_args))
+    manual_ids = list(dict.fromkeys(manual_ids))
+    if not manual_ids:
+        flash("请先勾选要设置组装图号的产品", "error")
+        return redirect(url_for("products_index", **redirect_args))
+
+    assembly_drawing_no = request.form.get("assembly_drawing_no", "").strip()
+    quantity_text = request.form.get("quantity_per_set", "").strip()
+    try:
+        quantity_per_set = int(quantity_text)
+    except (TypeError, ValueError):
+        quantity_per_set = 0
+    if not assembly_drawing_no:
+        flash("请填写组装图号", "error")
+        return redirect(url_for("products_index", **redirect_args))
+    if quantity_per_set <= 0 or quantity_per_set > MAX_ORDER_QUANTITY:
+        flash(
+            f"每套配件数量必须是 1 到 {MAX_ORDER_QUANTITY} 之间的整数",
+            "error",
+        )
+        return redirect(url_for("products_index", **redirect_args))
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with get_db() as conn:
+        placeholders = ",".join("?" for _ in manual_ids)
+        manuals = conn.execute(
+            f"SELECT id, customer FROM manuals WHERE id IN ({placeholders})",
+            manual_ids,
+        ).fetchall()
+        if len(manuals) != len(manual_ids):
+            flash("请选择有效的产品", "error")
+            return redirect(url_for("products_index", **redirect_args))
+        customers = {str(row["customer"] or "").strip() for row in manuals}
+        if "" in customers:
+            flash("未设置客户的产品不能批量设置组装图号", "error")
+            return redirect(url_for("products_index", **redirect_args))
+        if len(customers) != 1:
+            flash("只能批量设置同一客户的产品", "error")
+            return redirect(url_for("products_index", **redirect_args))
+
+        component_rows = conn.execute(
+            f"""
+            SELECT id, manual_id, assembly_drawing_no
+            FROM product_assembly_components
+            WHERE manual_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            manual_ids,
+        ).fetchall()
+        existing_component_ids = {}
+        for row in component_rows:
+            key = (row["manual_id"], str(row["assembly_drawing_no"] or "").casefold())
+            existing_component_ids.setdefault(key, row["id"])
+        requested_component_key = assembly_drawing_no.casefold()
+
+        for manual_id in manual_ids:
+            existing_id = existing_component_ids.get(
+                (manual_id, requested_component_key)
+            )
+            if existing_id is not None:
+                conn.execute(
+                    """
+                    UPDATE product_assembly_components
+                    SET assembly_drawing_no = ?, quantity_per_set = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        assembly_drawing_no,
+                        quantity_per_set,
+                        now,
+                        existing_id,
+                    ),
+                )
+            else:
+                next_sort_order = conn.execute(
+                    """
+                    SELECT COALESCE(MAX(sort_order), -1) + 1
+                    FROM product_assembly_components
+                    WHERE manual_id = ?
+                    """,
+                    (manual_id,),
+                ).fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO product_assembly_components (
+                        manual_id, assembly_drawing_no, quantity_per_set,
+                        sort_order, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        manual_id,
+                        assembly_drawing_no,
+                        quantity_per_set,
+                        next_sort_order,
+                        now,
+                        now,
+                    ),
+                )
+        conn.execute(
+            f"""
+            UPDATE manuals
+            SET updated_by = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            [current_admin_username(), now, *manual_ids],
+        )
+
+    flash(
+        f"已为 {len(manual_ids)} 个产品设置组装图号 {assembly_drawing_no}，每套 {quantity_per_set} 个",
+        "success",
+    )
+    return redirect(url_for("products_index", **redirect_args))
 
 
 @app.route("/dashboard")
@@ -10038,6 +10228,8 @@ def admin_orders():
     selected_customer = request.args.get("customer", "").strip()
     order_sort_columns = {
         "order_no": "product_orders.order_no COLLATE NOCASE",
+        "assembly_drawing_no": "product_orders.assembly_drawing_no COLLATE NOCASE",
+        "assembly_set_quantity": "product_orders.assembly_set_quantity",
         "ordered_at": "product_orders.ordered_at",
         "drawing_no": "manuals.drawing_no COLLATE NOCASE",
         "product_name": "manuals.product_name COLLATE NOCASE",
@@ -10093,6 +10285,7 @@ def admin_orders():
             """
             (
                 product_orders.order_no LIKE ?
+                OR product_orders.assembly_drawing_no LIKE ?
                 OR product_orders.customer LIKE ?
                 OR manuals.customer LIKE ?
                 OR manuals.supplier LIKE ?
@@ -10107,7 +10300,7 @@ def admin_orders():
             """
         )
         like = f"%{query}%"
-        params.extend([like, like, like, like, like, like, like, like, like, like, like])
+        params.extend([like, like, like, like, like, like, like, like, like, like, like, like])
     if selected_customer:
         conditions.append(
             """
@@ -11616,6 +11809,25 @@ def new_order():
     if request.method == "POST":
         order_no = request.form.get("order_no", "").strip()
         ordered_at = request.form.get("ordered_at", "").strip()
+        selected_customer = request.form.get("customer", "").strip()
+        assembly_drawing_no = request.form.get("assembly_drawing_no", "").strip()
+        assembly_set_quantity_text = request.form.get(
+            "assembly_set_quantity", ""
+        ).strip()
+        try:
+            assembly_set_quantity = int(assembly_set_quantity_text or 0)
+        except ValueError:
+            flash("组装数量必须大于 0", "error")
+            return redirect(url_for("new_order"))
+        if bool(assembly_drawing_no) != bool(assembly_set_quantity_text):
+            flash("组装图号和组装数量必须同时填写", "error")
+            return redirect(url_for("new_order"))
+        if assembly_drawing_no and assembly_set_quantity <= 0:
+            flash("组装数量必须大于 0", "error")
+            return redirect(url_for("new_order"))
+        if assembly_set_quantity > MAX_ORDER_QUANTITY:
+            flash(f"组装数量不能超过 {MAX_ORDER_QUANTITY}", "error")
+            return redirect(url_for("new_order"))
         manual_ids = request.form.getlist("manual_id")
         quantities = request.form.getlist("quantity")
         planned_ship_dates = request.form.getlist("planned_ship_at")
@@ -11626,6 +11838,9 @@ def new_order():
 
         if not all([order_no, ordered_at]):
             flash("订单号、下单时间为必填项", "error")
+            return redirect(url_for("new_order"))
+        if not selected_customer:
+            flash("请选择客户", "error")
             return redirect(url_for("new_order"))
 
         items = []
@@ -11649,7 +11864,7 @@ def new_order():
             if not any([manual_id, quantity, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status]):
                 continue
             if not manual_id or not quantity or not planned_ship_at:
-                flash("每一行产品都需要选择产品图号、填写订单数量和计划发货时间", "error")
+                flash("每一行都需要选择产品、填写订单数量和计划发货时间", "error")
                 return redirect(url_for("new_order"))
             try:
                 manual_id_value = int(manual_id)
@@ -11660,6 +11875,9 @@ def new_order():
             if quantity_value <= 0:
                 flash("订单数量必须大于 0", "error")
                 return redirect(url_for("new_order"))
+            if quantity_value > MAX_ORDER_QUANTITY:
+                flash(f"订单数量不能超过 {MAX_ORDER_QUANTITY}", "error")
+                return redirect(url_for("new_order"))
             items.append((manual_id_value, quantity_value, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status))
 
         if not items:
@@ -11668,6 +11886,22 @@ def new_order():
 
         now = datetime.utcnow().isoformat(timespec="seconds")
         with get_db() as conn:
+            if assembly_drawing_no:
+                assembly_options = get_assembly_options_for_customer(
+                    conn, selected_customer
+                )
+                canonical_assembly_drawing_no = next(
+                    (
+                        option
+                        for option in assembly_options
+                        if option.casefold() == assembly_drawing_no.casefold()
+                    ),
+                    None,
+                )
+                if canonical_assembly_drawing_no is None:
+                    flash("请选择该客户有效的组装图号", "error")
+                    return redirect(url_for("new_order"))
+                assembly_drawing_no = canonical_assembly_drawing_no
             manual_rows = conn.execute(
                 f"""
                 SELECT id, customer
@@ -11678,7 +11912,13 @@ def new_order():
             ).fetchall()
             manuals_by_id = {row["id"]: row for row in manual_rows}
             if len(manuals_by_id) != len({item[0] for item in items}):
-                flash("请选择有效的产品图号", "error")
+                flash("请选择有效的产品", "error")
+                return redirect(url_for("new_order"))
+            if selected_customer and any(
+                (manuals_by_id[item[0]]["customer"] or "") != selected_customer
+                for item in items
+            ):
+                flash("订单产品必须属于所选客户", "error")
                 return redirect(url_for("new_order"))
             customer_emails_by_name = {
                 row["name"]: row["email"]
@@ -11695,11 +11935,12 @@ def new_order():
                 """
                 INSERT INTO product_orders (
                     manual_id, order_no, ordered_at, quantity, customer,
+                    assembly_drawing_no, assembly_set_quantity,
                     customer_email, planned_ship_at, material_stock_status, material_stock_assignee, remark,
                     carton_status, carton_assignee, recent_ship_status, shipped_quantity, shipped_at,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?)
                 """,
                 [
                     (
@@ -11708,6 +11949,8 @@ def new_order():
                         ordered_at,
                         quantity,
                         manuals_by_id[manual_id]["customer"] or "",
+                        assembly_drawing_no,
+                        assembly_set_quantity,
                         customer_emails_by_name.get(manuals_by_id[manual_id]["customer"] or "", ""),
                         planned_ship_at,
                         material_stock_status,
@@ -11737,6 +11980,60 @@ def new_order():
         products=products,
         product_customers=product_customers,
         default_ordered_at=datetime.now().date().isoformat(),
+    )
+
+
+@app.route("/admin/orders/assembly-options")
+@permission_required("orders_manage")
+def order_assembly_options():
+    customer = request.args.get("customer", "")
+    try:
+        with get_db() as conn:
+            drawing_numbers = get_assembly_options_for_customer(conn, customer)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify({"assembly_drawing_numbers": drawing_numbers})
+
+
+@app.route("/admin/orders/assembly-definition")
+@permission_required("orders_manage")
+def order_assembly_definition():
+    customer = request.args.get("customer", "")
+    requested_drawing_no = request.args.get("assembly_drawing_no", "")
+    try:
+        with get_db() as conn:
+            drawing_numbers = get_assembly_options_for_customer(conn, customer)
+            canonical_drawing_no = next(
+                (
+                    drawing_no
+                    for drawing_no in drawing_numbers
+                    if drawing_no.casefold() == requested_drawing_no.strip().casefold()
+                ),
+                None,
+            )
+            if not requested_drawing_no.strip():
+                raise ValueError("请选择组装图号")
+            if canonical_drawing_no is None:
+                return jsonify({"error": "未找到该客户的组装图号配置"}), 404
+            definition = get_assembly_definition(
+                conn, customer, canonical_drawing_no
+            )
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    return jsonify(
+        {
+            "assembly_drawing_no": canonical_drawing_no,
+            "items": [
+                {
+                    "manual_id": row["manual_id"],
+                    "drawing_no": row["drawing_no"],
+                    "product_name": row["product_name"],
+                    "quantity_per_set": row["quantity_per_set"],
+                }
+                for row in definition
+            ],
+        }
     )
 
 
@@ -11894,6 +12191,9 @@ def edit_order(order_id):
         if quantity_value <= 0:
             flash("订单数量必须大于 0", "error")
             return redirect(url_for("edit_order", order_id=order_id))
+        if quantity_value > MAX_ORDER_QUANTITY:
+            flash(f"订单数量不能超过 {MAX_ORDER_QUANTITY}", "error")
+            return redirect(url_for("edit_order", order_id=order_id))
 
         now = datetime.utcnow().isoformat(timespec="seconds")
         with get_db() as conn:
@@ -11902,6 +12202,8 @@ def edit_order(order_id):
                 f"""
                 SELECT product_orders.manual_id,
                        product_orders.customer,
+                       product_orders.assembly_drawing_no,
+                       product_orders.assembly_set_quantity,
                        COALESCE(
                            shipments.shipped_total,
                            product_orders.shipped_quantity,
@@ -11935,6 +12237,12 @@ def edit_order(order_id):
             ).fetchone()
             if manual is None:
                 flash("请选择有效的产品图号", "error")
+                return redirect(url_for("edit_order", order_id=order_id))
+            if (
+                current_order["assembly_drawing_no"]
+                and (manual["customer"] or "") != (current_order["customer"] or "")
+            ):
+                flash("组装订单不能更换为其他客户的产品", "error")
                 return redirect(url_for("edit_order", order_id=order_id))
             if current_order["has_shipment_reference"] and (
                 manual_id_value != current_order["manual_id"]
@@ -12381,6 +12689,23 @@ def edit_manual(manual_id):
         if assembly_components and not customer:
             flash("请先选择客户，再配置所属组装件", "error")
             return render_edit_manual_page(manual, submitted_assembly_components)
+        if customer != (manual["customer"] or ""):
+            with get_db() as conn:
+                has_assembly_order = conn.execute(
+                    """
+                    SELECT 1
+                    FROM product_orders
+                    WHERE manual_id = ?
+                      AND TRIM(assembly_drawing_no) != ''
+                    LIMIT 1
+                    """,
+                    (manual_id,),
+                ).fetchone()
+            if has_assembly_order:
+                flash("已有组装订单的产品不能直接更换客户", "error")
+                return render_edit_manual_page(
+                    manual, submitted_assembly_components
+                )
 
         saved_files = []
         if uploads:

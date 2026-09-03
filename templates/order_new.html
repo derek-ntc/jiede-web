@@ -4,7 +4,7 @@
   <section class="page-head">
     <div>
       <h1>新增产品订单</h1>
-      <p>一个订单可添加多个产品，客户名称按产品资料自动匹配。</p>
+      <p>一个订单可添加多个产品，可按产品图号或产品名称选择，客户名称按产品资料自动匹配。</p>
     </div>
     <div class="form-actions">
       <a class="button" href="{{ url_for('import_orders') }}">Excel导入订单</a>
@@ -14,7 +14,13 @@
   </section>
 
   <section class="panel">
-    <form method="post" class="stack-form order-entry-form" data-order-entry>
+    <form
+      method="post"
+      class="stack-form order-entry-form"
+      data-order-entry
+      data-assembly-options-url="{{ url_for('order_assembly_options') }}"
+      data-assembly-definition-url="{{ url_for('order_assembly_definition') }}"
+    >
       <div class="grid-form">
         <label>
           订单号
@@ -25,14 +31,33 @@
           <input type="date" name="ordered_at" value="{{ default_ordered_at }}" required>
         </label>
         <label>
-          客户筛选
-          <input type="text" list="order-customer-options" placeholder="输入或选择客户" data-order-customer-filter>
-          <datalist id="order-customer-options">
-            {% for customer in product_customers %}
-              <option value="{{ customer }}"></option>
-            {% endfor %}
-          </datalist>
+          订单交货期（自动填入清单）
+          <input type="date" data-order-delivery-date>
         </label>
+        <label>
+          客户
+          <select name="customer" data-order-customer-filter required>
+            <option value="">请选择客户</option>
+            {% for customer in product_customers %}
+              <option value="{{ customer }}">{{ customer }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          组装图号（可选）
+          <select name="assembly_drawing_no" data-order-assembly-drawing disabled>
+            <option value="">先选择客户</option>
+          </select>
+        </label>
+        <label>
+          组装数量（套）
+          <input type="number" name="assembly_set_quantity" min="1" max="2147483647" step="1" data-order-assembly-quantity disabled>
+        </label>
+      </div>
+
+      <div class="form-actions">
+        <button class="secondary" type="button" data-generate-assembly-order disabled>生成配件清单</button>
+        <span class="empty-text" data-assembly-order-status aria-live="polite">选择客户和组装图号后，可按套数自动生成配件数量。</span>
       </div>
 
       <div class="table-wrap input-table-wrap">
@@ -54,19 +79,28 @@
           <tbody data-order-items>
             <tr data-order-item>
               <td data-label="产品图号">
-                <select name="manual_id" data-product-select required>
+                <select name="manual_id" data-product-select data-product-drawing-select required>
                   <option value="" data-product-name="" data-customer="">请选择产品图号</option>
                   {% for product in products %}
-                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}">
+                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}" data-drawing-no="{{ product.drawing_no or '' }}">
                       {{ product.drawing_no or "未填图号" }}
                     </option>
                   {% endfor %}
                 </select>
               </td>
-              <td data-label="产品名称" data-product-name-cell>-</td>
+              <td data-label="产品名称">
+                <select data-product-name-select required>
+                  <option value="" data-product-name="" data-customer="">请选择产品名称</option>
+                  {% for product in products %}
+                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}" data-drawing-no="{{ product.drawing_no or '' }}">
+                      {{ product.product_name }} / {{ product.drawing_no or "未填图号" }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </td>
               <td data-label="客户名称" data-customer-name-cell>-</td>
               <td data-label="订单数量">
-                <input type="number" name="quantity" min="1" step="1" required>
+                <input type="number" name="quantity" min="1" max="2147483647" step="1" required>
               </td>
               <td data-label="计划发货时间">
                 <input type="date" name="planned_ship_at" required>
@@ -111,103 +145,5 @@
   </section>
 {% endblock %}
 {% block scripts %}
-  <script>
-    (() => {
-      const form = document.querySelector("[data-order-entry]");
-      if (!form) return;
-
-      const body = form.querySelector("[data-order-items]");
-      const addButton = form.querySelector("[data-add-row]");
-      const customerFilter = form.querySelector("[data-order-customer-filter]");
-
-      function syncRow(row) {
-        const select = row.querySelector("[data-product-select]");
-        const option = select.selectedOptions[0];
-        row.querySelector("[data-product-name-cell]").textContent = option?.dataset.productName || "-";
-        row.querySelector("[data-customer-name-cell]").textContent = option?.dataset.customer || "-";
-      }
-
-      function activeCustomer() {
-        return (customerFilter?.value || "").trim().toLowerCase();
-      }
-
-      function filterProductSelect(select) {
-        const customer = activeCustomer();
-        let selectedStillVisible = !customer || (select.selectedOptions[0]?.dataset.customer || "").toLowerCase().includes(customer);
-        Array.from(select.options).forEach((option) => {
-          if (!option.value) {
-            option.hidden = false;
-            option.disabled = false;
-            return;
-          }
-          const matches = !customer || (option.dataset.customer || "").toLowerCase().includes(customer);
-          option.hidden = !matches;
-          option.disabled = !matches;
-        });
-        if (!selectedStillVisible) {
-          select.value = "";
-        }
-      }
-
-      function filterAllProductSelects() {
-        body.querySelectorAll("[data-product-select]").forEach((select) => {
-          filterProductSelect(select);
-          syncRow(select.closest("[data-order-item]"));
-        });
-      }
-
-      function updateRemoveState() {
-        const rows = body.querySelectorAll("[data-order-item]");
-        rows.forEach((row) => {
-          row.querySelector("[data-remove-row]").disabled = rows.length === 1;
-        });
-      }
-
-      body.addEventListener("change", (event) => {
-        if (event.target.matches("[data-product-select]")) {
-          syncRow(event.target.closest("[data-order-item]"));
-        }
-      });
-
-      customerFilter?.addEventListener("input", filterAllProductSelects);
-      customerFilter?.addEventListener("change", filterAllProductSelects);
-
-      body.addEventListener("click", (event) => {
-        if (!event.target.matches("[data-remove-row]")) return;
-        event.target.closest("[data-order-item]").remove();
-        updateRemoveState();
-      });
-
-      addButton.addEventListener("click", () => {
-        const row = body.querySelector("[data-order-item]").cloneNode(true);
-        row.querySelector("[data-product-select]").value = "";
-        row.querySelectorAll("input").forEach((input) => {
-          if (input.type === "checkbox") {
-            input.checked = false;
-          } else {
-            input.value = "";
-          }
-        });
-        syncRow(row);
-        body.appendChild(row);
-        filterProductSelect(row.querySelector("[data-product-select]"));
-        updateRemoveState();
-      });
-
-      body.querySelectorAll("[data-order-item]").forEach(syncRow);
-      filterAllProductSelects();
-      updateRemoveState();
-
-      form.addEventListener("submit", () => {
-        body.querySelectorAll("[data-order-item]").forEach((row) => {
-          row.querySelectorAll("[data-status-checkbox]").forEach((checkbox) => {
-            const target = row.querySelector(`input[type="hidden"][name="${checkbox.dataset.statusTarget}"]`);
-            if (target) {
-              target.value = checkbox.checked ? "1" : "";
-            }
-          });
-        });
-      });
-    })();
-  </script>
+  <script src="{{ url_for('static', filename='order_entry.js', v=static_version) }}"></script>
 {% endblock %}

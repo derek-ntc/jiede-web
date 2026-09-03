@@ -11,7 +11,7 @@
     <section class="page-head index-head">
       <div>
         <h1>利万产品技术参数资料</h1>
-        <p>按产品图号、产品名称、供应商或客户搜索。</p>
+        <p>按产品图号、产品名称、组装图号、供应商或客户搜索。</p>
       </div>
       <div class="head-stat">
         <strong>{{ manuals|length }}</strong>
@@ -23,7 +23,7 @@
         </div>
       {% endif %}
       <form class="search" method="get">
-        <input type="search" name="q" value="{{ query }}" placeholder="搜索图号、名称、供应商、客户" data-auto-submit-search>
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索图号、名称、组装图号、供应商、客户" data-auto-submit-search>
         <select name="supplier" aria-label="供应商分类" onchange="this.form.submit()">
           <option value="">供应商分类：全部</option>
           {% for supplier in suppliers %}
@@ -45,24 +45,61 @@
       </form>
     </section>
 
+    {% if can_edit_products %}
+      <form
+        id="product-assembly-batch-form"
+        class="shipped-export-bar product-assembly-batch-bar"
+        method="post"
+        action="{{ url_for('batch_set_product_assembly_components') }}"
+        data-product-assembly-batch
+      >
+        <span class="empty-text" data-product-selection-count>已选择 0 个产品</span>
+        <label class="inline-date-field">
+          组装图号
+          <input type="text" name="assembly_drawing_no" placeholder="例如 ASM-100" required>
+        </label>
+        <label class="inline-date-field">
+          每套配件数量
+          <input type="number" name="quantity_per_set" min="1" max="2147483647" step="1" required>
+        </label>
+        <input type="hidden" name="return_q" value="{{ query }}">
+        <input type="hidden" name="return_supplier" value="{{ selected_supplier }}">
+        <input type="hidden" name="return_customer" value="{{ selected_customer }}">
+        <input type="hidden" name="return_sort" value="{{ sort }}">
+        <input type="hidden" name="return_direction" value="{{ direction }}">
+        <button type="submit" data-product-assembly-submit disabled>批量设置组装属性</button>
+      </form>
+    {% endif %}
+
     <div class="table-wrap product-table-wrap">
       <table class="product-table">
         <colgroup>
+          {% if can_edit_products %}<col style="width: 48px;">{% endif %}
+          <col style="width: 150px;">
           <col style="width: 170px;">
-          <col style="width: 280px;">
+          <col style="width: 130px;">
+          <col style="width: 130px;">
+          <col style="width: 220px;">
+          <col style="width: 120px;">
           <col style="width: 180px;">
-          <col style="width: 180px;">
-          <col style="width: 132px;">
-          <col style="width: 260px;">
-          <col style="width: 360px;">
-          <col style="width: 280px;">
+          <col style="width: 300px;">
+          <col style="width: 240px;">
         </colgroup>
       <thead>
         <tr>
+          {% if can_edit_products %}
+            <th class="shipment-select-head">
+              <label class="shipment-select-all-label">
+                <input type="checkbox" data-product-select-all>
+                <span>选择</span>
+              </label>
+            </th>
+          {% endif %}
           <th>{{ sort_link("产品图号", "drawing_no") }}</th>
           <th>{{ sort_link("产品名称", "product_name") }}</th>
           <th>{{ sort_link("供应商", "supplier") }}</th>
           <th>{{ sort_link("客户", "customer") }}</th>
+          <th>所属组装件</th>
           <th>{{ sort_link("修改时间", "updated_at") }}</th>
           <th>{{ sort_link("备注", "remark") }}</th>
           <th>材料信息</th>
@@ -72,10 +109,27 @@
       <tbody>
         {% for manual in manuals %}
           <tr>
+            {% if can_edit_products %}
+              <td class="shipment-select-cell" data-label="选择">
+                <input type="checkbox" name="manual_id" value="{{ manual.id }}" form="product-assembly-batch-form" data-product-row-select aria-label="选择产品 {{ manual.drawing_no or manual.product_name }} {{ manual.product_name }}">
+              </td>
+            {% endif %}
             <td data-label="产品图号">{{ manual.drawing_no or "-" }}</td>
             <td data-label="产品名称">{{ manual.product_name }}</td>
             <td data-label="供应商">{{ manual.supplier or "-" }}</td>
             <td data-label="客户">{{ manual.customer or "-" }}</td>
+            <td data-label="所属组装件">
+              {% set assembly_components = assembly_components_by_manual.get(manual.id, []) %}
+              {% if assembly_components %}
+                <div class="product-assembly-list">
+                  {% for component in assembly_components %}
+                    <div>{{ component.assembly_drawing_no }} × {{ component.quantity_per_set }}</div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <span class="empty-text">未设置</span>
+              {% endif %}
+            </td>
             <td data-label="修改时间">{{ manual.updated_at | datetime }}</td>
             <td data-label="备注">{{ manual.remark or "-" }}</td>
             <td data-label="材料信息">
@@ -115,7 +169,7 @@
           </tr>
         {% else %}
           <tr>
-            <td colspan="8" class="empty">暂无产品资料</td>
+            <td colspan="{% if can_edit_products %}10{% else %}9{% endif %}" class="empty">暂无产品资料</td>
           </tr>
         {% endfor %}
       </tbody>
@@ -141,7 +195,7 @@
       const table = document.querySelector(".product-table");
       if (!table || window.matchMedia("(max-width: 760px)").matches) return;
 
-      const storageKey = "factory-web.product-column-widths";
+      const storageKey = "factory-web.product-column-widths.v2.{{ 'editor' if can_edit_products else 'readonly' }}";
       const headers = Array.from(table.querySelectorAll("thead th"));
       const colgroup = table.querySelector("colgroup");
       const columns = colgroup ? Array.from(colgroup.querySelectorAll("col")) : [];
@@ -168,7 +222,8 @@
           document.body.classList.add("is-resizing-column");
 
           function resize(moveEvent) {
-            const nextWidth = Math.max(88, startWidth + moveEvent.clientX - startX);
+            const isSelectionColumn = index === 0 && document.querySelector("[data-product-select-all]");
+            const nextWidth = Math.max(isSelectionColumn ? 44 : 72, startWidth + moveEvent.clientX - startX);
             header.style.width = `${nextWidth}px`;
             if (columns[index]) {
               columns[index].style.width = `${nextWidth}px`;
@@ -191,4 +246,5 @@
       });
     })();
   </script>
+  <script src="{{ url_for('static', filename='product_list.js', v=static_version) }}"></script>
 {% endblock %}

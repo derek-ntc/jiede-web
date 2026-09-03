@@ -28,6 +28,16 @@
           客户名称
           <input type="text" value="{{ order.product_customer or '-' }}" data-customer-display disabled>
         </label>
+        {% if order.assembly_drawing_no %}
+          <label>
+            组装图号
+            <input type="text" value="{{ order.assembly_drawing_no }}" disabled>
+          </label>
+          <label>
+            组装套数
+            <input type="text" value="{{ order.assembly_set_quantity }} 套" disabled>
+          </label>
+        {% endif %}
         <label>
           客户邮箱
           <input type="email" name="customer_email" value="{{ order.customer_email or '' }}" placeholder="客户收件邮箱">
@@ -42,7 +52,7 @@
         </label>
         <label>
           订单数量
-          <input type="number" name="quantity" min="1" step="1" value="{{ order.quantity }}" required>
+          <input type="number" name="quantity" min="1" max="2147483647" step="1" value="{{ order.quantity }}" required>
         </label>
         <label>
           计划发货时间

@@ -29,7 +29,7 @@
       </div>
       <div class="section-actions">
         <form class="search compact-search" method="get">
-          <input type="search" name="q" value="{{ query }}" placeholder="搜索订单号、图号、产品名称、客户、供应商、库存、备注、纸箱、最近发货" data-auto-submit-search>
+          <input type="search" name="q" value="{{ query }}" placeholder="搜索订单号、组装图号、产品图号、产品名称、客户、供应商、库存、备注、纸箱、最近发货" data-auto-submit-search>
           <select name="customer" aria-label="客户筛选" onchange="this.form.submit()">
             <option value="">客户：全部</option>
             {% for customer in customers %}
@@ -75,6 +75,8 @@
         <colgroup>
           {% if can_manage_orders %}<col style="width: 48px;">{% endif %}
           <col style="width: 92px;">
+          <col style="width: 104px;">
+          <col style="width: 66px;">
           <col style="width: 84px;">
           <col style="width: 96px;">
           <col style="width: 128px;">
@@ -102,6 +104,8 @@
               </th>
             {% endif %}
             <th>{{ sort_link("订单号", "order_no") }}</th>
+            <th>{{ sort_link("组装图号", "assembly_drawing_no") }}</th>
+            <th>{{ sort_link("组装套数", "assembly_set_quantity") }}</th>
             <th>{{ sort_link("下单", "ordered_at") }}</th>
             <th>{{ sort_link("图号", "drawing_no") }}</th>
             <th>{{ sort_link("产品", "product_name") }}</th>
@@ -132,6 +136,8 @@
                 </td>
               {% endif %}
               <td data-label="订单号">{{ order.order_no }}</td>
+              <td data-label="组装图号">{{ order.assembly_drawing_no or "-" }}</td>
+              <td data-label="组装套数">{% if order.assembly_drawing_no %}{{ order.assembly_set_quantity }} 套{% else %}-{% endif %}</td>
               <td data-label="下单时间">{{ order.ordered_at }}</td>
               <td data-label="产品图号">
                 <a href="{{ url_for('manual_detail', manual_id=order.manual_id) }}">{{ order.drawing_no or "-" }}</a>
@@ -198,7 +204,7 @@
             </tr>
           {% else %}
             <tr>
-              <td colspan="{% if can_manage_orders %}17{% else %}16{% endif %}" class="empty">暂无产品订单</td>
+              <td colspan="{% if can_manage_orders %}19{% else %}18{% endif %}" class="empty">暂无产品订单</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -240,13 +246,13 @@
       if (!wrap || !table || window.matchMedia("(max-width: 760px)").matches) return;
 
       const mainHeaders = Array.from(table.querySelectorAll("thead th"));
-      const storageKey = "factory-web.order-column-widths.v2";
+      const storageKey = "factory-web.order-column-widths.v3";
       const savedWidths = JSON.parse(localStorage.getItem(storageKey) || "[]");
       const mainCols = Array.from(table.querySelectorAll("col"));
       const sampleRows = Array.from(table.querySelectorAll("tbody tr")).slice(0, 50);
       const maxAutoWidths = [
         {% if can_manage_orders %}48,{% endif %}
-        104, 88, 104, 142, 104, 66, 68, 66, 92, 74, 60, 92, 60, 92, 132, 132
+        104, 112, 72, 88, 104, 142, 104, 66, 68, 66, 92, 74, 60, 92, 60, 92, 132, 132
       ];
 
       if (stickyHead) {
