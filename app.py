@@ -501,6 +501,7 @@ def init_db():
         ensure_arrival_record_tables(conn)
         ensure_inventory_tables(conn)
         ensure_assembly_shipping_tables(conn)
+        ensure_finance_tables(conn)
         ensure_feedback_table(conn)
         ensure_production_followup_tables(conn)
         ensure_indexes(conn)
@@ -527,6 +528,8 @@ def ensure_columns(conn):
         "qr_code": "ALTER TABLE manuals ADD COLUMN qr_code TEXT NOT NULL DEFAULT ''",
         "default_location_id": "ALTER TABLE manuals ADD COLUMN default_location_id INTEGER",
         "min_stock": "ALTER TABLE manuals ADD COLUMN min_stock INTEGER NOT NULL DEFAULT 0",
+        "unit_price_minor": "ALTER TABLE manuals ADD COLUMN unit_price_minor INTEGER",
+        "currency": "ALTER TABLE manuals ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'",
     }
     for column, statement in migrations.items():
         if column not in existing:
@@ -659,6 +662,19 @@ def ensure_assembly_shipping_tables(conn):
         )
         """
     )
+    existing_item_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(assembly_shipment_items)").fetchall()
+    }
+    item_migrations = {
+        "unit_price_minor": "ALTER TABLE assembly_shipment_items ADD COLUMN unit_price_minor INTEGER",
+        "currency": "ALTER TABLE assembly_shipment_items ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'",
+        "price_recorded_by": "ALTER TABLE assembly_shipment_items ADD COLUMN price_recorded_by TEXT NOT NULL DEFAULT ''",
+        "price_recorded_at": "ALTER TABLE assembly_shipment_items ADD COLUMN price_recorded_at TEXT NOT NULL DEFAULT ''",
+    }
+    for column, statement in item_migrations.items():
+        if column not in existing_item_columns:
+            conn.execute(statement)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS assembly_shipment_allocations (
@@ -802,6 +818,10 @@ def ensure_order_table(conn):
         "signature_expires_at": "ALTER TABLE product_order_shipments ADD COLUMN signature_expires_at TEXT NOT NULL DEFAULT ''",
         "photo_upload_token": "ALTER TABLE product_order_shipments ADD COLUMN photo_upload_token TEXT NOT NULL DEFAULT ''",
         "remark": "ALTER TABLE product_order_shipments ADD COLUMN remark TEXT NOT NULL DEFAULT ''",
+        "unit_price_minor": "ALTER TABLE product_order_shipments ADD COLUMN unit_price_minor INTEGER",
+        "currency": "ALTER TABLE product_order_shipments ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'",
+        "price_recorded_by": "ALTER TABLE product_order_shipments ADD COLUMN price_recorded_by TEXT NOT NULL DEFAULT ''",
+        "price_recorded_at": "ALTER TABLE product_order_shipments ADD COLUMN price_recorded_at TEXT NOT NULL DEFAULT ''",
     }
     for column, statement in shipment_migrations.items():
         if column not in existing_shipment_columns:
@@ -1083,6 +1103,8 @@ def ensure_user_table(conn):
         "can_manage_production_followups": "ALTER TABLE users ADD COLUMN can_manage_production_followups INTEGER NOT NULL DEFAULT 0",
         "can_create_products": "ALTER TABLE users ADD COLUMN can_create_products INTEGER NOT NULL DEFAULT 1",
         "can_edit_products": "ALTER TABLE users ADD COLUMN can_edit_products INTEGER NOT NULL DEFAULT 1",
+        "can_view_prices": "ALTER TABLE users ADD COLUMN can_view_prices INTEGER NOT NULL DEFAULT 0",
+        "can_manage_finance": "ALTER TABLE users ADD COLUMN can_manage_finance INTEGER NOT NULL DEFAULT 0",
     }
     for column, statement in migrations.items():
         if column not in existing:
@@ -1118,7 +1140,80 @@ def ensure_customer_table(conn):
         )
         """
     )
+    existing = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(customers)").fetchall()
+    }
+    migrations = {
+        "invoice_title": "ALTER TABLE customers ADD COLUMN invoice_title TEXT NOT NULL DEFAULT ''",
+        "tax_id": "ALTER TABLE customers ADD COLUMN tax_id TEXT NOT NULL DEFAULT ''",
+        "registered_address": "ALTER TABLE customers ADD COLUMN registered_address TEXT NOT NULL DEFAULT ''",
+        "registered_phone": "ALTER TABLE customers ADD COLUMN registered_phone TEXT NOT NULL DEFAULT ''",
+        "bank_name": "ALTER TABLE customers ADD COLUMN bank_name TEXT NOT NULL DEFAULT ''",
+        "bank_account": "ALTER TABLE customers ADD COLUMN bank_account TEXT NOT NULL DEFAULT ''",
+        "invoice_email": "ALTER TABLE customers ADD COLUMN invoice_email TEXT NOT NULL DEFAULT ''",
+    }
+    for column, statement in migrations.items():
+        if column not in existing:
+            conn.execute(statement)
     sync_product_customers(conn)
+
+
+def ensure_finance_tables(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS finance_invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            customer_name TEXT NOT NULL,
+            invoice_title TEXT NOT NULL DEFAULT '',
+            tax_id TEXT NOT NULL DEFAULT '',
+            registered_address TEXT NOT NULL DEFAULT '',
+            registered_phone TEXT NOT NULL DEFAULT '',
+            bank_name TEXT NOT NULL DEFAULT '',
+            bank_account TEXT NOT NULL DEFAULT '',
+            invoice_email TEXT NOT NULL DEFAULT '',
+            currency TEXT NOT NULL,
+            total_minor INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            invoice_no TEXT NOT NULL DEFAULT '',
+            invoice_date TEXT NOT NULL DEFAULT '',
+            payment_date TEXT NOT NULL DEFAULT '',
+            finance_remark TEXT NOT NULL DEFAULT '',
+            voided_by TEXT NOT NULL DEFAULT '',
+            voided_at TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL,
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS finance_invoice_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            active_claim_key TEXT UNIQUE,
+            order_no TEXT NOT NULL DEFAULT '',
+            assembly_batch_id INTEGER,
+            assembly_drawing_no TEXT NOT NULL DEFAULT '',
+            shipped_at TEXT NOT NULL,
+            drawing_no TEXT NOT NULL DEFAULT '',
+            product_name TEXT NOT NULL DEFAULT '',
+            quantity INTEGER NOT NULL,
+            unit_price_minor INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            line_total_minor INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (invoice_id) REFERENCES finance_invoices(id) ON DELETE CASCADE,
+            CHECK (source_type IN ('ordinary', 'assembly_item'))
+        )
+        """
+    )
 
 
 def ensure_customer_exists(conn, name, now=None):
@@ -1449,6 +1544,36 @@ def ensure_indexes(conn):
         """
         CREATE INDEX IF NOT EXISTS idx_product_orders_order_no
         ON product_orders (order_no)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_finance_invoices_customer_id
+        ON finance_invoices (customer_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_finance_invoices_status
+        ON finance_invoices (status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_finance_invoices_invoice_date
+        ON finance_invoices (invoice_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_finance_invoice_items_invoice_id
+        ON finance_invoice_items (invoice_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_finance_invoice_items_source
+        ON finance_invoice_items (source_type, source_id)
         """
     )
     conn.execute(
