@@ -9922,9 +9922,10 @@ def fetch_inventory_product_by_code(conn, code):
     if not code:
         return None
     ensure_all_product_inventory_codes(conn)
+    projection = ", ".join(MANUAL_SAFE_COLUMNS)
     return conn.execute(
-        """
-        SELECT *
+        f"""
+        SELECT {projection}
         FROM manuals
         WHERE sku = ? OR barcode = ? OR qr_code = ?
         LIMIT 1
@@ -10061,9 +10062,10 @@ def inventory_api_product():
 def inventory_form_context(selected_manual_id=None, selected_order_id=None, selected_order_no=""):
     with get_db() as conn:
         ensure_all_product_inventory_codes(conn)
+        projection = ", ".join(MANUAL_SAFE_COLUMNS)
         products = conn.execute(
-            """
-            SELECT *
+            f"""
+            SELECT {projection}
             FROM manuals
             ORDER BY product_name COLLATE NOCASE ASC, id ASC
             """
@@ -13199,7 +13201,7 @@ def copy_manual(manual_id):
     current_user = current_admin_username()
     now = datetime.utcnow().isoformat(timespec="seconds")
     with get_db() as conn:
-        manual = conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)).fetchone()
+        manual = fetch_manual_by_id(conn, manual_id)
         if manual is None:
             abort(404)
         files = get_manual_files(conn, manual_id)
@@ -13273,7 +13275,7 @@ def copy_manual(manual_id):
 @permission_required("product_edit")
 def delete_manual(manual_id):
     with get_db() as conn:
-        manual = conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)).fetchone()
+        manual = fetch_manual_by_id(conn, manual_id)
         if manual is None:
             abort(404)
         files = get_manual_files(conn, manual_id)

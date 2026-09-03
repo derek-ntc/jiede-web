@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import app
 
@@ -278,6 +279,7 @@ class ProductPageTestCase(unittest.TestCase):
         can_edit_products=0,
         can_create_products=0,
         can_view_prices=0,
+        can_manage_warehouse_inventory=0,
     ):
         now = "2026-09-03T10:00:00"
         conn.execute(
@@ -285,14 +287,16 @@ class ProductPageTestCase(unittest.TestCase):
             INSERT INTO users (
                 username, password_hash, role, active,
                 can_manage_products, can_create_products, can_edit_products,
-                can_view_prices, can_manage_finance, created_at, updated_at
-            ) VALUES (?, 'hash', 'operator', 1, 0, ?, ?, ?, 0, ?, ?)
+                can_view_prices, can_manage_finance,
+                can_manage_warehouse_inventory, created_at, updated_at
+            ) VALUES (?, 'hash', 'operator', 1, 0, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 username,
                 can_create_products,
                 can_edit_products,
                 can_view_prices,
+                can_manage_warehouse_inventory,
                 now,
                 now,
             ),
@@ -322,6 +326,32 @@ class ProductPageTestCase(unittest.TestCase):
         }
         data.update(overrides)
         return data
+
+    def capture_request_sql(self, request):
+        statements = []
+        sqlite_connect = app.sqlite3.connect
+
+        def traced_connect(*args, **kwargs):
+            conn = sqlite_connect(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(app.sqlite3, "connect", side_effect=traced_connect):
+            response = request()
+        return response, statements
+
+    def assert_manual_selects_exclude_price(self, statements):
+        manual_selects = []
+        for statement in statements:
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select") and " from manuals" in normalized:
+                manual_selects.append(normalized)
+
+        self.assertTrue(manual_selects, statements)
+        for statement in manual_selects:
+            self.assertNotIn("unit_price_minor", statement)
+            self.assertNotRegex(statement, r"\bcurrency\b")
+            self.assertNotRegex(statement, r"select\s+(?:manuals\.)?\*")
 
 
 class ProductPageSplitTests(ProductPageTestCase):
@@ -530,6 +560,76 @@ class ProductCurrentPriceTests(ProductPageTestCase):
             (manual["unit_price_minor"], manual["currency"]),
             (1234, "CNY"),
         )
+
+    def test_warehouse_routes_use_non_price_manual_projections(self):
+        with app.get_db() as conn:
+            self.create_user(
+                conn,
+                "warehouse-only",
+                can_manage_warehouse_inventory=1,
+            )
+        self.login_as("warehouse-only")
+
+        response, statements = self.capture_request_sql(
+            lambda: self.client.get("/admin/inventory/api/product?code=SKU-100")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["product"]["id"], self.manual_id)
+        self.assert_manual_selects_exclude_price(statements)
+
+        for path in (
+            "/admin/inventory/inbound",
+            "/admin/inventory/outbound",
+            "/admin/inventory/adjust",
+        ):
+            with self.subTest(path=path):
+                response, statements = self.capture_request_sql(
+                    lambda path=path: self.client.get(path)
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("分栏产品", response.get_data(as_text=True))
+                self.assert_manual_selects_exclude_price(statements)
+
+    def test_product_copy_and_delete_use_non_price_manual_projections(self):
+        with app.get_db() as conn:
+            conn.execute("DELETE FROM manual_files WHERE manual_id = ?", (self.manual_id,))
+            conn.execute(
+                """
+                UPDATE manuals
+                SET filename = '', original_filename = '', file_type = 'file'
+                WHERE id = ?
+                """,
+                (self.manual_id,),
+            )
+        self.login_as("plain-editor")
+
+        response, statements = self.capture_request_sql(
+            lambda: self.client.post(f"/admin/{self.manual_id}/copy")
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assert_manual_selects_exclude_price(statements)
+        with app.get_db() as conn:
+            copied = conn.execute(
+                """
+                SELECT id, product_name, unit_price_minor, currency
+                FROM manuals
+                WHERE product_name = '分栏产品 - 副本'
+                """
+            ).fetchone()
+        self.assertIsNotNone(copied)
+        self.assertEqual((copied["unit_price_minor"], copied["currency"]), (None, "CNY"))
+
+        response, statements = self.capture_request_sql(
+            lambda: self.client.post(f"/admin/{copied['id']}/delete")
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assert_manual_selects_exclude_price(statements)
+        with app.get_db() as conn:
+            deleted = conn.execute(
+                "SELECT id FROM manuals WHERE id = ?",
+                (copied["id"],),
+            ).fetchone()
+        self.assertIsNone(deleted)
 
     def test_editor_without_price_permission_cannot_alter_price_by_direct_post(self):
         self.login_as("plain-editor")
