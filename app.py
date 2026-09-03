@@ -120,6 +120,15 @@ PRODUCTION_STAGE_LABELS = {
     "bending": "折弯",
     "welding": "焊接",
 }
+CUSTOMER_INVOICE_FIELDS = (
+    "invoice_title",
+    "tax_id",
+    "registered_address",
+    "registered_phone",
+    "bank_name",
+    "bank_account",
+    "invoice_email",
+)
 DISABLED_ENDPOINT_PREFIXES = (
     "admin_powder_coating",
     "export_powder_coating",
@@ -1979,6 +1988,17 @@ def get_customers_with_conn(conn):
         ORDER BY customer
         """
     ).fetchall()
+
+
+def customer_invoice_snapshot(customer):
+    snapshot = {"customer_name": str(customer["name"] or "")}
+    snapshot.update(
+        {
+            field: str(customer[field] or "")
+            for field in CUSTOMER_INVOICE_FIELDS
+        }
+    )
+    return snapshot
 
 
 def get_suppliers_with_conn(conn):
@@ -6945,9 +6965,11 @@ def admin_customers():
                OR email LIKE ?
                OR phone LIKE ?
                OR remark LIKE ?
+               OR invoice_title LIKE ?
+               OR tax_id LIKE ?
         """
         like = f"%{query}%"
-        params.extend([like, like, like, like, like, like])
+        params.extend([like, like, like, like, like, like, like, like])
     sql += " ORDER BY name COLLATE NOCASE ASC, id DESC"
     with get_db() as conn:
         customers = conn.execute(sql, params).fetchall()
@@ -6994,6 +7016,60 @@ def edit_customer(customer_id):
     return redirect(url_for("admin_customers"))
 
 
+@app.route("/admin/customers/<int:customer_id>/billing", methods=["GET", "POST"])
+@login_required
+def customer_billing(customer_id):
+    can_manage_customers = user_has_permission("customers")
+    can_manage_finance = user_has_permission("finance_manage")
+    if not can_manage_customers and not can_manage_finance:
+        flash("当前账号没有权限查看客户开票信息", "error")
+        return redirect(url_for("admin_index"))
+    if request.method == "POST" and not can_manage_customers:
+        flash("当前账号没有权限修改客户开票信息", "error")
+        return redirect(url_for("customer_billing", customer_id=customer_id))
+
+    with get_db() as conn:
+        customer = conn.execute(
+            "SELECT * FROM customers WHERE id = ?",
+            (customer_id,),
+        ).fetchone()
+        if customer is None:
+            abort(404)
+
+        if request.method == "POST":
+            values = {
+                field: request.form.get(field, "").strip()
+                for field in CUSTOMER_INVOICE_FIELDS
+            }
+            if values["invoice_email"] and not re.fullmatch(
+                r"[^\s@]+@[^\s@]+\.[^\s@]+",
+                values["invoice_email"],
+            ):
+                flash("收票邮箱格式不正确", "error")
+                return redirect(
+                    url_for("customer_billing", customer_id=customer_id)
+                )
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE customers
+                SET invoice_title = ?, tax_id = ?, registered_address = ?,
+                    registered_phone = ?, bank_name = ?, bank_account = ?,
+                    invoice_email = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    *(values[field] for field in CUSTOMER_INVOICE_FIELDS),
+                    now,
+                    customer_id,
+                ),
+            )
+            flash("客户开票信息已保存", "success")
+            return redirect(url_for("customer_billing", customer_id=customer_id))
+
+    return render_template("customer_billing.html", customer=customer)
+
+
 @app.route("/admin/customers/<int:customer_id>/delete", methods=["POST"])
 @permission_required("customers")
 def delete_customer(customer_id):
@@ -7004,6 +7080,13 @@ def delete_customer(customer_id):
         ).fetchone()
         if customer is None:
             abort(404)
+        finance_record = conn.execute(
+            "SELECT 1 FROM finance_invoices WHERE customer_id = ? LIMIT 1",
+            (customer_id,),
+        ).fetchone()
+        if finance_record is not None:
+            flash("该客户已有财务记录，不能删除", "error")
+            return redirect(url_for("admin_customers"))
         conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
 
     flash("客户信息已删除", "success")

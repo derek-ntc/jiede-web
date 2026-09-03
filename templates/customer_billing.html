@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}客户开票信息{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>客户开票信息</h1>
+      <p>{{ customer.name }}</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('admin_customers') if can_manage_customers else url_for('admin_index') }}">返回</a>
+  </section>
+
+  <section class="panel customer-billing-panel">
+    <div class="section-head">
+      <div>
+        <h2>开票资料</h2>
+        <span class="empty-text">财务开票时会保存这里信息的快照，后续修改不会影响历史单据。</span>
+      </div>
+    </div>
+    <form method="post" class="grid-form customer-billing-form">
+      <label class="wide">
+        开票抬头
+        <input type="text" name="invoice_title" value="{{ customer.invoice_title or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      <label>
+        纳税人识别号
+        <input type="text" name="tax_id" value="{{ customer.tax_id or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      <label>
+        收票邮箱
+        <input type="email" name="invoice_email" value="{{ customer.invoice_email or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      <label class="wide">
+        注册地址
+        <input type="text" name="registered_address" value="{{ customer.registered_address or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      <label>
+        注册电话
+        <input type="text" name="registered_phone" value="{{ customer.registered_phone or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      <label>
+        开户银行
+        <input type="text" name="bank_name" value="{{ customer.bank_name or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      <label class="wide">
+        银行账号
+        <input type="text" name="bank_account" value="{{ customer.bank_account or '' }}" {% if not can_manage_customers %}readonly{% endif %}>
+      </label>
+      {% if can_manage_customers %}
+        <div class="wide form-actions">
+          <button type="submit">保存开票信息</button>
+          <a class="button secondary" href="{{ url_for('admin_customers') }}">返回客户列表</a>
+        </div>
+      {% endif %}
+    </form>
+  </section>
+{% endblock %}

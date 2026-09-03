@@ -49,7 +49,7 @@
     <div class="section-head">
       <h2>客户列表</h2>
       <form class="search compact-search" method="get">
-        <input type="search" name="q" value="{{ query }}" placeholder="搜索客户、联系人、地址、邮箱、电话">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索客户、联系人、地址、邮箱、电话、开票抬头或税号">
         <button type="submit">搜索</button>
         {% if query %}
           <a class="button secondary" href="{{ url_for('admin_customers') }}">清除</a>
@@ -96,6 +96,7 @@
                 <div class="action-buttons">
                   <form id="customer-form-{{ customer.id }}" method="post" action="{{ url_for('edit_customer', customer_id=customer.id) }}"></form>
                   <button form="customer-form-{{ customer.id }}" type="submit">保存</button>
+                  <a class="button secondary" href="{{ url_for('customer_billing', customer_id=customer.id) }}">开票信息</a>
                   <form method="post" action="{{ url_for('delete_customer', customer_id=customer.id) }}" onsubmit="return confirm('确定删除这个客户信息吗？');">
                     <button class="danger" type="submit">删除</button>
                   </form>
