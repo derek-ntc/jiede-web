@@ -5194,6 +5194,541 @@ def fetch_shipment_by_photo_token(conn, token):
     ).fetchone()
 
 
+FINANCE_SOURCE_TYPES = frozenset({"ordinary", "assembly_item"})
+
+
+def finance_claim_key(source_type, source_id):
+    if source_type not in FINANCE_SOURCE_TYPES:
+        raise ValueError("发货记录来源无效")
+    try:
+        normalized_id = int(source_id)
+    except (TypeError, ValueError) as error:
+        raise ValueError("发货记录来源无效") from error
+    if normalized_id <= 0:
+        raise ValueError("发货记录来源无效")
+    return f"{source_type}:{normalized_id}"
+
+
+def _finance_source_select(source_type):
+    if source_type == "ordinary":
+        return """
+            SELECT 'ordinary' AS source_type,
+                   product_order_shipments.id AS source_id,
+                   COALESCE(
+                       NULLIF(TRIM(product_orders.customer), ''),
+                       TRIM(manuals.customer)
+                   ) AS customer_name,
+                   product_orders.order_no AS order_no,
+                   NULL AS assembly_batch_id,
+                   '' AS assembly_drawing_no,
+                   product_order_shipments.shipped_at AS shipped_at,
+                   manuals.drawing_no AS drawing_no,
+                   manuals.product_name AS product_name,
+                   product_order_shipments.shipped_quantity AS quantity,
+                   product_order_shipments.unit_price_minor AS unit_price_minor,
+                   product_order_shipments.currency AS currency,
+                   product_order_shipments.unit_price_minor
+                       * product_order_shipments.shipped_quantity AS line_total_minor
+            FROM product_order_shipments
+            JOIN product_orders
+              ON product_orders.id = product_order_shipments.order_id
+            JOIN manuals
+              ON manuals.id = product_orders.manual_id
+        """
+    if source_type == "assembly_item":
+        return """
+            SELECT 'assembly_item' AS source_type,
+                   assembly_shipment_items.id AS source_id,
+                   TRIM(assembly_shipment_batches.customer) AS customer_name,
+                   COALESCE((
+                       SELECT GROUP_CONCAT(product_orders.order_no, ' / ')
+                       FROM assembly_shipment_allocations
+                       JOIN product_orders
+                         ON product_orders.id = assembly_shipment_allocations.order_id
+                       WHERE assembly_shipment_allocations.item_id = assembly_shipment_items.id
+                   ), '') AS order_no,
+                   assembly_shipment_batches.id AS assembly_batch_id,
+                   assembly_shipment_batches.assembly_drawing_no AS assembly_drawing_no,
+                   assembly_shipment_batches.shipped_at AS shipped_at,
+                   assembly_shipment_items.drawing_no AS drawing_no,
+                   assembly_shipment_items.product_name AS product_name,
+                   assembly_shipment_items.shipped_quantity AS quantity,
+                   assembly_shipment_items.unit_price_minor AS unit_price_minor,
+                   assembly_shipment_items.currency AS currency,
+                   assembly_shipment_items.unit_price_minor
+                       * assembly_shipment_items.shipped_quantity AS line_total_minor
+            FROM assembly_shipment_items
+            JOIN assembly_shipment_batches
+              ON assembly_shipment_batches.id = assembly_shipment_items.batch_id
+        """
+    raise ValueError("发货记录来源无效")
+
+
+def _fetch_finance_source(conn, source_type, source_id):
+    claim_key = finance_claim_key(source_type, source_id)
+    row = conn.execute(
+        f"""
+        SELECT finance_source.*,
+               finance_invoice_items.invoice_id AS claimed_invoice_id
+        FROM ({_finance_source_select(source_type)}) AS finance_source
+        LEFT JOIN finance_invoice_items
+          ON finance_invoice_items.active_claim_key = ?
+        WHERE finance_source.source_id = ?
+        """,
+        (claim_key, int(source_id)),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def fetch_available_finance_sources(conn, customer_name, currency=""):
+    customer_name = str(customer_name or "").strip()
+    normalized_currency = ""
+    if currency:
+        normalized_currency = normalize_currency(currency)
+    sources = []
+    for source_type in ("ordinary", "assembly_item"):
+        params = [customer_name]
+        currency_condition = ""
+        if normalized_currency:
+            currency_condition = " AND finance_source.currency = ?"
+            params.append(normalized_currency)
+        rows = conn.execute(
+            f"""
+            SELECT finance_source.*
+            FROM ({_finance_source_select(source_type)}) AS finance_source
+            WHERE finance_source.customer_name = ?
+              AND finance_source.unit_price_minor IS NOT NULL
+              {currency_condition}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM finance_invoice_items
+                  WHERE active_claim_key = (
+                      finance_source.source_type || ':' || finance_source.source_id
+                  )
+              )
+            ORDER BY finance_source.shipped_at DESC, finance_source.source_id DESC
+            """,
+            params,
+        ).fetchall()
+        sources.extend(dict(row) for row in rows)
+    sources.sort(
+        key=lambda row: (
+            str(row["shipped_at"] or ""),
+            row["source_type"],
+            int(row["source_id"]),
+        ),
+        reverse=True,
+    )
+    return sources
+
+
+def _normalize_finance_source_refs(source_refs, require_nonempty=True):
+    refs = []
+    for reference in source_refs or ():
+        if isinstance(reference, dict):
+            source_type = reference.get("source_type")
+            source_id = reference.get("source_id")
+        else:
+            try:
+                source_type, source_id = reference
+            except (TypeError, ValueError) as error:
+                raise ValueError("发货记录来源无效") from error
+        claim_key = finance_claim_key(str(source_type or ""), source_id)
+        refs.append((str(source_type), int(source_id), claim_key))
+    if require_nonempty and not refs:
+        raise ValueError("请至少选择一条发货记录")
+    if len({claim_key for _, _, claim_key in refs}) != len(refs):
+        raise ValueError("不能重复选择同一发货记录")
+    return refs
+
+
+@contextmanager
+def _finance_write_scope(conn, operation):
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    savepoint = f"finance_{operation}_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def _load_finance_sources(
+    conn,
+    source_refs,
+    *,
+    expected_customer="",
+    expected_currency="",
+    allowed_invoice_id=None,
+    require_nonempty=True,
+):
+    refs = _normalize_finance_source_refs(
+        source_refs,
+        require_nonempty=require_nonempty,
+    )
+    sources = []
+    for source_type, source_id, _claim_key in refs:
+        source = _fetch_finance_source(conn, source_type, source_id)
+        if source is None:
+            raise ValueError("发货记录不存在")
+        if source["unit_price_minor"] is None:
+            raise ValueError("该发货记录尚未记录价格，不能开票")
+        try:
+            source["currency"] = normalize_currency(source["currency"])
+        except ValueError as error:
+            raise ValueError("价格格式或币种不正确") from error
+        claimed_invoice_id = source.pop("claimed_invoice_id")
+        if claimed_invoice_id is not None and int(claimed_invoice_id) != int(
+            allowed_invoice_id or 0
+        ):
+            raise ValueError("该发货记录已加入其他开票单")
+        sources.append(source)
+
+    customer_names = {str(source["customer_name"] or "").strip() for source in sources}
+    currencies = {source["currency"] for source in sources}
+    if (
+        len(customer_names) > 1
+        or len(currencies) > 1
+        or (sources and expected_customer and customer_names != {expected_customer})
+        or (sources and expected_currency and currencies != {expected_currency})
+    ):
+        raise ValueError("只能合并同一客户、同一币种的发货记录")
+    return refs, sources
+
+
+def _insert_finance_invoice_item(conn, invoice_id, source, created_at):
+    claim_key = finance_claim_key(source["source_type"], source["source_id"])
+    try:
+        conn.execute(
+            """
+            INSERT INTO finance_invoice_items (
+                invoice_id, source_type, source_id, active_claim_key,
+                order_no, assembly_batch_id, assembly_drawing_no,
+                shipped_at, drawing_no, product_name, quantity,
+                unit_price_minor, currency, line_total_minor, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                invoice_id,
+                source["source_type"],
+                source["source_id"],
+                claim_key,
+                source["order_no"] or "",
+                source["assembly_batch_id"],
+                source["assembly_drawing_no"] or "",
+                source["shipped_at"],
+                source["drawing_no"] or "",
+                source["product_name"] or "",
+                int(source["quantity"]),
+                int(source["unit_price_minor"]),
+                source["currency"],
+                int(source["unit_price_minor"]) * int(source["quantity"]),
+                created_at,
+            ),
+        )
+    except sqlite3.IntegrityError as error:
+        if "active_claim_key" in str(error) or "UNIQUE constraint failed" in str(error):
+            raise ValueError("该发货记录已加入其他开票单") from error
+        raise
+
+
+def _recalculate_finance_invoice_total(conn, invoice_id, updated_by, updated_at):
+    total = conn.execute(
+        """
+        SELECT COALESCE(SUM(line_total_minor), 0) AS total_minor
+        FROM finance_invoice_items
+        WHERE invoice_id = ?
+        """,
+        (invoice_id,),
+    ).fetchone()["total_minor"]
+    conn.execute(
+        """
+        UPDATE finance_invoices
+        SET total_minor = ?, updated_by = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (int(total or 0), str(updated_by or ""), updated_at, invoice_id),
+    )
+
+
+def create_finance_invoice(conn, customer_id, source_refs, created_by):
+    with _finance_write_scope(conn, "create"):
+        customer = conn.execute(
+            "SELECT * FROM customers WHERE id = ?",
+            (customer_id,),
+        ).fetchone()
+        if customer is None:
+            raise ValueError("客户不存在")
+        snapshot = customer_invoice_snapshot(customer)
+        _refs, sources = _load_finance_sources(
+            conn,
+            source_refs,
+            expected_customer=snapshot["customer_name"],
+        )
+        currency = sources[0]["currency"]
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        invoice_id = conn.execute(
+            """
+            INSERT INTO finance_invoices (
+                customer_id, customer_name, invoice_title, tax_id,
+                registered_address, registered_phone, bank_name, bank_account,
+                invoice_email, currency, total_minor, status,
+                created_by, updated_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?)
+            """,
+            (
+                customer_id,
+                snapshot["customer_name"],
+                snapshot["invoice_title"],
+                snapshot["tax_id"],
+                snapshot["registered_address"],
+                snapshot["registered_phone"],
+                snapshot["bank_name"],
+                snapshot["bank_account"],
+                snapshot["invoice_email"],
+                currency,
+                str(created_by or ""),
+                str(created_by or ""),
+                now,
+                now,
+            ),
+        ).lastrowid
+        for source in sources:
+            _insert_finance_invoice_item(conn, invoice_id, source, now)
+        _recalculate_finance_invoice_total(conn, invoice_id, created_by, now)
+    return invoice_id
+
+
+def replace_pending_invoice_items(
+    conn,
+    invoice_id,
+    source_refs,
+    updated_by,
+):
+    with _finance_write_scope(conn, "replace"):
+        invoice = conn.execute(
+            "SELECT * FROM finance_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
+        if invoice is None:
+            raise ValueError("开票单不存在")
+        if invoice["status"] != "pending":
+            raise ValueError("只有待开票单可以修改明细")
+        refs, sources = _load_finance_sources(
+            conn,
+            source_refs,
+            expected_customer=invoice["customer_name"],
+            expected_currency=invoice["currency"],
+            allowed_invoice_id=invoice_id,
+            require_nonempty=False,
+        )
+        requested = {(source_type, source_id) for source_type, source_id, _ in refs}
+        sources_by_ref = {
+            (source["source_type"], int(source["source_id"])): source
+            for source in sources
+        }
+        existing_rows = conn.execute(
+            """
+            SELECT id, source_type, source_id
+            FROM finance_invoice_items
+            WHERE invoice_id = ?
+            """,
+            (invoice_id,),
+        ).fetchall()
+        existing = {
+            (row["source_type"], int(row["source_id"])): row["id"]
+            for row in existing_rows
+        }
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        for reference in requested - set(existing):
+            _insert_finance_invoice_item(
+                conn,
+                invoice_id,
+                sources_by_ref[reference],
+                now,
+            )
+        removed_ids = [
+            item_id for reference, item_id in existing.items() if reference not in requested
+        ]
+        if removed_ids:
+            placeholders = ",".join("?" for _ in removed_ids)
+            conn.execute(
+                f"DELETE FROM finance_invoice_items WHERE id IN ({placeholders})",
+                removed_ids,
+            )
+        _recalculate_finance_invoice_total(conn, invoice_id, updated_by, now)
+
+
+def finance_source_is_claimed(conn, source_type, source_id):
+    claim_key = finance_claim_key(source_type, source_id)
+    return (
+        conn.execute(
+            """
+            SELECT 1
+            FROM finance_invoice_items
+            WHERE active_claim_key = ?
+            LIMIT 1
+            """,
+            (claim_key,),
+        ).fetchone()
+        is not None
+    )
+
+
+def mark_finance_invoice_invoiced(
+    conn,
+    invoice_id,
+    invoice_no,
+    invoice_date,
+    finance_remark,
+    updated_by,
+):
+    invoice_no = str(invoice_no or "").strip()
+    invoice_date = str(invoice_date or "").strip()
+    if not invoice_no or not invoice_date:
+        raise ValueError("请填写发票号码和开票日期")
+    with _finance_write_scope(conn, "invoice"):
+        invoice = conn.execute(
+            "SELECT status FROM finance_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
+        if invoice is None:
+            raise ValueError("开票单不存在")
+        if invoice["status"] != "pending":
+            raise ValueError("只有待开票单可以登记开票")
+        item_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM finance_invoice_items WHERE invoice_id = ?",
+            (invoice_id,),
+        ).fetchone()["c"]
+        if not item_count:
+            raise ValueError("请至少选择一条发货记录")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            UPDATE finance_invoices
+            SET status = 'invoiced', invoice_no = ?, invoice_date = ?,
+                finance_remark = ?, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                invoice_no,
+                invoice_date,
+                str(finance_remark or "").strip(),
+                str(updated_by or ""),
+                now,
+                invoice_id,
+            ),
+        )
+
+
+def mark_finance_invoice_paid(conn, invoice_id, payment_date, updated_by):
+    payment_date = str(payment_date or "").strip()
+    if not payment_date:
+        raise ValueError("请填写收款日期")
+    with _finance_write_scope(conn, "payment"):
+        invoice = conn.execute(
+            "SELECT status FROM finance_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
+        if invoice is None:
+            raise ValueError("开票单不存在")
+        if invoice["status"] != "invoiced":
+            raise ValueError("只有已开票记录可以登记收款")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            UPDATE finance_invoices
+            SET status = 'paid', payment_date = ?, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (payment_date, str(updated_by or ""), now, invoice_id),
+        )
+
+
+def reopen_finance_invoice_payment(conn, invoice_id, updated_by):
+    with _finance_write_scope(conn, "reopen"):
+        invoice = conn.execute(
+            "SELECT status FROM finance_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
+        if invoice is None:
+            raise ValueError("开票单不存在")
+        if invoice["status"] != "paid":
+            raise ValueError("只有已收款记录可以撤销收款")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            UPDATE finance_invoices
+            SET status = 'invoiced', payment_date = '',
+                updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (str(updated_by or ""), now, invoice_id),
+        )
+
+
+def void_finance_invoice(conn, invoice_id, updated_by):
+    with _finance_write_scope(conn, "void"):
+        invoice = conn.execute(
+            "SELECT status FROM finance_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
+        if invoice is None:
+            raise ValueError("开票单不存在")
+        if invoice["status"] == "paid":
+            raise ValueError("已收款记录需先撤销收款后才能作废")
+        if invoice["status"] != "invoiced":
+            raise ValueError("只有已开票记录可以作废")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            UPDATE finance_invoice_items
+            SET active_claim_key = NULL
+            WHERE invoice_id = ?
+            """,
+            (invoice_id,),
+        )
+        conn.execute(
+            """
+            UPDATE finance_invoices
+            SET status = 'void', voided_by = ?, voided_at = ?,
+                updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(updated_by or ""),
+                now,
+                str(updated_by or ""),
+                now,
+                invoice_id,
+            ),
+        )
+
+
+def delete_pending_finance_invoice(conn, invoice_id):
+    with _finance_write_scope(conn, "delete"):
+        invoice = conn.execute(
+            "SELECT status FROM finance_invoices WHERE id = ?",
+            (invoice_id,),
+        ).fetchone()
+        if invoice is None:
+            raise ValueError("开票单不存在")
+        if invoice["status"] != "pending":
+            raise ValueError("只有待开票单可以删除")
+        # Foreign keys are intentionally disabled for this SMB-hosted SQLite app,
+        # so remove children explicitly instead of relying on ON DELETE CASCADE.
+        conn.execute(
+            "DELETE FROM finance_invoice_items WHERE invoice_id = ?",
+            (invoice_id,),
+        )
+        conn.execute("DELETE FROM finance_invoices WHERE id = ?", (invoice_id,))
+
+
 def get_shipment_images(conn, shipment_ids):
     if not shipment_ids:
         return {}
