@@ -75,6 +75,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from reportlab.lib import colors
@@ -6588,6 +6589,304 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
     return buffer
 
 
+def finance_invoice_source_label(item):
+    if item["source_type"] == "ordinary":
+        return item["order_no"] or "-"
+    drawing_no = item["assembly_drawing_no"] or "-"
+    batch_id = item["assembly_batch_id"] or "-"
+    return f"{drawing_no} / 批次 {batch_id}"
+
+
+def build_finance_invoice_workbook(invoice, items):
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "开票单"
+    worksheet.freeze_panes = "A11"
+    worksheet.sheet_view.showGridLines = False
+
+    invoice_no = invoice["invoice_no"] or f"待开票-{invoice['id']}"
+    status_label = FINANCE_STATUS_LABELS.get(invoice["status"], invoice["status"])
+    currency = invoice["currency"]
+    worksheet["A1"] = "财务开票单"
+    worksheet.merge_cells("A1:I1")
+    worksheet["A1"].font = Font(bold=True, size=18, color="FFFFFF")
+    worksheet["A1"].fill = PatternFill("solid", fgColor="2F5D62")
+    worksheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[1].height = 30
+
+    metadata = (
+        ("开票单号", invoice_no, "状态", status_label, "币种", currency),
+        ("客户名称", invoice["customer_name"], "开票抬头", invoice["invoice_title"] or "-", "开票日期", invoice["invoice_date"] or "-"),
+        ("纳税人识别号", invoice["tax_id"] or "-", "注册地址", invoice["registered_address"] or "-", "注册电话", invoice["registered_phone"] or "-"),
+        ("开户银行", invoice["bank_name"] or "-", "银行账号", invoice["bank_account"] or "-", "收票邮箱", invoice["invoice_email"] or "-"),
+        ("财务备注", invoice["finance_remark"] or "-", "收款日期", invoice["payment_date"] or "-", "创建人", invoice["created_by"] or "-"),
+    )
+    label_fill = PatternFill("solid", fgColor="DDE8E8")
+    for row_index, row_values in enumerate(metadata, start=3):
+        for pair_index in range(3):
+            label_column = pair_index * 3 + 1
+            value_column = label_column + 1
+            label_cell = worksheet.cell(
+                row=row_index,
+                column=label_column,
+                value=row_values[pair_index * 2],
+            )
+            value_cell = worksheet.cell(
+                row=row_index,
+                column=value_column,
+                value=row_values[pair_index * 2 + 1],
+            )
+            worksheet.merge_cells(
+                start_row=row_index,
+                start_column=value_column,
+                end_row=row_index,
+                end_column=value_column + 1,
+            )
+            label_cell.font = Font(bold=True, color="27474A")
+            label_cell.fill = label_fill
+            label_cell.alignment = Alignment(vertical="center")
+            value_cell.alignment = Alignment(vertical="center", wrap_text=True)
+            value_cell.number_format = "@"
+            value_cell.quotePrefix = True
+        worksheet.row_dimensions[row_index].height = 28
+
+    header_row = 10
+    headers = (
+        "序号",
+        "来源",
+        "发货日期",
+        "订单/组装图号",
+        "产品图号",
+        "产品名称",
+        "数量",
+        "单价",
+        "金额",
+    )
+    for column, header in enumerate(headers, start=1):
+        cell = worksheet.cell(row=header_row, column=column, value=header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="3F7378")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[header_row].height = 24
+
+    for index, item in enumerate(items, start=1):
+        row = header_row + index
+        values = (
+            index,
+            "普通发货" if item["source_type"] == "ordinary" else "组装配件",
+            item["shipped_at"] or "-",
+            finance_invoice_source_label(item),
+            item["drawing_no"] or "-",
+            item["product_name"] or "-",
+            int(item["quantity"] or 0),
+            f"{format_money_minor(item['unit_price_minor'], item['currency'])} {item['currency']}",
+            f"{format_money_minor(item['line_total_minor'], item['currency'])} {item['currency']}",
+        )
+        for column, value in enumerate(values, start=1):
+            cell = worksheet.cell(row=row, column=column, value=value)
+            cell.alignment = Alignment(
+                horizontal="right" if column in {1, 7, 8, 9} else "left",
+                vertical="center",
+                wrap_text=True,
+            )
+            if index % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor="F1F6F6")
+        worksheet.row_dimensions[row].height = 24
+
+    total_row = header_row + max(len(items), 1) + 1
+    if not items:
+        worksheet.merge_cells(start_row=11, start_column=1, end_row=11, end_column=9)
+        worksheet["A11"] = "暂无开票明细"
+        worksheet["A11"].alignment = Alignment(horizontal="center")
+    worksheet.merge_cells(
+        start_row=total_row,
+        start_column=1,
+        end_row=total_row,
+        end_column=8,
+    )
+    worksheet.cell(row=total_row, column=1, value="合计").alignment = Alignment(
+        horizontal="right"
+    )
+    total_cell = worksheet.cell(
+        row=total_row,
+        column=9,
+        value=f"{format_money_minor(invoice['total_minor'], currency)} {currency}",
+    )
+    for cell in worksheet[total_row]:
+        cell.font = Font(bold=True, color="17383B")
+        cell.fill = PatternFill("solid", fgColor="DDE8E8")
+    total_cell.alignment = Alignment(horizontal="right")
+
+    widths = (14, 16, 14, 24, 18, 24, 14, 16, 16)
+    for column_index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(column_index)].width = width
+    worksheet.auto_filter.ref = f"A{header_row}:I{header_row + max(len(items), 1)}"
+    worksheet.print_title_rows = f"1:{header_row}"
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.sheet_properties.outlinePr.summaryBelow = True
+    return workbook
+
+
+def build_finance_invoice_pdf(invoice, items):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=9 * mm,
+        rightMargin=9 * mm,
+        topMargin=10 * mm,
+        bottomMargin=10 * mm,
+        title=f"财务开票单 {invoice['invoice_no'] or invoice['id']}",
+    )
+    font_name = get_pdf_font_name()
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "FinanceInvoiceTitle",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=18,
+        leading=22,
+        alignment=1,
+        spaceAfter=4 * mm,
+    )
+    info_style = ParagraphStyle(
+        "FinanceInvoiceInfo",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=8.5,
+        leading=10,
+    )
+    cell_style = ParagraphStyle(
+        "FinanceInvoiceCell",
+        parent=info_style,
+        fontSize=8,
+        leading=9.5,
+    )
+    currency = invoice["currency"]
+    invoice_no = invoice["invoice_no"] or f"待开票-{invoice['id']}"
+    status_label = FINANCE_STATUS_LABELS.get(invoice["status"], invoice["status"])
+    story = [Paragraph("财务开票单", title_style)]
+
+    meta_data = [
+        ["客户名称", invoice["customer_name"] or "-", "开票单号", invoice_no],
+        ["开票抬头", invoice["invoice_title"] or "-", "状态", status_label],
+        ["纳税人识别号", invoice["tax_id"] or "-", "开票日期", invoice["invoice_date"] or "-"],
+        ["注册地址", invoice["registered_address"] or "-", "注册电话", invoice["registered_phone"] or "-"],
+        ["开户银行", invoice["bank_name"] or "-", "银行账号", invoice["bank_account"] or "-"],
+        ["收票邮箱", invoice["invoice_email"] or "-", "币种", currency],
+        ["财务备注", invoice["finance_remark"] or "-", "收款日期", invoice["payment_date"] or "-"],
+    ]
+    meta_table = Table(
+        [
+            [pdf_single_line_paragraph(value, info_style) for value in row]
+            for row in meta_data
+        ],
+        colWidths=[25 * mm, 104 * mm, 25 * mm, 105 * mm],
+    )
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#DDE8E8")),
+                ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#DDE8E8")),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#17383B")),
+                ("FONTNAME", (0, 0), (0, -1), font_name),
+                ("FONTNAME", (2, 0), (2, -1), font_name),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#9AAEAF")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    story.extend([meta_table, Spacer(1, 4 * mm)])
+
+    detail_data = [[
+        "序号",
+        "来源",
+        "发货日期",
+        "订单/组装图号",
+        "产品图号",
+        "产品名称",
+        "数量",
+        "单价",
+        "金额",
+    ]]
+    for index, item in enumerate(items, start=1):
+        detail_data.append(
+            [
+                str(index),
+                "普通发货" if item["source_type"] == "ordinary" else "组装配件",
+                item["shipped_at"] or "-",
+                finance_invoice_source_label(item),
+                item["drawing_no"] or "-",
+                item["product_name"] or "-",
+                str(item["quantity"] or 0),
+                f"{format_money_minor(item['unit_price_minor'], item['currency'])} {item['currency']}",
+                f"{format_money_minor(item['line_total_minor'], item['currency'])} {item['currency']}",
+            ]
+        )
+    if len(detail_data) == 1:
+        detail_data.append(["暂无开票明细"] + [""] * 8)
+    detail_table = Table(
+        [
+            [pdf_wrapped_paragraph(value, cell_style, chunk_size=18) for value in row]
+            for row in detail_data
+        ],
+        colWidths=[10 * mm, 20 * mm, 23 * mm, 39 * mm, 27 * mm, 45 * mm, 14 * mm, 36 * mm, 45 * mm],
+        repeatRows=1,
+    )
+    detail_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#3F7378")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("ALIGN", (0, 1), (0, -1), "RIGHT"),
+                ("ALIGN", (6, 1), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#9AAEAF")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F1F6F6")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    total_table = Table(
+        [[
+            pdf_single_line_paragraph("合计", info_style),
+            pdf_single_line_paragraph(
+                f"{format_money_minor(invoice['total_minor'], currency)} {currency}",
+                info_style,
+            ),
+        ]],
+        colWidths=[214 * mm, 45 * mm],
+    )
+    total_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#DDE8E8")),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#17383B")),
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LINEABOVE", (0, 0), (-1, 0), 0.8, colors.HexColor("#3F7378")),
+            ]
+        )
+    )
+    story.extend([detail_table, total_table])
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+
 def delete_upload_file(filename):
     upload_path = MANUALS_DIR / filename
     if upload_path.exists():
@@ -7893,6 +8192,39 @@ def finance_invoice_detail(invoice_id):
         available_sources=available_sources,
         status_labels=FINANCE_STATUS_LABELS,
         default_date=datetime.now().date().isoformat(),
+    )
+
+
+@app.route("/admin/finance/<int:invoice_id>/export/<export_format>")
+@permission_required("finance_manage")
+def export_finance_invoice(invoice_id, export_format):
+    export_format = str(export_format or "").strip().lower()
+    if export_format not in {"xlsx", "pdf"}:
+        abort(404)
+    with get_db() as conn:
+        invoice = fetch_finance_invoice(conn, invoice_id)
+        if invoice is None:
+            abort(404)
+        items = fetch_finance_invoice_items(conn, invoice_id)
+
+    filename_base = f"finance-invoice-{invoice_id}"
+    if export_format == "pdf":
+        return send_file(
+            build_finance_invoice_pdf(invoice, items),
+            as_attachment=True,
+            download_name=f"{filename_base}.pdf",
+            mimetype="application/pdf",
+        )
+
+    workbook = build_finance_invoice_workbook(invoice, items)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=f"{filename_base}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 

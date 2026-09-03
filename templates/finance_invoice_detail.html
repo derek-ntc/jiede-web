@@ -8,6 +8,8 @@
     </div>
     <div class="finance-head-actions">
       <span class="finance-status status-{{ invoice.status }}">{{ status_labels[invoice.status] }}</span>
+      <a class="button secondary" href="{{ url_for('export_finance_invoice', invoice_id=invoice.id, export_format='xlsx') }}">导出 Excel</a>
+      <a class="button secondary" href="{{ url_for('export_finance_invoice', invoice_id=invoice.id, export_format='pdf') }}">导出 PDF</a>
       <a class="button secondary" href="{{ url_for('finance_invoices') }}">返回财务列表</a>
     </div>
   </section>

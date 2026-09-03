@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import app
 from flask import get_flashed_messages, session
@@ -1267,3 +1268,209 @@ class FinanceShipmentLockTests(FinanceDomainTestCase):
                     (self.assembly_a_cny,),
                 ).fetchone()
             )
+
+
+class FinanceExportTests(FinanceDomainTestCase):
+    def setUp(self):
+        super().setUp()
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, active,
+                    can_manage_finance, created_at, updated_at
+                ) VALUES ('finance-exporter', 'hash', 'operator', 1, 1, ?, ?)
+                """,
+                (now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, active,
+                    can_manage_finance, created_at, updated_at
+                ) VALUES ('unauthorized', 'hash', 'operator', 1, 0, ?, ?)
+                """,
+                (now, now),
+            )
+            self.invoice_id = app.create_finance_invoice(
+                conn,
+                self.customer_a,
+                [
+                    ("ordinary", self.ordinary_a_cny),
+                    ("assembly_item", self.assembly_a_cny),
+                ],
+                "finance-exporter",
+            )
+            app.mark_finance_invoice_invoiced(
+                conn,
+                self.invoice_id,
+                "INV-EXPORT-001",
+                "2026-09-08",
+                "导出测试",
+                "finance-exporter",
+            )
+            self.invoice = dict(app.fetch_finance_invoice(conn, self.invoice_id))
+            self.items = [
+                dict(row)
+                for row in app.fetch_finance_invoice_items(conn, self.invoice_id)
+            ]
+            conn.execute(
+                """
+                UPDATE customers
+                SET invoice_title = '后来修改的抬头',
+                    tax_id = 'CHANGED-TAX',
+                    bank_account = 'CHANGED-ACCOUNT'
+                WHERE id = ?
+                """,
+                (self.customer_a,),
+            )
+            conn.execute(
+                "UPDATE manuals SET product_name = '后来改名', unit_price_minor = 999999 WHERE id = ?",
+                (self.manual_a,),
+            )
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.app.config.update(
+            TESTING=self.original_testing,
+            SECRET_KEY=self.original_secret_key,
+        )
+        super().tearDown()
+
+    def login_as(self, username):
+        with self.client.session_transaction() as session:
+            session.clear()
+            session["admin_logged_in"] = True
+            session["admin_username"] = username
+            session["admin_role"] = "operator"
+
+    def test_finance_workbook_contains_only_invoice_and_item_snapshots(self):
+        workbook = app.build_finance_invoice_workbook(self.invoice, self.items)
+        worksheet = workbook.active
+        values = [
+            cell.value
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.value is not None
+        ]
+        rendered = "\n".join(str(value) for value in values)
+
+        for expected in (
+            "INV-EXPORT-001",
+            "客户A开票抬头",
+            "TAX-A",
+            "银行A",
+            "ACCOUNT-A",
+            "SO-A",
+            "ASM-A / 批次",
+            "FA-100",
+            "财务产品A",
+            "1.00 CNY",
+            "1.50 CNY",
+            "2.00 CNY",
+            "6.00 CNY",
+            "8.00 CNY",
+        ):
+            self.assertIn(expected, rendered)
+        self.assertNotIn("后来修改的抬头", rendered)
+        self.assertNotIn("CHANGED-TAX", rendered)
+        self.assertNotIn("CHANGED-ACCOUNT", rendered)
+        self.assertNotIn("后来改名", rendered)
+        self.assertNotIn("9999.99", rendered)
+        bank_account_cell = next(
+            cell
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.value == "ACCOUNT-A"
+        )
+        self.assertEqual(bank_account_cell.number_format, "@")
+        self.assertTrue(bank_account_cell.quotePrefix)
+
+    def test_finance_pdf_contains_snapshot_details_and_exact_total(self):
+        captured_story = []
+
+        def capture_story(_document, story):
+            captured_story.extend(story)
+
+        with patch.object(app.SimpleDocTemplate, "build", capture_story):
+            app.build_finance_invoice_pdf(self.invoice, self.items)
+
+        texts = []
+
+        def collect_text(value):
+            if hasattr(value, "getPlainText"):
+                texts.append(value.getPlainText())
+            if hasattr(value, "_cellvalues"):
+                collect_text(value._cellvalues)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    collect_text(item)
+
+        collect_text(captured_story)
+        text = "\n".join(texts)
+        for expected in (
+            "INV-EXPORT-001",
+            "客户A开票抬头",
+            "TAX-A",
+            "ACCOUNT-A",
+            "SO-A",
+            "ASM-A",
+            "FA-100",
+            "财务产品A",
+            "1.00 CNY",
+            "1.50 CNY",
+            "8.00 CNY",
+        ):
+            self.assertIn(expected, text)
+        self.assertNotIn("后来修改的抬头", text)
+        self.assertNotIn("CHANGED-TAX", text)
+        self.assertNotIn("CHANGED-ACCOUNT", text)
+        self.assertNotIn("后来改名", text)
+
+    def test_finance_exports_are_protected_and_support_only_xlsx_and_pdf(self):
+        self.login_as("finance-exporter")
+        xlsx = self.client.get(
+            f"/admin/finance/{self.invoice_id}/export/xlsx"
+        )
+        pdf = self.client.get(f"/admin/finance/{self.invoice_id}/export/pdf")
+        unsupported = self.client.get(
+            f"/admin/finance/{self.invoice_id}/export/csv"
+        )
+
+        self.assertEqual(xlsx.status_code, 200)
+        self.assertEqual(
+            xlsx.mimetype,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn(".xlsx", xlsx.headers["Content-Disposition"])
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf.mimetype, "application/pdf")
+        self.assertIn(".pdf", pdf.headers["Content-Disposition"])
+        self.assertIn(unsupported.status_code, (400, 404))
+
+        self.login_as("unauthorized")
+        for export_format in ("xlsx", "pdf"):
+            with self.subTest(export_format=export_format):
+                response = self.client.get(
+                    f"/admin/finance/{self.invoice_id}/export/{export_format}"
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.location.endswith("/admin"))
+
+    def test_finance_detail_has_separate_excel_and_pdf_downloads(self):
+        self.login_as("finance-exporter")
+        html = self.client.get(
+            f"/admin/finance/{self.invoice_id}"
+        ).get_data(as_text=True)
+        self.assertIn(
+            f'/admin/finance/{self.invoice_id}/export/xlsx',
+            html,
+        )
+        self.assertIn(
+            f'/admin/finance/{self.invoice_id}/export/pdf',
+            html,
+        )
