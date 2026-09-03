@@ -10,6 +10,10 @@ SUPPORTED_CURRENCIES = {
     "JPY": 0,
 }
 
+SQLITE_INTEGER_MAX = 2**63 - 1
+MAX_PRICED_QUANTITY = 2_147_483_647
+MAX_UNIT_PRICE_MINOR = SQLITE_INTEGER_MAX // MAX_PRICED_QUANTITY
+
 
 def normalize_currency(raw: str) -> str:
     currency = str(raw or "CNY").strip().upper()
@@ -34,7 +38,13 @@ def parse_money_minor(raw: str, currency: str) -> int | None:
         raise ValueError("价格格式不正确")
     if value < 0:
         raise ValueError("产品价格不能为负数")
-    if value != value.quantize(quantum):
+    if value > Decimal(MAX_UNIT_PRICE_MINOR).scaleb(-digits):
+        raise ValueError("产品价格过大")
+    try:
+        quantized = value.quantize(quantum)
+    except InvalidOperation as error:
+        raise ValueError("价格格式不正确") from error
+    if value != quantized:
         raise ValueError(f"价格最多保留 {digits} 位小数")
     return int(value * (10**digits))
 
@@ -52,4 +62,7 @@ def line_total_minor(unit_price_minor: int | None, quantity: int) -> int | None:
         raise ValueError("数量不能为负数")
     if unit_price_minor is None:
         return None
-    return unit_price_minor * quantity
+    total = unit_price_minor * quantity
+    if total > SQLITE_INTEGER_MAX:
+        raise ValueError("金额过大")
+    return total

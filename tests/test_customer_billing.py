@@ -202,6 +202,131 @@ class CustomerBillingTests(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(customer)
 
+    def test_customer_rename_cascades_live_sources_but_keeps_issued_snapshot(self):
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            manual_id = conn.execute(
+                """
+                INSERT INTO manuals (
+                    drawing_no, product_name, customer, model, category, version,
+                    filename, original_filename, created_at, updated_at
+                ) VALUES ('RENAME-100', '改名测试产品', '客户甲', '', '', '', '', '', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+            order_id = conn.execute(
+                """
+                INSERT INTO product_orders (
+                    manual_id, order_no, ordered_at, quantity, customer,
+                    planned_ship_at, created_at, updated_at
+                ) VALUES (?, 'SO-RENAME', '2026-09-01', 2, '客户甲',
+                          '2026-09-10', ?, ?)
+                """,
+                (manual_id, now, now),
+            ).lastrowid
+            ordinary_id = conn.execute(
+                """
+                INSERT INTO product_order_shipments (
+                    order_id, shipped_quantity, shipped_at, created_at,
+                    unit_price_minor, currency
+                ) VALUES (?, 2, '2026-09-03', ?, 100, 'CNY')
+                """,
+                (order_id, now),
+            ).lastrowid
+            batch_id = conn.execute(
+                """
+                INSERT INTO assembly_shipment_batches (
+                    customer, assembly_drawing_no, set_quantity, shipped_at,
+                    logistics_no, created_by, created_at, updated_at
+                ) VALUES ('客户甲', 'ASM-RENAME', 1, '2026-09-03', '',
+                          'customer-manager', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+            assembly_item_id = conn.execute(
+                """
+                INSERT INTO assembly_shipment_items (
+                    batch_id, manual_id, drawing_no, product_name,
+                    quantity_per_set, calculated_quantity, shipped_quantity,
+                    inventory_deducted_quantity, inventory_shortage_quantity,
+                    unit_price_minor, currency, created_at, updated_at
+                ) VALUES (?, ?, 'RENAME-100', '改名测试产品', 1, 1, 1, 0, 1,
+                          100, 'CNY', ?, ?)
+                """,
+                (batch_id, manual_id, now, now),
+            ).lastrowid
+            issued_invoice_id = conn.execute(
+                """
+                INSERT INTO finance_invoices (
+                    customer_id, customer_name, currency, total_minor, status,
+                    created_by, updated_by, created_at, updated_at
+                ) VALUES (?, '客户甲', 'CNY', 0, 'invoiced',
+                          'finance-manager', 'finance-manager', ?, ?)
+                """,
+                (self.customer_id, now, now),
+            ).lastrowid
+            pending_invoice_id = conn.execute(
+                """
+                INSERT INTO finance_invoices (
+                    customer_id, customer_name, currency, total_minor, status,
+                    created_by, updated_by, created_at, updated_at
+                ) VALUES (?, '客户甲', 'CNY', 0, 'pending',
+                          'finance-manager', 'finance-manager', ?, ?)
+                """,
+                (self.customer_id, now, now),
+            ).lastrowid
+
+        self.login_as("customer-manager")
+        response = self.client.post(
+            f"/admin/customers/{self.customer_id}/edit",
+            data={
+                "name": "客户甲（新名称）",
+                "contact": "张三",
+                "address": "送货地址",
+                "email": "contact@example.com",
+                "phone": "0574-12345678",
+                "remark": "",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            live_names = {
+                "manual": conn.execute(
+                    "SELECT customer FROM manuals WHERE id = ?", (manual_id,)
+                ).fetchone()["customer"],
+                "order": conn.execute(
+                    "SELECT customer FROM product_orders WHERE id = ?", (order_id,)
+                ).fetchone()["customer"],
+                "assembly": conn.execute(
+                    "SELECT customer FROM assembly_shipment_batches WHERE id = ?",
+                    (batch_id,),
+                ).fetchone()["customer"],
+            }
+            invoice_names = {
+                row["id"]: row["customer_name"]
+                for row in conn.execute(
+                    "SELECT id, customer_name FROM finance_invoices WHERE id IN (?, ?)",
+                    (issued_invoice_id, pending_invoice_id),
+                )
+            }
+            new_sources = app.fetch_available_finance_sources(
+                conn, "客户甲（新名称）", "CNY"
+            )
+            app.sync_product_customers(conn)
+            customer_names = {
+                row["name"] for row in conn.execute("SELECT name FROM customers")
+            }
+
+        self.assertEqual(set(live_names.values()), {"客户甲（新名称）"})
+        self.assertEqual(invoice_names[issued_invoice_id], "客户甲")
+        self.assertEqual(invoice_names[pending_invoice_id], "客户甲（新名称）")
+        self.assertEqual(
+            {(source["source_type"], source["source_id"]) for source in new_sources},
+            {("ordinary", ordinary_id), ("assembly_item", assembly_item_id)},
+        )
+        self.assertNotIn("客户甲", customer_names)
+
 
 if __name__ == "__main__":
     unittest.main()

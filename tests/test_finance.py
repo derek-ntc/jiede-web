@@ -1,11 +1,13 @@
 import sqlite3
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import app
 from flask import get_flashed_messages, session
+from openpyxl import load_workbook
 
 
 class FinanceMigrationTests(unittest.TestCase):
@@ -493,6 +495,42 @@ class FinanceInvoiceCreationTests(FinanceDomainTestCase):
                 app.create_finance_invoice(
                     conn, self.customer_a, refs, "second-finance-user"
                 )
+
+    def test_invoice_total_rejects_database_integer_overflow_atomically(self):
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE product_order_shipments
+                SET shipped_quantity = 2147483647,
+                    unit_price_minor = 4294967298,
+                    currency = 'CNY'
+                WHERE id IN (?, ?)
+                """,
+                (self.ordinary_a_cny, self.ordinary_a_usd),
+            )
+
+        try:
+            with app.get_db() as conn:
+                app.create_finance_invoice(
+                    conn,
+                    self.customer_a,
+                    [
+                        ("ordinary", self.ordinary_a_cny),
+                        ("ordinary", self.ordinary_a_usd),
+                    ],
+                    "finance-user",
+                )
+        except Exception as error:
+            self.assertIsInstance(error, ValueError)
+            self.assertIn("总金额过大", str(error))
+        else:
+            self.fail("超出数据库整数范围的开票合计不应被接受")
+
+        with app.get_db() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM finance_invoices"
+            ).fetchone()["c"]
+        self.assertEqual(count, 0)
 
 
 class FinanceInvoiceStateTests(FinanceDomainTestCase):
@@ -1389,6 +1427,51 @@ class FinanceExportTests(FinanceDomainTestCase):
         )
         self.assertEqual(bank_account_cell.number_format, "@")
         self.assertTrue(bank_account_cell.quotePrefix)
+
+    def test_finance_workbook_keeps_untrusted_text_as_literal_cells(self):
+        invoice = dict(self.invoice)
+        invoice.update(
+            {
+                "customer_name": "=1+1",
+                "invoice_title": "+2+2",
+                "tax_id": "-3+3",
+                "finance_remark": "@SUM(A1:A2)",
+            }
+        )
+        items = [dict(item) for item in self.items]
+        items[0]["order_no"] = "\t=4+4"
+        items[0]["drawing_no"] = "\r=5+5"
+
+        workbook = app.build_finance_invoice_workbook(invoice, items)
+        worksheet = workbook.active
+        control_prefixed = {"\t=4+4", "\r=5+5"}
+        control_cells = [
+            cell
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.value in control_prefixed
+        ]
+        self.assertEqual({cell.value for cell in control_cells}, control_prefixed)
+        for cell in control_cells:
+            self.assertEqual(cell.data_type, "s")
+            self.assertTrue(cell.quotePrefix)
+
+        output = BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        worksheet = load_workbook(output, data_only=False).active
+
+        dangerous_values = {"=1+1", "+2+2", "-3+3", "@SUM(A1:A2)"}
+        cells = [
+            cell
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.value in dangerous_values
+        ]
+        self.assertEqual({cell.value for cell in cells}, dangerous_values)
+        for cell in cells:
+            self.assertEqual(cell.data_type, "s")
+            self.assertTrue(cell.quotePrefix)
 
     def test_finance_pdf_contains_snapshot_details_and_exact_total(self):
         captured_story = []

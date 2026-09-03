@@ -97,8 +97,10 @@ from assembly_shipping import (
     preview_token,
 )
 from pricing import (
+    SQLITE_INTEGER_MAX,
     SUPPORTED_CURRENCIES,
     format_money_minor,
+    line_total_minor,
     normalize_currency,
     parse_money_minor,
 )
@@ -5425,6 +5427,10 @@ def _load_finance_sources(
 
 def _insert_finance_invoice_item(conn, invoice_id, source, created_at):
     claim_key = finance_claim_key(source["source_type"], source["source_id"])
+    line_total = line_total_minor(
+        int(source["unit_price_minor"]),
+        int(source["quantity"]),
+    )
     try:
         conn.execute(
             """
@@ -5449,7 +5455,7 @@ def _insert_finance_invoice_item(conn, invoice_id, source, created_at):
                 int(source["quantity"]),
                 int(source["unit_price_minor"]),
                 source["currency"],
-                int(source["unit_price_minor"]) * int(source["quantity"]),
+                line_total,
                 created_at,
             ),
         )
@@ -5460,14 +5466,17 @@ def _insert_finance_invoice_item(conn, invoice_id, source, created_at):
 
 
 def _recalculate_finance_invoice_total(conn, invoice_id, updated_by, updated_at):
-    total = conn.execute(
+    item_totals = conn.execute(
         """
-        SELECT COALESCE(SUM(line_total_minor), 0) AS total_minor
+        SELECT line_total_minor
         FROM finance_invoice_items
         WHERE invoice_id = ?
         """,
         (invoice_id,),
-    ).fetchone()["total_minor"]
+    ).fetchall()
+    total = sum(int(row["line_total_minor"]) for row in item_totals)
+    if total > SQLITE_INTEGER_MAX:
+        raise ValueError("开票单总金额过大")
     conn.execute(
         """
         UPDATE finance_invoices
@@ -6597,6 +6606,15 @@ def finance_invoice_source_label(item):
     return f"{drawing_no} / 批次 {batch_id}"
 
 
+def set_excel_literal_value(cell, value):
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+        if value.startswith(("=", "+", "-", "@", "\t", "\r")):
+            cell.quotePrefix = True
+    return cell
+
+
 def build_finance_invoice_workbook(invoice, items):
     workbook = Workbook()
     worksheet = workbook.active
@@ -6631,10 +6649,9 @@ def build_finance_invoice_workbook(invoice, items):
                 column=label_column,
                 value=row_values[pair_index * 2],
             )
-            value_cell = worksheet.cell(
-                row=row_index,
-                column=value_column,
-                value=row_values[pair_index * 2 + 1],
+            value_cell = set_excel_literal_value(
+                worksheet.cell(row=row_index, column=value_column),
+                row_values[pair_index * 2 + 1],
             )
             worksheet.merge_cells(
                 start_row=row_index,
@@ -6683,7 +6700,11 @@ def build_finance_invoice_workbook(invoice, items):
             f"{format_money_minor(item['line_total_minor'], item['currency'])} {item['currency']}",
         )
         for column, value in enumerate(values, start=1):
-            cell = worksheet.cell(row=row, column=column, value=value)
+            cell = worksheet.cell(row=row, column=column)
+            if isinstance(value, str):
+                set_excel_literal_value(cell, value)
+            else:
+                cell.value = value
             cell.alignment = Alignment(
                 horizontal="right" if column in {1, 7, 8, 9} else "left",
                 vertical="center",
@@ -7947,11 +7968,12 @@ def edit_customer(customer_id):
     try:
         with get_db() as conn:
             customer = conn.execute(
-                "SELECT id FROM customers WHERE id = ?",
+                "SELECT id, name FROM customers WHERE id = ?",
                 (customer_id,),
             ).fetchone()
             if customer is None:
                 abort(404)
+            previous_name = str(customer["name"] or "").strip()
             conn.execute(
                 """
                 UPDATE customers
@@ -7961,6 +7983,27 @@ def edit_customer(customer_id):
                 """,
                 (name, contact, address, email, phone, remark, now, customer_id),
             )
+            if name != previous_name:
+                conn.execute(
+                    "UPDATE manuals SET customer = ? WHERE customer = ?",
+                    (name, previous_name),
+                )
+                conn.execute(
+                    "UPDATE product_orders SET customer = ? WHERE customer = ?",
+                    (name, previous_name),
+                )
+                conn.execute(
+                    "UPDATE assembly_shipment_batches SET customer = ? WHERE customer = ?",
+                    (name, previous_name),
+                )
+                conn.execute(
+                    """
+                    UPDATE finance_invoices
+                    SET customer_name = ?, updated_by = ?, updated_at = ?
+                    WHERE customer_id = ? AND status = 'pending'
+                    """,
+                    (name, current_admin_username(), now, customer_id),
+                )
     except sqlite3.IntegrityError:
         flash("该客户名称已存在", "error")
         return redirect(url_for("admin_customers"))

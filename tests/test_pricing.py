@@ -27,3 +27,27 @@ class PricingTests(unittest.TestCase):
         self.assertIsNone(line_total_minor(None, 3))
         self.assertEqual(line_total_minor(0, 3), 0)
         self.assertEqual(line_total_minor(250, 4), 1000)
+
+    def test_price_and_line_total_reject_database_integer_overflow(self):
+        try:
+            parse_money_minor("42949672.99", "CNY")
+        except Exception as error:
+            self.assertIsInstance(error, ValueError)
+            self.assertIn("价格过大", str(error))
+        else:
+            self.fail("超出安全范围的产品价格不应被接受")
+
+        try:
+            parse_money_minor("1e1000", "CNY")
+        except Exception as error:
+            self.assertIsInstance(error, ValueError)
+            self.assertIn("价格过大", str(error))
+        else:
+            self.fail("极端指数价格不应被接受")
+
+        self.assertEqual(
+            line_total_minor(4_294_967_298, 2_147_483_647),
+            9_223_372_036_854_775_806,
+        )
+        with self.assertRaisesRegex(ValueError, "金额过大"):
+            line_total_minor(4_294_967_299, 2_147_483_647)
