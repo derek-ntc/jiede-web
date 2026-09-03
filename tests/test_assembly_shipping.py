@@ -1382,6 +1382,62 @@ class AssemblySaveTests(AssemblyAppTestCase):
             app.sync_order_shipment_summary(conn, order_id, updated_at=now)
         return batch_id
 
+    def test_assembly_shipment_snapshots_each_server_price_and_ignores_browser_prices(self):
+        first = self.create_product("P-PRICE-1", "客户A")
+        second = self.create_product("P-PRICE-2", "客户A")
+        with app.get_db() as conn:
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 100, currency = 'CNY' WHERE id = ?",
+                (first,),
+            )
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 250, currency = 'CNY' WHERE id = ?",
+                (second,),
+            )
+        self.configure_components([(first, 2), (second, 3)])
+        self.create_order(first, "SO-PRICE-1", 2)
+        self.create_order(second, "SO-PRICE-2", 3)
+        self.stock_product(first, 2)
+        self.stock_product(second, 3)
+        preview = self.post_preview(sets=1).get_json()
+
+        response = self.post_save(
+            preview,
+            extra_data={
+                "unit_price_minor": ["999", "999"],
+                "currency": ["USD", "USD"],
+                "price_recorded_by": "browser",
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        with app.get_db() as conn:
+            items = conn.execute(
+                """
+                SELECT manual_id, shipped_quantity, unit_price_minor, currency,
+                       price_recorded_by, price_recorded_at
+                FROM assembly_shipment_items
+                ORDER BY manual_id
+                """
+            ).fetchall()
+        self.assertEqual(
+            [
+                (
+                    row["manual_id"],
+                    row["shipped_quantity"],
+                    row["unit_price_minor"],
+                    row["currency"],
+                    row["price_recorded_by"],
+                    bool(row["price_recorded_at"]),
+                )
+                for row in items
+            ],
+            [
+                (first, 2, 100, "CNY", "admin", True),
+                (second, 3, 250, "CNY", "admin", True),
+            ],
+        )
+
     def test_confirmed_shipment_saves_server_preview_with_mixed_allocation_and_shortage(self):
         manual_id = self.create_product("P1", "客户A")
         self.configure_component(manual_id, quantity_per_set=2)
@@ -2868,6 +2924,168 @@ class AssemblyHistoryTests(AssemblyTask7TestCase):
 
 
 class AssemblyEditDeleteTests(AssemblyTask7TestCase):
+    def test_edit_preserves_retained_item_price_snapshots_after_current_prices_change(self):
+        first = self.create_product("P-EDIT-PRICE-1", "客户A")
+        second = self.create_product("P-EDIT-PRICE-2", "客户A")
+        with app.get_db() as conn:
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 100, currency = 'CNY' WHERE id = ?",
+                (first,),
+            )
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 250, currency = 'CNY' WHERE id = ?",
+                (second,),
+            )
+        self.configure_components([(first, 2), (second, 3)])
+        self.create_order(first, "SO-EDIT-PRICE-1", 4)
+        self.create_order(second, "SO-EDIT-PRICE-2", 6)
+        self.stock_product(first, 4)
+        self.stock_product(second, 6)
+        create_preview = self.post_preview(sets=1).get_json()
+        create_response = self.client.post(
+            "/admin/shipped-orders/assembly/new",
+            data=self.save_data(create_preview),
+        )
+        self.assertEqual(
+            create_response.status_code,
+            201,
+            create_response.get_data(as_text=True),
+        )
+        batch_id = create_response.get_json()["batch_id"]
+        with app.get_db() as conn:
+            original = {
+                row["manual_id"]: (
+                    row["unit_price_minor"],
+                    row["currency"],
+                    row["price_recorded_by"],
+                    row["price_recorded_at"],
+                )
+                for row in conn.execute(
+                    "SELECT * FROM assembly_shipment_items WHERE batch_id = ?",
+                    (batch_id,),
+                )
+            }
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 999 WHERE id IN (?, ?)",
+                (first, second),
+            )
+        self.assertEqual(
+            {
+                manual_id: (snapshot[0], snapshot[1])
+                for manual_id, snapshot in original.items()
+            },
+            {first: (100, "CNY"), second: (250, "CNY")},
+        )
+
+        preview_response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            json={"overrides": {str(first): "4", str(second): "6"}},
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        edit_response = self.post_edit(batch_id, preview_response.get_json())
+
+        self.assertEqual(
+            edit_response.status_code,
+            201,
+            edit_response.get_data(as_text=True),
+        )
+        with app.get_db() as conn:
+            edited = {
+                row["manual_id"]: (
+                    row["unit_price_minor"],
+                    row["currency"],
+                    row["price_recorded_by"],
+                    row["price_recorded_at"],
+                )
+                for row in conn.execute(
+                    "SELECT * FROM assembly_shipment_items WHERE batch_id = ?",
+                    (batch_id,),
+                )
+            }
+        self.assertEqual(edited, original)
+
+    def test_edit_uses_current_price_only_for_a_newly_introduced_component(self):
+        retained = self.create_product("P-PRICE-RETAINED", "客户A")
+        removed = self.create_product("P-PRICE-REMOVED", "客户A")
+        introduced = self.create_product("P-PRICE-NEW", "客户A")
+        with app.get_db() as conn:
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 100 WHERE id = ?",
+                (retained,),
+            )
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 200 WHERE id = ?",
+                (removed,),
+            )
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 300 WHERE id = ?",
+                (introduced,),
+            )
+        self.configure_components([(retained, 1), (removed, 1)])
+        self.create_order(retained, "SO-PRICE-RETAINED", 2)
+        self.create_order(removed, "SO-PRICE-REMOVED", 1)
+        self.create_order(introduced, "SO-PRICE-NEW", 1)
+        self.stock_product(retained, 2)
+        self.stock_product(removed, 1)
+        self.stock_product(introduced, 1)
+        create_preview = self.post_preview(sets=1).get_json()
+        create_response = self.client.post(
+            "/admin/shipped-orders/assembly/new",
+            data=self.save_data(create_preview),
+        )
+        self.assertEqual(create_response.status_code, 201)
+        batch_id = create_response.get_json()["batch_id"]
+
+        with app.get_db() as conn:
+            app.save_product_assembly_components(
+                conn,
+                removed,
+                [],
+                "2026-08-30T12:00:00",
+            )
+            app.save_product_assembly_components(
+                conn,
+                introduced,
+                [
+                    {
+                        "assembly_drawing_no": "ASM-100",
+                        "quantity_per_set": 1,
+                        "sort_order": 1,
+                    }
+                ],
+                "2026-08-30T12:00:00",
+            )
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 999 WHERE id = ?",
+                (retained,),
+            )
+        preview_response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            json={"overrides": {str(retained): "1", str(introduced): "1"}},
+        )
+        self.assertEqual(preview_response.status_code, 200)
+
+        edit_response = self.post_edit(batch_id, preview_response.get_json())
+
+        self.assertEqual(
+            edit_response.status_code,
+            201,
+            edit_response.get_data(as_text=True),
+        )
+        with app.get_db() as conn:
+            prices = {
+                row["manual_id"]: row["unit_price_minor"]
+                for row in conn.execute(
+                    """
+                    SELECT manual_id, unit_price_minor
+                    FROM assembly_shipment_items
+                    WHERE batch_id = ?
+                    """,
+                    (batch_id,),
+                )
+            }
+        self.assertEqual(prices, {retained: 100, introduced: 300})
+
     def test_edit_adds_back_own_batch_once_and_preserves_batch_identity(self):
         batch_id, manual_id, order_id = self.create_single_batch(
             drawing_no="P-EDIT-DOWN",

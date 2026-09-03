@@ -4474,12 +4474,90 @@ def _validated_assembly_preview_header(preview, shipped_at):
     return customer, assembly_drawing_no, set_quantity, shipped_at
 
 
-def _save_assembly_shipment_items(conn, batch_id, preview, now):
+def _price_snapshot_values(unit_price_minor, currency, recorded_by, recorded_at):
+    has_price = unit_price_minor is not None
+    return {
+        "unit_price_minor": unit_price_minor,
+        "currency": str(currency or "CNY"),
+        "price_recorded_by": str(recorded_by or "") if has_price else "",
+        "price_recorded_at": str(recorded_at or "") if has_price else "",
+    }
+
+
+def current_product_price_snapshot(conn, manual_id, recorded_by, recorded_at):
+    manual = conn.execute(
+        """
+        SELECT unit_price_minor, currency
+        FROM manuals
+        WHERE id = ?
+        """,
+        (parse_positive_int(manual_id, "产品 ID"),),
+    ).fetchone()
+    if manual is None:
+        raise ValueError("产品不存在，无法记录发货价格")
+    return _price_snapshot_values(
+        manual["unit_price_minor"],
+        manual["currency"],
+        recorded_by,
+        recorded_at,
+    )
+
+
+def _current_product_price_snapshots(conn, manual_ids, recorded_by, recorded_at):
+    manual_ids = list(dict.fromkeys(manual_ids))
+    if not manual_ids:
+        return {}
+    placeholders = ",".join("?" for _ in manual_ids)
+    rows = conn.execute(
+        f"""
+        SELECT id, unit_price_minor, currency
+        FROM manuals
+        WHERE id IN ({placeholders})
+        """,
+        manual_ids,
+    ).fetchall()
+    snapshots = {
+        int(row["id"]): _price_snapshot_values(
+            row["unit_price_minor"],
+            row["currency"],
+            recorded_by,
+            recorded_at,
+        )
+        for row in rows
+    }
+    if len(snapshots) != len(manual_ids):
+        raise ValueError("产品不存在，无法记录发货价格")
+    return snapshots
+
+
+def _save_assembly_shipment_items(
+    conn,
+    batch_id,
+    preview,
+    now,
+    recorded_by,
+    existing_price_snapshots=None,
+):
     customer = str(preview["customer"] or "").strip()
     assembly_drawing_no = str(preview["assembly_drawing_no"] or "").strip()
+    manual_ids = [
+        parse_positive_int(preview_item.get("manual_id"), "配件 ID")
+        for preview_item in preview["items"]
+    ]
+    existing_price_snapshots = existing_price_snapshots or {}
+    introduced_manual_ids = [
+        manual_id
+        for manual_id in manual_ids
+        if manual_id not in existing_price_snapshots
+    ]
+    current_price_snapshots = _current_product_price_snapshots(
+        conn,
+        introduced_manual_ids,
+        recorded_by,
+        now,
+    )
     affected_order_ids = set()
-    for preview_item in preview["items"]:
-        manual_id = parse_positive_int(preview_item.get("manual_id"), "配件 ID")
+    for preview_item, manual_id in zip(preview["items"], manual_ids):
         quantity_per_set = parse_positive_int(
             preview_item.get("quantity_per_set"), "每套用量"
         )
@@ -4506,6 +4584,10 @@ def _save_assembly_shipment_items(conn, batch_id, preview, now):
         )
         if allocation_total != shipped_quantity:
             raise ValueError("组装发货订单分配数量无效")
+        if manual_id in existing_price_snapshots:
+            price_snapshot = existing_price_snapshots[manual_id]
+        else:
+            price_snapshot = current_price_snapshots[manual_id]
 
         item_id = conn.execute(
             """
@@ -4513,8 +4595,9 @@ def _save_assembly_shipment_items(conn, batch_id, preview, now):
                 batch_id, manual_id, drawing_no, product_name,
                 quantity_per_set, calculated_quantity, shipped_quantity,
                 inventory_deducted_quantity, inventory_shortage_quantity,
+                unit_price_minor, currency, price_recorded_by, price_recorded_at,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -4526,6 +4609,10 @@ def _save_assembly_shipment_items(conn, batch_id, preview, now):
                 shipped_quantity,
                 expected_deducted,
                 expected_shortage,
+                price_snapshot["unit_price_minor"],
+                price_snapshot["currency"],
+                price_snapshot["price_recorded_by"],
+                price_snapshot["price_recorded_at"],
                 now,
                 now,
             ),
@@ -4580,7 +4667,11 @@ def save_assembly_shipment(conn, preview, shipped_at, logistics_no, created_by):
         ),
     ).lastrowid
     affected_order_ids = _save_assembly_shipment_items(
-        conn, batch_id, preview, now
+        conn,
+        batch_id,
+        preview,
+        now,
+        created_by,
     )
     for order_id in sorted(affected_order_ids):
         sync_order_shipment_summary(conn, order_id, updated_at=now)
@@ -4588,7 +4679,14 @@ def save_assembly_shipment(conn, preview, shipped_at, logistics_no, created_by):
 
 
 def replace_assembly_shipment(
-    conn, batch_id, preview, shipped_at, logistics_no, old_order_ids
+    conn,
+    batch_id,
+    preview,
+    shipped_at,
+    logistics_no,
+    old_order_ids,
+    existing_price_snapshots=None,
+    recorded_by="",
 ):
     customer, assembly_drawing_no, set_quantity, shipped_at = (
         _validated_assembly_preview_header(preview, shipped_at)
@@ -4612,7 +4710,12 @@ def replace_assembly_shipment(
         ),
     )
     new_order_ids = _save_assembly_shipment_items(
-        conn, batch_id, preview, now
+        conn,
+        batch_id,
+        preview,
+        now,
+        recorded_by,
+        existing_price_snapshots=existing_price_snapshots,
     )
     for order_id in sorted(set(old_order_ids) | set(new_order_ids)):
         sync_order_shipment_summary(conn, order_id, updated_at=now)
@@ -11050,6 +11153,15 @@ def edit_assembly_shipment(batch_id):
                     ),
                     409,
                 )
+            existing_price_snapshots = {
+                int(item["manual_id"]): {
+                    "unit_price_minor": item["unit_price_minor"],
+                    "currency": item["currency"],
+                    "price_recorded_by": item["price_recorded_by"],
+                    "price_recorded_at": item["price_recorded_at"],
+                }
+                for item in batch["items"]
+            }
             old_order_ids = reverse_assembly_shipment_batch(conn, batch_id)
             replace_assembly_shipment(
                 conn,
@@ -11058,6 +11170,8 @@ def edit_assembly_shipment(batch_id):
                 shipped_at,
                 logistics_no,
                 old_order_ids,
+                existing_price_snapshots=existing_price_snapshots,
+                recorded_by=current_admin_username(),
             )
             if staged_images:
                 save_assembly_shipment_images(conn, batch_id, staged_images)
@@ -11163,6 +11277,7 @@ def create_shipment_from_shipped_page():
     shipment_ids = []
     image_files = selected_shipment_images()
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         unique_order_ids = list(dict.fromkeys(order_id for order_id, _ in requested_items))
         placeholders = ",".join("?" for _ in unique_order_ids)
         rows = conn.execute(
@@ -11197,6 +11312,13 @@ def create_shipment_from_shipped_page():
             return redirect(url_for("shipped_orders"))
 
         for order_id_value, shipped_quantity_value in requested_items:
+            order = orders_by_id[order_id_value]
+            price_snapshot = current_product_price_snapshot(
+                conn,
+                order["manual_id"],
+                current_admin_username(),
+                now,
+            )
             signature_token = unique_signature_token(conn)
             photo_upload_token = unique_shipment_photo_token(conn)
             signature_expires = signature_expires_at()
@@ -11204,9 +11326,10 @@ def create_shipment_from_shipped_page():
                 """
                 INSERT INTO product_order_shipments (
                     order_id, shipped_quantity, shipped_at, created_at, email_sent_at, logistics_no,
-                    signature_token, signature_status, signature_expires_at, photo_upload_token
+                    signature_token, signature_status, signature_expires_at, photo_upload_token,
+                    unit_price_minor, currency, price_recorded_by, price_recorded_at
                 )
-                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?)
+                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_id_value,
@@ -11217,6 +11340,10 @@ def create_shipment_from_shipped_page():
                     signature_token,
                     signature_expires,
                     photo_upload_token,
+                    price_snapshot["unit_price_minor"],
+                    price_snapshot["currency"],
+                    price_snapshot["price_recorded_by"],
+                    price_snapshot["price_recorded_at"],
                 ),
             )
             shipment_id = cursor.lastrowid

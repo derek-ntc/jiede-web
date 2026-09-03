@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
+from pricing import line_total_minor
 
 
 class ProductPricingMigrationTests(unittest.TestCase):
@@ -185,6 +186,191 @@ class ProductPricePermissionTests(unittest.TestCase):
                 "SELECT can_view_prices, can_manage_finance FROM users WHERE username = 'form-user'"
             ).fetchone()
         self.assertEqual((user["can_view_prices"], user["can_manage_finance"]), (1, 0))
+
+
+class ShipmentPriceSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self.original_db_path = app.DB_PATH
+        self.original_database_ready = app.DATABASE_READY
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        self.tmpdir = tempfile.TemporaryDirectory()
+        app.DB_PATH = Path(self.tmpdir.name) / "manuals.db"
+        app.DATABASE_READY = False
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        app.init_db()
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, active,
+                    can_manage_shipped, can_view_shipped, can_view_prices,
+                    created_at, updated_at
+                ) VALUES ('shipper', 'hash', 'operator', 1, 1, 1, 0, ?, ?)
+                """,
+                (now, now),
+            )
+            self.location_id = conn.execute(
+                """
+                INSERT INTO warehouse_locations (
+                    name, code, remark, enabled, created_at, updated_at
+                ) VALUES ('价格快照库位', 'PRICE-SNAPSHOT', '', 1, ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+        self.client = app.app.test_client()
+        with self.client.session_transaction() as session:
+            session["admin_logged_in"] = True
+            session["admin_username"] = "shipper"
+            session["admin_role"] = "operator"
+
+    def tearDown(self):
+        app.DB_PATH = self.original_db_path
+        app.DATABASE_READY = self.original_database_ready
+        app.app.config.update(
+            TESTING=self.original_testing,
+            SECRET_KEY=self.original_secret_key,
+        )
+        self.tmpdir.cleanup()
+
+    def create_order(self, drawing_no, unit_price_minor):
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            manual_id = conn.execute(
+                """
+                INSERT INTO manuals (
+                    drawing_no, product_name, customer, model, category, version,
+                    filename, original_filename, unit_price_minor, currency,
+                    created_at, updated_at
+                ) VALUES (?, ?, '客户甲', '', '', '', '', '', ?, 'CNY', ?, ?)
+                """,
+                (drawing_no, f"产品-{drawing_no}", unit_price_minor, now, now),
+            ).lastrowid
+            order_id = conn.execute(
+                """
+                INSERT INTO product_orders (
+                    manual_id, order_no, ordered_at, quantity, customer,
+                    planned_ship_at, created_at, updated_at
+                ) VALUES (?, ?, '2026-09-03', 10, '客户甲', '2026-09-04', ?, ?)
+                """,
+                (manual_id, f"SO-{drawing_no}", now, now),
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO inventory_balances (
+                    manual_id, location_id, quantity, updated_at
+                ) VALUES (?, ?, 10, ?)
+                """,
+                (manual_id, self.location_id, now),
+            )
+        return manual_id, order_id
+
+    def ship(self, order_id, quantity, **extra_data):
+        return self.client.post(
+            "/admin/shipped-orders/new",
+            data={
+                "order_id": str(order_id),
+                "shipped_quantity": str(quantity),
+                "shipped_at": "2026-09-03",
+                "logistics_no": "SNAPSHOT",
+                **extra_data,
+            },
+        )
+
+    def test_ordinary_shipment_snapshots_server_price_and_edit_keeps_it_immutable(self):
+        manual_id, order_id = self.create_order("P-250", 250)
+
+        response = self.ship(
+            order_id,
+            4,
+            unit_price_minor="1",
+            currency="USD",
+            price_recorded_by="browser",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            shipment = conn.execute(
+                "SELECT * FROM product_order_shipments WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = 999 WHERE id = ?",
+                (manual_id,),
+            )
+        edit_response = self.client.post(
+            f"/admin/shipped-orders/{shipment['id']}/edit",
+            data={
+                "shipped_quantity": "4",
+                "shipped_at": "2026-09-04",
+                "logistics_no": "EDITED",
+                "unit_price_minor": "999",
+                "currency": "USD",
+            },
+        )
+        self.assertEqual(edit_response.status_code, 302)
+        with app.get_db() as conn:
+            shipment = conn.execute(
+                "SELECT * FROM product_order_shipments WHERE id = ?",
+                (shipment["id"],),
+            ).fetchone()
+
+        self.assertEqual(
+            (shipment["unit_price_minor"], shipment["currency"]),
+            (250, "CNY"),
+        )
+        self.assertEqual(line_total_minor(shipment["unit_price_minor"], 4), 1000)
+        self.assertEqual(shipment["price_recorded_by"], "shipper")
+        self.assertTrue(shipment["price_recorded_at"])
+
+    def test_ordinary_shipment_snapshots_zero_as_a_recorded_price(self):
+        _manual_id, order_id = self.create_order("P-ZERO", 0)
+
+        response = self.ship(order_id, 2)
+
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            shipment = conn.execute(
+                "SELECT * FROM product_order_shipments WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()
+        self.assertEqual(
+            (
+                shipment["unit_price_minor"],
+                shipment["currency"],
+                shipment["price_recorded_by"],
+                bool(shipment["price_recorded_at"]),
+            ),
+            (0, "CNY", "shipper", True),
+        )
+
+    def test_ordinary_shipment_keeps_null_price_and_blank_audit_fields(self):
+        _manual_id, order_id = self.create_order("P-NULL", None)
+
+        response = self.ship(
+            order_id,
+            2,
+            unit_price_minor="777",
+            currency="USD",
+            price_recorded_at="browser",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            shipment = conn.execute(
+                "SELECT * FROM product_order_shipments WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()
+        self.assertEqual(
+            (
+                shipment["unit_price_minor"],
+                shipment["currency"],
+                shipment["price_recorded_by"],
+                shipment["price_recorded_at"],
+            ),
+            (None, "CNY", "", ""),
+        )
 
 
 class ProductPageTestCase(unittest.TestCase):
