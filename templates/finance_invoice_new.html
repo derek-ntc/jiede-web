@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}新建待开票单{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>新建待开票单</h1>
+      <p>先选择客户，再勾选同一币种的完整发货明细。</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('finance_invoices') }}">返回财务列表</a>
+  </section>
+
+  <section class="panel">
+    <form class="finance-source-filter" method="get">
+      <label>
+        客户
+        <select name="customer_id" required onchange="this.form.submit()">
+          <option value="">请选择客户</option>
+          {% for customer in customers %}
+            <option value="{{ customer.id }}" {% if selected_customer and customer.id == selected_customer.id %}selected{% endif %}>{{ customer.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        币种
+        <select name="currency" onchange="this.form.submit()">
+          <option value="">全部币种</option>
+          {% for currency in supported_currencies %}
+            <option value="{{ currency }}" {% if currency == selected_currency %}selected{% endif %}>{{ currency }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <noscript><button type="submit">查询</button></noscript>
+    </form>
+  </section>
+
+  {% if selected_customer %}
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h2>{{ selected_customer.name }}：可开票发货</h2>
+          <span class="empty-text">未记录价格或已被有效开票单占用的明细不会出现在这里。</span>
+        </div>
+      </div>
+      <form method="post" class="finance-source-form" data-finance-source-form>
+        <input type="hidden" name="customer_id" value="{{ selected_customer.id }}">
+        <input type="hidden" name="currency" value="{{ selected_currency }}">
+        <div class="table-wrap finance-table-wrap">
+          <table class="finance-table finance-source-table">
+            <thead>
+              <tr>
+                <th>选择</th>
+                <th>来源</th>
+                <th>发货日期</th>
+                <th>订单/组装图号</th>
+                <th>产品图号</th>
+                <th>产品名称</th>
+                <th>数量</th>
+                <th>单价</th>
+                <th>金额</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for source in sources %}
+                <tr>
+                  <td data-label="选择">
+                    <input
+                      type="checkbox"
+                      name="source_ref"
+                      value="{{ source.source_type }}:{{ source.source_id }}"
+                      data-finance-source
+                      data-currency="{{ source.currency }}"
+                      data-total-minor="{{ source.line_total_minor }}"
+                    >
+                  </td>
+                  <td data-label="来源">{{ "普通发货" if source.source_type == "ordinary" else "组装配件" }}</td>
+                  <td data-label="发货日期">{{ source.shipped_at }}</td>
+                  <td data-label="订单/组装图号">
+                    {% if source.source_type == "ordinary" %}
+                      {{ source.order_no or "-" }}
+                    {% else %}
+                      {{ source.assembly_drawing_no }} / 批次 {{ source.assembly_batch_id }}
+                    {% endif %}
+                  </td>
+                  <td data-label="产品图号">{{ source.drawing_no or "-" }}</td>
+                  <td data-label="产品名称">{{ source.product_name or "-" }}</td>
+                  <td data-label="数量">{{ source.quantity }}</td>
+                  <td data-label="单价">{{ source.unit_price_minor | money_minor(source.currency) }} {{ source.currency }}</td>
+                  <td data-label="金额"><strong>{{ source.line_total_minor | money_minor(source.currency) }} {{ source.currency }}</strong></td>
+                </tr>
+              {% else %}
+                <tr><td class="empty" colspan="9">该客户暂无可开票的发货明细</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="finance-selection-bar">
+          <span data-finance-selection-summary>尚未选择发货明细</span>
+          <button type="submit" data-finance-submit disabled>创建待开票单</button>
+        </div>
+      </form>
+    </section>
+  {% endif %}
+{% endblock %}
+{% block scripts %}
+  <script src="{{ url_for('static', filename='finance.js', v=static_version) }}"></script>
+{% endblock %}

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}财务开票{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>财务开票</h1>
+      <p>合并同一客户、同一币种的发货明细，登记开票和收款状态。</p>
+    </div>
+    <a class="button" href="{{ url_for('new_finance_invoice') }}">新建待开票单</a>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>开票单列表</h2>
+      <span class="empty-text">{{ invoices|length }} 张</span>
+    </div>
+    <form class="search finance-filter-form" method="get">
+      <select name="customer" aria-label="客户">
+        <option value="">客户：全部</option>
+        {% for customer in customers %}
+          <option value="{{ customer.name }}" {% if customer.name == selected_customer %}selected{% endif %}>{{ customer.name }}</option>
+        {% endfor %}
+      </select>
+      <select name="status" aria-label="开票状态">
+        <option value="">状态：全部</option>
+        {% for value, label in status_labels.items() %}
+          <option value="{{ value }}" {% if value == selected_status %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <input type="search" name="invoice_no" value="{{ selected_invoice_no }}" placeholder="发票号码">
+      <input type="date" name="date" value="{{ selected_invoice_date }}" aria-label="开票日期">
+      <button type="submit">筛选</button>
+      {% if selected_customer or selected_status or selected_invoice_no or selected_invoice_date %}
+        <a class="button secondary" href="{{ url_for('finance_invoices') }}">清除</a>
+      {% endif %}
+    </form>
+
+    <div class="table-wrap finance-table-wrap">
+      <table class="finance-table">
+        <thead>
+          <tr>
+            <th>编号</th>
+            <th>客户</th>
+            <th>状态</th>
+            <th>发票号码</th>
+            <th>开票日期</th>
+            <th>明细</th>
+            <th>总金额</th>
+            <th>更新时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for invoice in invoices %}
+            <tr data-finance-invoice-id="{{ invoice.id }}">
+              <td data-label="编号">{{ invoice.id }}</td>
+              <td data-label="客户">{{ invoice.customer_name }}</td>
+              <td data-label="状态"><span class="finance-status status-{{ invoice.status }}">{{ status_labels[invoice.status] }}</span></td>
+              <td data-label="发票号码">{{ invoice.invoice_no or "-" }}</td>
+              <td data-label="开票日期">{{ invoice.invoice_date or "-" }}</td>
+              <td data-label="明细">{{ invoice.item_count }} 项</td>
+              <td data-label="总金额"><strong>{{ invoice.total_minor | money_minor(invoice.currency) }} {{ invoice.currency }}</strong></td>
+              <td data-label="更新时间">{{ invoice.updated_at | datetime }}</td>
+              <td data-label="操作"><a class="button compact-button" href="{{ url_for('finance_invoice_detail', invoice_id=invoice.id) }}">查看</a></td>
+            </tr>
+          {% else %}
+            <tr><td class="empty" colspan="9">暂无开票单</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

@@ -366,6 +366,7 @@ def upload_limits():
             (BASE_DIR / "static" / "inventory.js").stat().st_mtime if (BASE_DIR / "static" / "inventory.js").exists() else 0,
             (BASE_DIR / "static" / "order_entry.js").stat().st_mtime if (BASE_DIR / "static" / "order_entry.js").exists() else 0,
             (BASE_DIR / "static" / "product_list.js").stat().st_mtime if (BASE_DIR / "static" / "product_list.js").exists() else 0,
+            (BASE_DIR / "static" / "finance.js").stat().st_mtime if (BASE_DIR / "static" / "finance.js").exists() else 0,
         )),
         "current_user_role": current_user_role(),
         "current_admin_username": current_admin_username(),
@@ -5195,6 +5196,12 @@ def fetch_shipment_by_photo_token(conn, token):
 
 
 FINANCE_SOURCE_TYPES = frozenset({"ordinary", "assembly_item"})
+FINANCE_STATUS_LABELS = {
+    "pending": "待开票",
+    "invoiced": "已开票",
+    "paid": "已收款",
+    "void": "已作废",
+}
 
 
 def finance_claim_key(source_type, source_id):
@@ -5207,6 +5214,20 @@ def finance_claim_key(source_type, source_id):
     if normalized_id <= 0:
         raise ValueError("发货记录来源无效")
     return f"{source_type}:{normalized_id}"
+
+
+def parse_finance_source_refs(raw_refs):
+    refs = []
+    for raw_ref in raw_refs or ():
+        match = re.fullmatch(r"(ordinary|assembly_item):([1-9][0-9]*)", str(raw_ref))
+        if not match:
+            raise ValueError("请选择有效的发货记录")
+        refs.append((match.group(1), int(match.group(2))))
+    if not refs:
+        raise ValueError("请至少选择一条发货记录")
+    if len(set(refs)) != len(refs):
+        raise ValueError("不能重复选择同一发货记录")
+    return refs
 
 
 def _finance_source_select(source_type):
@@ -5727,6 +5748,37 @@ def delete_pending_finance_invoice(conn, invoice_id):
             (invoice_id,),
         )
         conn.execute("DELETE FROM finance_invoices WHERE id = ?", (invoice_id,))
+
+
+def fetch_finance_invoice(conn, invoice_id):
+    return conn.execute(
+        """
+        SELECT finance_invoices.*,
+               (
+                   SELECT COUNT(*)
+                   FROM finance_invoice_items
+                   WHERE finance_invoice_items.invoice_id = finance_invoices.id
+               ) AS item_count
+        FROM finance_invoices
+        WHERE finance_invoices.id = ?
+        """,
+        (invoice_id,),
+    ).fetchone()
+
+
+def fetch_finance_invoice_items(conn, invoice_id):
+    return conn.execute(
+        """
+        SELECT id, invoice_id, source_type, source_id, active_claim_key,
+               order_no, assembly_batch_id, assembly_drawing_no, shipped_at,
+               drawing_no, product_name, quantity, unit_price_minor, currency,
+               line_total_minor, created_at
+        FROM finance_invoice_items
+        WHERE invoice_id = ?
+        ORDER BY shipped_at ASC, id ASC
+        """,
+        (invoice_id,),
+    ).fetchall()
 
 
 def get_shipment_images(conn, shipment_ids):
@@ -7626,6 +7678,256 @@ def delete_customer(customer_id):
 
     flash("客户信息已删除", "success")
     return redirect(url_for("admin_customers"))
+
+
+@app.route("/admin/finance")
+@permission_required("finance_manage")
+def finance_invoices():
+    selected_customer = request.args.get("customer", "").strip()
+    selected_status = request.args.get("status", "").strip()
+    invoice_no = request.args.get("invoice_no", "").strip()
+    invoice_date = request.args.get("date", "").strip()
+    conditions = []
+    params = []
+    if selected_customer:
+        conditions.append("finance_invoices.customer_name = ?")
+        params.append(selected_customer)
+    if selected_status:
+        if selected_status not in FINANCE_STATUS_LABELS:
+            selected_status = ""
+        else:
+            conditions.append("finance_invoices.status = ?")
+            params.append(selected_status)
+    if invoice_no:
+        conditions.append("finance_invoices.invoice_no LIKE ?")
+        params.append(f"%{invoice_no}%")
+    if invoice_date:
+        conditions.append("finance_invoices.invoice_date = ?")
+        params.append(invoice_date)
+
+    sql = """
+        SELECT finance_invoices.*,
+               (
+                   SELECT COUNT(*)
+                   FROM finance_invoice_items
+                   WHERE finance_invoice_items.invoice_id = finance_invoices.id
+               ) AS item_count
+        FROM finance_invoices
+    """
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY finance_invoices.created_at DESC, finance_invoices.id DESC"
+    with get_db() as conn:
+        invoices = conn.execute(sql, params).fetchall()
+        customers = conn.execute(
+            "SELECT id, name FROM customers ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+    return render_template(
+        "finance_invoices.html",
+        invoices=invoices,
+        customers=customers,
+        status_labels=FINANCE_STATUS_LABELS,
+        selected_customer=selected_customer,
+        selected_status=selected_status,
+        selected_invoice_no=invoice_no,
+        selected_invoice_date=invoice_date,
+    )
+
+
+@app.route("/admin/finance/new", methods=["GET", "POST"])
+@permission_required("finance_manage")
+def new_finance_invoice():
+    selected_customer_id = request.values.get("customer_id", "").strip()
+    selected_currency = request.values.get("currency", "").strip().upper()
+    if request.method == "POST":
+        try:
+            customer_id = int(selected_customer_id)
+            if customer_id <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            flash("请选择客户", "error")
+            return redirect(url_for("new_finance_invoice"))
+        try:
+            source_refs = parse_finance_source_refs(
+                request.form.getlist("source_ref")
+            )
+            with get_db() as conn:
+                invoice_id = create_finance_invoice(
+                    conn,
+                    customer_id,
+                    source_refs,
+                    current_admin_username(),
+                )
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(
+                url_for(
+                    "new_finance_invoice",
+                    customer_id=selected_customer_id,
+                    currency=selected_currency,
+                )
+            )
+        flash("待开票单已创建", "success")
+        return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+
+    if selected_currency:
+        try:
+            selected_currency = normalize_currency(selected_currency)
+        except ValueError as error:
+            flash(str(error), "error")
+            selected_currency = ""
+    selected_customer = None
+    sources = []
+    with get_db() as conn:
+        customers = conn.execute(
+            "SELECT id, name FROM customers ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+        if selected_customer_id.isdigit() and int(selected_customer_id) > 0:
+            selected_customer = conn.execute(
+                "SELECT id, name FROM customers WHERE id = ?",
+                (int(selected_customer_id),),
+            ).fetchone()
+            if selected_customer:
+                sources = fetch_available_finance_sources(
+                    conn,
+                    selected_customer["name"],
+                    selected_currency,
+                )
+    return render_template(
+        "finance_invoice_new.html",
+        customers=customers,
+        selected_customer=selected_customer,
+        selected_customer_id=selected_customer_id,
+        selected_currency=selected_currency,
+        supported_currencies=SUPPORTED_CURRENCIES,
+        sources=sources,
+    )
+
+
+@app.route("/admin/finance/<int:invoice_id>")
+@permission_required("finance_manage")
+def finance_invoice_detail(invoice_id):
+    with get_db() as conn:
+        invoice = fetch_finance_invoice(conn, invoice_id)
+        if invoice is None:
+            abort(404)
+        items = fetch_finance_invoice_items(conn, invoice_id)
+        available_sources = []
+        if invoice["status"] == "pending":
+            available_sources = fetch_available_finance_sources(
+                conn,
+                invoice["customer_name"],
+                invoice["currency"],
+            )
+    return render_template(
+        "finance_invoice_detail.html",
+        invoice=invoice,
+        items=items,
+        available_sources=available_sources,
+        status_labels=FINANCE_STATUS_LABELS,
+        default_date=datetime.now().date().isoformat(),
+    )
+
+
+@app.route("/admin/finance/<int:invoice_id>/items", methods=["POST"])
+@permission_required("finance_manage")
+def edit_finance_invoice_items(invoice_id):
+    raw_refs = request.form.getlist("source_ref")
+    try:
+        source_refs = parse_finance_source_refs(raw_refs) if raw_refs else []
+        with get_db() as conn:
+            replace_pending_invoice_items(
+                conn,
+                invoice_id,
+                source_refs,
+                current_admin_username(),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash("待开票明细已更新", "success")
+    return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+
+
+@app.route("/admin/finance/<int:invoice_id>/issue", methods=["POST"])
+@permission_required("finance_manage")
+def issue_finance_invoice(invoice_id):
+    try:
+        with get_db() as conn:
+            mark_finance_invoice_invoiced(
+                conn,
+                invoice_id,
+                request.form.get("invoice_no", ""),
+                request.form.get("invoice_date", ""),
+                request.form.get("finance_remark", ""),
+                current_admin_username(),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash("开票信息已登记", "success")
+    return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+
+
+@app.route("/admin/finance/<int:invoice_id>/pay", methods=["POST"])
+@permission_required("finance_manage")
+def pay_finance_invoice(invoice_id):
+    try:
+        with get_db() as conn:
+            mark_finance_invoice_paid(
+                conn,
+                invoice_id,
+                request.form.get("payment_date", ""),
+                current_admin_username(),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash("收款信息已登记", "success")
+    return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+
+
+@app.route("/admin/finance/<int:invoice_id>/reopen", methods=["POST"])
+@permission_required("finance_manage")
+def reopen_finance_invoice(invoice_id):
+    try:
+        with get_db() as conn:
+            reopen_finance_invoice_payment(
+                conn,
+                invoice_id,
+                current_admin_username(),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash("已撤销收款状态", "success")
+    return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+
+
+@app.route("/admin/finance/<int:invoice_id>/void", methods=["POST"])
+@permission_required("finance_manage")
+def void_finance_invoice_route(invoice_id):
+    try:
+        with get_db() as conn:
+            void_finance_invoice(conn, invoice_id, current_admin_username())
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash("开票单已作废，关联发货明细已释放", "success")
+    return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+
+
+@app.route("/admin/finance/<int:invoice_id>/delete", methods=["POST"])
+@permission_required("finance_manage")
+def delete_finance_invoice(invoice_id):
+    try:
+        with get_db() as conn:
+            delete_pending_finance_invoice(conn, invoice_id)
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("finance_invoice_detail", invoice_id=invoice_id))
+    flash("待开票单已删除", "success")
+    return redirect(url_for("finance_invoices"))
 
 
 @app.route("/admin/common-info", methods=["GET", "POST"])

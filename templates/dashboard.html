@@ -38,6 +38,12 @@
         <strong>{{ stats.shipped }}</strong>
       </a>
     {% endif %}
+    {% if can_manage_finance %}
+      <a class="overview-card" href="{{ url_for('finance_invoices') }}">
+        <span>财务开票</span>
+        <strong>进入</strong>
+      </a>
+    {% endif %}
     {% if can_manage_customers %}
       <a class="overview-card" href="{{ url_for('admin_customers') }}">
         <span>客户信息</span>
@@ -93,6 +99,12 @@
       <a class="module-card" href="{{ url_for('shipped_orders') }}">
         <strong>发货</strong>
         <span>查看已发货记录并导出送货单。</span>
+      </a>
+    {% endif %}
+    {% if can_manage_finance %}
+      <a class="module-card" href="{{ url_for('finance_invoices') }}">
+        <strong>财务</strong>
+        <span>管理待开票、已开票、已收款和已作废单据。</span>
       </a>
     {% endif %}
     <a class="module-card" href="{{ url_for('products_index') }}">

@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}开票单 {{ invoice.id }}{% endblock %}
+{% block content %}
+  <section class="page-head">
+    <div>
+      <h1>开票单 #{{ invoice.id }}</h1>
+      <p>{{ invoice.customer_name }} / {{ invoice.currency }}</p>
+    </div>
+    <div class="finance-head-actions">
+      <span class="finance-status status-{{ invoice.status }}">{{ status_labels[invoice.status] }}</span>
+      <a class="button secondary" href="{{ url_for('finance_invoices') }}">返回财务列表</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>客户开票资料快照</h2>
+      <strong class="finance-total">{{ invoice.total_minor | money_minor(invoice.currency) }} {{ invoice.currency }}</strong>
+    </div>
+    <dl class="finance-snapshot-grid">
+      <div><dt>客户名称</dt><dd>{{ invoice.customer_name }}</dd></div>
+      <div><dt>开票抬头</dt><dd>{{ invoice.invoice_title or "-" }}</dd></div>
+      <div><dt>纳税人识别号</dt><dd>{{ invoice.tax_id or "-" }}</dd></div>
+      <div><dt>注册地址</dt><dd>{{ invoice.registered_address or "-" }}</dd></div>
+      <div><dt>注册电话</dt><dd>{{ invoice.registered_phone or "-" }}</dd></div>
+      <div><dt>开户银行</dt><dd>{{ invoice.bank_name or "-" }}</dd></div>
+      <div><dt>银行账号</dt><dd>{{ invoice.bank_account or "-" }}</dd></div>
+      <div><dt>收票邮箱</dt><dd>{{ invoice.invoice_email or "-" }}</dd></div>
+    </dl>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>开票明细</h2>
+      <span class="empty-text">{{ invoice.item_count }} 项</span>
+    </div>
+    <div class="table-wrap finance-table-wrap">
+      <table class="finance-table">
+        <thead>
+          <tr>
+            <th>来源</th>
+            <th>发货日期</th>
+            <th>订单/组装图号</th>
+            <th>产品图号</th>
+            <th>产品名称</th>
+            <th>数量</th>
+            <th>单价</th>
+            <th>金额</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+            <tr>
+              <td data-label="来源">{{ "普通发货" if item.source_type == "ordinary" else "组装配件" }}</td>
+              <td data-label="发货日期">{{ item.shipped_at }}</td>
+              <td data-label="订单/组装图号">
+                {% if item.source_type == "ordinary" %}
+                  {{ item.order_no or "-" }}
+                {% else %}
+                  {{ item.assembly_drawing_no }} / 批次 {{ item.assembly_batch_id }}
+                {% endif %}
+              </td>
+              <td data-label="产品图号">{{ item.drawing_no or "-" }}</td>
+              <td data-label="产品名称">{{ item.product_name or "-" }}</td>
+              <td data-label="数量">{{ item.quantity }}</td>
+              <td data-label="单价">{{ item.unit_price_minor | money_minor(item.currency) }} {{ item.currency }}</td>
+              <td data-label="金额"><strong>{{ item.line_total_minor | money_minor(item.currency) }} {{ item.currency }}</strong></td>
+            </tr>
+          {% else %}
+            <tr><td class="empty" colspan="8">当前待开票单没有明细</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {% if invoice.status == "pending" %}
+    <section class="panel">
+      <h2>调整待开票明细</h2>
+      <form method="post" action="{{ url_for('edit_finance_invoice_items', invoice_id=invoice.id) }}" class="finance-source-form" data-finance-source-form>
+        <div class="finance-check-list">
+          {% for item in items %}
+            <label>
+              <input type="checkbox" name="source_ref" value="{{ item.source_type }}:{{ item.source_id }}" data-finance-source data-currency="{{ item.currency }}" data-total-minor="{{ item.line_total_minor }}" checked>
+              <span>{{ item.drawing_no }} / {{ item.product_name }} / {{ item.line_total_minor | money_minor(item.currency) }} {{ item.currency }}</span>
+            </label>
+          {% endfor %}
+          {% for source in available_sources %}
+            <label>
+              <input type="checkbox" name="source_ref" value="{{ source.source_type }}:{{ source.source_id }}" data-finance-source data-currency="{{ source.currency }}" data-total-minor="{{ source.line_total_minor }}">
+              <span>可增加：{{ source.drawing_no }} / {{ source.product_name }} / {{ source.line_total_minor | money_minor(source.currency) }} {{ source.currency }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <div class="finance-selection-bar">
+          <span data-finance-selection-summary></span>
+          <button type="submit" data-finance-submit>保存明细</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel finance-action-panel">
+      <h2>登记开票</h2>
+      <form method="post" action="{{ url_for('issue_finance_invoice', invoice_id=invoice.id) }}" class="grid-form">
+        <label>发票号码<input type="text" name="invoice_no" required></label>
+        <label>开票日期<input type="date" name="invoice_date" value="{{ default_date }}" required></label>
+        <label class="wide">财务备注<textarea name="finance_remark" rows="2"></textarea></label>
+        <div class="wide form-actions"><button type="submit">登记为已开票</button></div>
+      </form>
+      <form method="post" action="{{ url_for('delete_finance_invoice', invoice_id=invoice.id) }}" onsubmit="return confirm('确定删除这张待开票单吗？关联发货明细将被释放。');">
+        <button class="danger" type="submit">删除待开票单</button>
+      </form>
+    </section>
+  {% elif invoice.status == "invoiced" %}
+    <section class="panel finance-action-panel">
+      <h2>收款与作废</h2>
+      <p>发票号码：{{ invoice.invoice_no }} / 开票日期：{{ invoice.invoice_date }}</p>
+      <form method="post" action="{{ url_for('pay_finance_invoice', invoice_id=invoice.id) }}" class="form-actions">
+        <label>收款日期<input type="date" name="payment_date" value="{{ default_date }}" required></label>
+        <button type="submit">登记已收款</button>
+      </form>
+      <form method="post" action="{{ url_for('void_finance_invoice_route', invoice_id=invoice.id) }}" onsubmit="return confirm('确定作废这张开票单吗？关联发货明细将被释放。');">
+        <button class="danger" type="submit">作废开票单</button>
+      </form>
+    </section>
+  {% elif invoice.status == "paid" %}
+    <section class="panel finance-action-panel">
+      <h2>已收款</h2>
+      <p>收款日期：{{ invoice.payment_date }}</p>
+      <form method="post" action="{{ url_for('reopen_finance_invoice', invoice_id=invoice.id) }}" onsubmit="return confirm('确定撤销收款状态吗？');">
+        <button class="secondary" type="submit">撤销收款</button>
+      </form>
+    </section>
+  {% endif %}
+
+  <section class="panel">
+    <h2>单据与审计</h2>
+    <dl class="finance-snapshot-grid">
+      <div><dt>状态</dt><dd>{{ status_labels[invoice.status] }}</dd></div>
+      <div><dt>发票号码</dt><dd>{{ invoice.invoice_no or "-" }}</dd></div>
+      <div><dt>开票日期</dt><dd>{{ invoice.invoice_date or "-" }}</dd></div>
+      <div><dt>收款日期</dt><dd>{{ invoice.payment_date or "-" }}</dd></div>
+      <div><dt>财务备注</dt><dd>{{ invoice.finance_remark or "-" }}</dd></div>
+      <div><dt>创建人</dt><dd>{{ invoice.created_by or "-" }}</dd></div>
+      <div><dt>更新人</dt><dd>{{ invoice.updated_by or "-" }}</dd></div>
+      <div><dt>作废人</dt><dd>{{ invoice.voided_by or "-" }}</dd></div>
+    </dl>
+  </section>
+{% endblock %}
+{% block scripts %}
+  {% if invoice.status == "pending" %}
+    <script src="{{ url_for('static', filename='finance.js', v=static_version) }}"></script>
+  {% endif %}
+{% endblock %}

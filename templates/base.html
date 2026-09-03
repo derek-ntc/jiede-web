@@ -22,6 +22,9 @@
           {% if can_manage_warehouse_inventory %}
             <a class="primary-nav-link{% if request.endpoint and request.endpoint.startswith('inventory') or request.endpoint == 'admin_inventory_overview' %} active-nav-link{% endif %}" href="{{ url_for('admin_inventory_overview') }}">库存</a>
           {% endif %}
+          {% if can_manage_finance %}
+            <a class="primary-nav-link{% if request.endpoint and (request.endpoint == 'finance_invoices' or request.endpoint.startswith('finance_invoice') or request.endpoint.startswith('new_finance') or request.endpoint.startswith('edit_finance') or request.endpoint.startswith('issue_finance') or request.endpoint.startswith('pay_finance') or request.endpoint.startswith('reopen_finance') or request.endpoint.startswith('void_finance') or request.endpoint.startswith('delete_finance')) %} active-nav-link{% endif %}" href="{{ url_for('finance_invoices') }}">财务</a>
+          {% endif %}
         {% endif %}
         {% if session.get("admin_logged_in") %}
           <a class="{% if request.endpoint in ['products_index', 'manual_detail', 'manual_technical', 'manual_preview', 'edit_manual', 'edit_manual_technical'] %}active-nav-link{% endif %}" href="{{ url_for('products_index') }}">产品列表</a>

@@ -13,6 +13,12 @@
   </section>
 
   <section class="module-grid">
+    {% if can_manage_finance %}
+      <a class="module-card" href="{{ url_for('finance_invoices') }}">
+        <strong>财务开票模块</strong>
+        <span>合并发货明细，登记开票、收款和作废状态。</span>
+      </a>
+    {% endif %}
     {% if can_manage_customers %}
       <a class="module-card" href="{{ url_for('admin_customers') }}">
         <strong>客户信息模块</strong>

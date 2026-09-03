@@ -708,3 +708,220 @@ class FinanceConcurrencyTests(FinanceDomainTestCase):
                 (f"ordinary:{self.ordinary_a_cny}",),
             ).fetchall()
         self.assertEqual([row["invoice_id"] for row in owners], [first_invoice_id])
+
+
+class FinanceRouteTests(FinanceDomainTestCase):
+    def setUp(self):
+        super().setUp()
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            self.create_user(conn, "finance-manager", can_manage_finance=1)
+            self.create_user(conn, "price-only", can_view_prices=1)
+            self.create_user(conn, "unrelated")
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.app.config.update(
+            TESTING=self.original_testing,
+            SECRET_KEY=self.original_secret_key,
+        )
+        super().tearDown()
+
+    def create_user(
+        self,
+        conn,
+        username,
+        can_view_prices=0,
+        can_manage_finance=0,
+    ):
+        now = "2026-09-03T10:00:00"
+        conn.execute(
+            """
+            INSERT INTO users (
+                username, password_hash, role, active,
+                can_view_prices, can_manage_finance,
+                created_at, updated_at
+            ) VALUES (?, 'hash', 'operator', 1, ?, ?, ?, ?)
+            """,
+            (username, can_view_prices, can_manage_finance, now, now),
+        )
+
+    def login_as(self, username):
+        with self.client.session_transaction() as session:
+            session.clear()
+            session["admin_logged_in"] = True
+            session["admin_username"] = username
+            session["admin_role"] = "operator"
+
+    def test_finance_manager_can_create_edit_and_complete_full_lifecycle(self):
+        self.login_as("finance-manager")
+        response = self.client.get(
+            "/admin/finance/new",
+            query_string={"customer_id": self.customer_a},
+        )
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("SO-A", html)
+        self.assertIn("ASM-A", html)
+        self.assertIn("1.00 CNY", html)
+        self.assertNotIn("SO-B", html)
+        self.assertNotIn("FA-NULL", html)
+
+        response = self.client.post(
+            "/admin/finance/new",
+            data={
+                "customer_id": str(self.customer_a),
+                "source_ref": [
+                    f"ordinary:{self.ordinary_a_cny}",
+                    f"assembly_item:{self.assembly_a_cny}",
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            invoice = conn.execute(
+                "SELECT * FROM finance_invoices ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        invoice_id = invoice["id"]
+        self.assertEqual(response.location, f"/admin/finance/{invoice_id}")
+
+        detail = self.client.get(response.location).get_data(as_text=True)
+        self.assertIn("客户A开票抬头", detail)
+        self.assertIn("TAX-A", detail)
+        self.assertIn("finance-manager", detail)
+        self.assertIn("8.00 CNY", detail)
+
+        response = self.client.post(
+            f"/admin/finance/{invoice_id}/items",
+            data={"source_ref": f"ordinary:{self.ordinary_a_cny}"},
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            invoice = conn.execute(
+                "SELECT total_minor FROM finance_invoices WHERE id = ?",
+                (invoice_id,),
+            ).fetchone()
+        self.assertEqual(invoice["total_minor"], 200)
+
+        response = self.client.post(
+            f"/admin/finance/{invoice_id}/issue",
+            data={
+                "invoice_no": "INV-ROUTE-001",
+                "invoice_date": "2026-09-06",
+                "finance_remark": "路由流程",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        response = self.client.post(
+            f"/admin/finance/{invoice_id}/pay",
+            data={"payment_date": "2026-09-10"},
+        )
+        self.assertEqual(response.status_code, 302)
+        response = self.client.post(f"/admin/finance/{invoice_id}/reopen")
+        self.assertEqual(response.status_code, 302)
+        response = self.client.post(f"/admin/finance/{invoice_id}/void")
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            invoice = conn.execute(
+                "SELECT * FROM finance_invoices WHERE id = ?", (invoice_id,)
+            ).fetchone()
+        self.assertEqual(invoice["status"], "void")
+        self.assertEqual(invoice["invoice_no"], "INV-ROUTE-001")
+        self.assertEqual(invoice["finance_remark"], "路由流程")
+
+    def test_invoice_list_filters_customer_status_number_and_date(self):
+        with app.get_db() as conn:
+            invoice_a = app.create_finance_invoice(
+                conn,
+                self.customer_a,
+                [("ordinary", self.ordinary_a_cny)],
+                "finance-manager",
+            )
+            app.mark_finance_invoice_invoiced(
+                conn,
+                invoice_a,
+                "INV-FILTER-A",
+                "2026-09-06",
+                "",
+                "finance-manager",
+            )
+            invoice_b = app.create_finance_invoice(
+                conn,
+                self.customer_b,
+                [("ordinary", self.ordinary_b_cny)],
+                "finance-manager",
+            )
+        self.login_as("finance-manager")
+
+        cases = (
+            ({"customer": "客户A"}, invoice_a, invoice_b),
+            ({"status": "invoiced"}, invoice_a, invoice_b),
+            ({"invoice_no": "FILTER-A"}, invoice_a, invoice_b),
+            ({"date": "2026-09-06"}, invoice_a, invoice_b),
+            ({"status": "pending"}, invoice_b, invoice_a),
+        )
+        for query, present, absent in cases:
+            with self.subTest(query=query):
+                response = self.client.get("/admin/finance", query_string=query)
+                html = response.get_data(as_text=True)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(f'data-finance-invoice-id="{present}"', html)
+                self.assertNotIn(f'data-finance-invoice-id="{absent}"', html)
+
+    def test_malformed_and_duplicate_source_references_write_nothing(self):
+        self.login_as("finance-manager")
+        cases = (
+            ["ordinary:not-a-number"],
+            [f"ordinary:{self.ordinary_a_cny}", f"ordinary:{self.ordinary_a_cny}"],
+            [f"unknown:{self.ordinary_a_cny}"],
+        )
+        for refs in cases:
+            with self.subTest(refs=refs):
+                response = self.client.post(
+                    "/admin/finance/new",
+                    data={"customer_id": str(self.customer_a), "source_ref": refs},
+                )
+                self.assertEqual(response.status_code, 302)
+                with app.get_db() as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) AS c FROM finance_invoices"
+                    ).fetchone()["c"]
+                self.assertEqual(count, 0)
+
+    def test_every_finance_route_rejects_price_only_and_unrelated_users(self):
+        requests = (
+            ("get", "/admin/finance", None),
+            ("get", "/admin/finance/new", None),
+            ("post", "/admin/finance/new", {"customer_id": self.customer_a}),
+            ("get", "/admin/finance/999", None),
+            ("post", "/admin/finance/999/items", {}),
+            ("post", "/admin/finance/999/issue", {}),
+            ("post", "/admin/finance/999/pay", {}),
+            ("post", "/admin/finance/999/reopen", {}),
+            ("post", "/admin/finance/999/void", {}),
+            ("post", "/admin/finance/999/delete", {}),
+        )
+        for username in ("price-only", "unrelated"):
+            self.login_as(username)
+            for method, path, data in requests:
+                with self.subTest(username=username, path=path):
+                    response = getattr(self.client, method)(path, data=data)
+                    self.assertEqual(response.status_code, 302)
+                    self.assertTrue(response.location.endswith("/admin"))
+
+    def test_navigation_is_visible_only_to_finance_managers(self):
+        self.login_as("finance-manager")
+        for path in ("/dashboard", "/admin"):
+            with self.subTest(path=path):
+                html = self.client.get(path).get_data(as_text=True)
+                self.assertIn('href="/admin/finance"', html)
+                self.assertIn("财务", html)
+
+        self.login_as("price-only")
+        for path in ("/dashboard", "/admin"):
+            with self.subTest(path=path):
+                html = self.client.get(path).get_data(as_text=True)
+                self.assertNotIn('href="/admin/finance"', html)
