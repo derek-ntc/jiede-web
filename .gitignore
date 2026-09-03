@@ -27,6 +27,7 @@ PIL/
 
 # Codex implementation artifacts and local reports
 .superpowers/
+.worktrees/
 task-*-report.md
 
 # OS and editor files
