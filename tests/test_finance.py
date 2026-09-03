@@ -925,3 +925,345 @@ class FinanceRouteTests(FinanceDomainTestCase):
             with self.subTest(path=path):
                 html = self.client.get(path).get_data(as_text=True)
                 self.assertNotIn('href="/admin/finance"', html)
+
+
+class FinanceShipmentLockTests(FinanceDomainTestCase):
+    lock_message = "该发货记录已加入开票单，不能修改发货日期、数量或价格"
+    parent_lock_message = "该产品或订单包含已进入财务的发货记录，不能删除"
+
+    def setUp(self):
+        super().setUp()
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, active,
+                    can_view_prices, can_manage_finance,
+                    can_manage_shipped, can_view_shipped,
+                    can_manage_orders, can_view_orders, can_edit_products,
+                    created_at, updated_at
+                ) VALUES (
+                    'finance-manager', 'hash', 'operator', 1,
+                    1, 1, 1, 1, 1, 1, 1, ?, ?
+                )
+                """,
+                ("2026-09-03T10:00:00", "2026-09-03T10:00:00"),
+            )
+        self.client = app.app.test_client()
+        self.login_as("finance-manager")
+
+    def tearDown(self):
+        app.app.config.update(
+            TESTING=self.original_testing,
+            SECRET_KEY=self.original_secret_key,
+        )
+        super().tearDown()
+
+    def login_as(self, username):
+        with self.client.session_transaction() as session:
+            session.clear()
+            session["admin_logged_in"] = True
+            session["admin_username"] = username
+            session["admin_role"] = "operator"
+
+    def create_claim(self, source_type, source_id, issued=False):
+        with app.get_db() as conn:
+            invoice_id = app.create_finance_invoice(
+                conn,
+                self.customer_a,
+                [(source_type, source_id)],
+                "finance-manager",
+            )
+            if issued:
+                app.mark_finance_invoice_invoiced(
+                    conn,
+                    invoice_id,
+                    f"INV-LOCK-{invoice_id}",
+                    "2026-09-07",
+                    "",
+                    "finance-manager",
+                )
+        return invoice_id
+
+    def create_claimable_assembly_batch(self, suffix):
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            batch_id = conn.execute(
+                """
+                INSERT INTO assembly_shipment_batches (
+                    customer, assembly_drawing_no, set_quantity, shipped_at,
+                    logistics_no, created_by, created_at, updated_at
+                ) VALUES ('客户A', ?, 4, '2026-09-05', '', 'shipper', ?, ?)
+                """,
+                (f"ASM-{suffix}", now, now),
+            ).lastrowid
+            item_id = self.create_assembly_item(
+                conn,
+                batch_id,
+                self.manual_a,
+                4,
+                150,
+                "CNY",
+                now,
+                drawing_no=f"FA-{suffix}",
+            )
+        return batch_id, item_id
+
+    def assert_ordinary_source_unchanged(self, source_id, expected_quantity, expected_date):
+        with app.get_db() as conn:
+            row = conn.execute(
+                """
+                SELECT shipped_quantity, shipped_at
+                FROM product_order_shipments
+                WHERE id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            (row["shipped_quantity"], row["shipped_at"]),
+            (expected_quantity, expected_date),
+        )
+
+    def test_pending_and_issued_ordinary_sources_reject_edit_delete_and_price_backfill(self):
+        cases = (
+            (self.ordinary_a_cny, False, 2, "2026-09-01"),
+            (self.ordinary_a_usd, True, 1, "2026-09-02"),
+        )
+        for source_id, issued, quantity, shipped_at in cases:
+            with self.subTest(issued=issued):
+                self.create_claim("ordinary", source_id, issued=issued)
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/{source_id}/edit",
+                    data={
+                        "shipped_quantity": str(quantity),
+                        "shipped_at": shipped_at,
+                        "logistics_no": "财务锁定后物流备注",
+                    },
+                    follow_redirects=True,
+                )
+                self.assertIn("物流备注已更新", response.get_data(as_text=True))
+                with app.get_db() as conn:
+                    logistics_no = conn.execute(
+                        "SELECT logistics_no FROM product_order_shipments WHERE id = ?",
+                        (source_id,),
+                    ).fetchone()["logistics_no"]
+                self.assertEqual(logistics_no, "财务锁定后物流备注")
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/{source_id}/edit",
+                    data={
+                        "shipped_quantity": str(quantity + 1),
+                        "shipped_at": "2026-09-20",
+                        "logistics_no": "不可改",
+                    },
+                    follow_redirects=True,
+                )
+                self.assertIn(self.lock_message, response.get_data(as_text=True))
+                self.assert_ordinary_source_unchanged(source_id, quantity, shipped_at)
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/{source_id}/delete",
+                    follow_redirects=True,
+                )
+                self.assertIn(self.lock_message, response.get_data(as_text=True))
+                self.assert_ordinary_source_unchanged(source_id, quantity, shipped_at)
+
+                with app.get_db() as conn:
+                    conn.execute(
+                        """
+                        UPDATE product_order_shipments
+                        SET unit_price_minor = NULL,
+                            currency = '',
+                            price_recorded_by = '',
+                            price_recorded_at = ''
+                        WHERE id = ?
+                        """,
+                        (source_id,),
+                    )
+                response = self.client.post(
+                    f"/admin/shipped-orders/prices/ordinary/{source_id}",
+                    data={"unit_price": "9.99", "currency": "CNY"},
+                    follow_redirects=True,
+                )
+                self.assertIn(self.lock_message, response.get_data(as_text=True))
+                with app.get_db() as conn:
+                    price = conn.execute(
+                        "SELECT unit_price_minor FROM product_order_shipments WHERE id = ?",
+                        (source_id,),
+                    ).fetchone()["unit_price_minor"]
+                self.assertIsNone(price)
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/{source_id}/remark",
+                    data={"remark": "物流备注仍可维护"},
+                    follow_redirects=True,
+                )
+                self.assertIn("发货备注已保存", response.get_data(as_text=True))
+                with app.get_db() as conn:
+                    remark = conn.execute(
+                        "SELECT remark FROM product_order_shipments WHERE id = ?",
+                        (source_id,),
+                    ).fetchone()["remark"]
+                self.assertEqual(remark, "物流备注仍可维护")
+
+    def test_pending_and_issued_assembly_sources_reject_replace_and_delete(self):
+        for issued in (False, True):
+            with self.subTest(issued=issued):
+                batch_id, item_id = self.create_claimable_assembly_batch(
+                    "ISSUED" if issued else "PENDING"
+                )
+                self.create_claim("assembly_item", item_id, issued=issued)
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/assembly/{batch_id}/edit",
+                    data={
+                        "shipped_at": "2026-09-20",
+                        "logistics_no": "不可改",
+                        "preview_token": "locked-before-preview",
+                        "confirm_warnings": "1",
+                        "manual_id": str(self.manual_a),
+                        "shipped_quantity": "4",
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], self.lock_message)
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/assembly/{batch_id}/delete",
+                    follow_redirects=True,
+                )
+                self.assertIn(self.lock_message, response.get_data(as_text=True))
+                with app.get_db() as conn:
+                    self.assertIsNotNone(
+                        conn.execute(
+                            "SELECT id FROM assembly_shipment_batches WHERE id = ?",
+                            (batch_id,),
+                        ).fetchone()
+                    )
+                    self.assertIsNotNone(
+                        conn.execute(
+                            "SELECT id FROM assembly_shipment_items WHERE id = ?",
+                            (item_id,),
+                        ).fetchone()
+                    )
+
+                response = self.client.post(
+                    f"/admin/shipped-orders/assembly/{batch_id}/edit",
+                    data={
+                        "shipped_at": "2026-09-05",
+                        "logistics_no": "财务锁定后备注",
+                        "preview_token": "quantity-is-unchanged",
+                        "confirm_warnings": "1",
+                        "manual_id": str(self.manual_a),
+                        "shipped_quantity": "4",
+                    },
+                )
+                self.assertEqual(response.status_code, 201)
+                with app.get_db() as conn:
+                    batch = conn.execute(
+                        """
+                        SELECT shipped_at, logistics_no
+                        FROM assembly_shipment_batches
+                        WHERE id = ?
+                        """,
+                        (batch_id,),
+                    ).fetchone()
+                self.assertEqual(
+                    (batch["shipped_at"], batch["logistics_no"]),
+                    ("2026-09-05", "财务锁定后备注"),
+                )
+
+                with app.get_db() as conn:
+                    conn.execute(
+                        """
+                        UPDATE assembly_shipment_items
+                        SET unit_price_minor = NULL,
+                            currency = '',
+                            price_recorded_by = '',
+                            price_recorded_at = ''
+                        WHERE id = ?
+                        """,
+                        (item_id,),
+                    )
+                response = self.client.post(
+                    f"/admin/shipped-orders/prices/assembly_item/{item_id}",
+                    data={"unit_price": "8.88", "currency": "CNY"},
+                    follow_redirects=True,
+                )
+                self.assertIn(self.lock_message, response.get_data(as_text=True))
+                with app.get_db() as conn:
+                    price = conn.execute(
+                        "SELECT unit_price_minor FROM assembly_shipment_items WHERE id = ?",
+                        (item_id,),
+                    ).fetchone()["unit_price_minor"]
+                self.assertIsNone(price)
+
+    def test_removing_pending_item_and_voiding_issued_invoice_release_sources(self):
+        pending_invoice = self.create_claim("ordinary", self.ordinary_a_cny)
+        with app.get_db() as conn:
+            app.replace_pending_invoice_items(
+                conn,
+                pending_invoice,
+                [],
+                "finance-manager",
+            )
+        response = self.client.post(
+            f"/admin/shipped-orders/{self.ordinary_a_cny}/delete",
+            follow_redirects=True,
+        )
+        self.assertIn("发货记录已删除", response.get_data(as_text=True))
+
+        batch_id, item_id = self.create_claimable_assembly_batch("RELEASE")
+        invoice_id = self.create_claim("assembly_item", item_id, issued=True)
+        with app.get_db() as conn:
+            app.void_finance_invoice(conn, invoice_id, "finance-manager")
+        response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/delete",
+            follow_redirects=True,
+        )
+        self.assertIn("组装发货批次已删除", response.get_data(as_text=True))
+
+    def test_order_and_product_delete_are_blocked_before_descendant_sources_change(self):
+        self.create_claim("ordinary", self.ordinary_a_cny)
+        with app.get_db() as conn:
+            order_id = conn.execute(
+                "SELECT order_id FROM product_order_shipments WHERE id = ?",
+                (self.ordinary_a_cny,),
+            ).fetchone()["order_id"]
+        response = self.client.post(
+            f"/admin/orders/{order_id}/delete",
+            follow_redirects=True,
+        )
+        self.assertIn(self.parent_lock_message, response.get_data(as_text=True))
+        with app.get_db() as conn:
+            self.assertIsNotNone(
+                conn.execute("SELECT id FROM product_orders WHERE id = ?", (order_id,)).fetchone()
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT id FROM product_order_shipments WHERE id = ?",
+                    (self.ordinary_a_cny,),
+                ).fetchone()
+            )
+
+        self.create_claim("assembly_item", self.assembly_a_cny)
+        response = self.client.post(
+            f"/admin/{self.manual_a}/delete",
+            follow_redirects=True,
+        )
+        self.assertIn(self.parent_lock_message, response.get_data(as_text=True))
+        with app.get_db() as conn:
+            self.assertIsNotNone(
+                conn.execute("SELECT id FROM manuals WHERE id = ?", (self.manual_a,)).fetchone()
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT id FROM assembly_shipment_items WHERE id = ?",
+                    (self.assembly_a_cny,),
+                ).fetchone()
+            )

@@ -9,14 +9,19 @@
   </section>
 
   <section class="panel">
+    {% if shipment.finance_claimed %}
+      <div class="message error">
+        该发货记录已加入开票单，发货日期和数量已锁定；仍可维护物流单号。
+      </div>
+    {% endif %}
     <form method="post" class="grid-form">
       <label>
         发货时间
-        <input type="date" name="shipped_at" value="{{ shipment.shipped_at }}" required>
+        <input type="date" name="shipped_at" value="{{ shipment.shipped_at }}" required{% if shipment.finance_claimed %} readonly{% endif %}>
       </label>
       <label>
         发货数量
-        <input type="number" name="shipped_quantity" min="1" step="1" value="{{ shipment.shipped_quantity }}" required>
+        <input type="number" name="shipped_quantity" min="1" step="1" value="{{ shipment.shipped_quantity }}" required{% if shipment.finance_claimed %} readonly{% endif %}>
       </label>
       {% if can_view_prices %}
         <label>
@@ -49,7 +54,7 @@
         <input type="text" value="{{ shipment.planned_ship_at or '-' }}" disabled>
       </label>
       <div class="wide form-actions">
-        <button type="submit">保存修改</button>
+        <button type="submit">{% if shipment.finance_claimed %}保存物流单号{% else %}保存修改{% endif %}</button>
         <a class="button secondary" href="{{ url_for('shipped_orders') }}">返回发货列表</a>
       </div>
     </form>

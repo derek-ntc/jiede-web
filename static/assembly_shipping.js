@@ -103,6 +103,7 @@ function renderAssemblyPreview(form, preview) {
     quantity.step = "1";
     quantity.required = true;
     quantity.value = String(item.shipped_quantity);
+    quantity.readOnly = form.dataset.assemblyFinanceClaimed === "1";
     quantity.dataset.assemblyItemQuantity = "";
     quantity.dataset.manualId = String(item.manual_id);
     quantity.setAttribute("aria-label", `${item.drawing_no || "配件"} 实际发货数量`);

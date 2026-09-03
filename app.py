@@ -5601,6 +5601,73 @@ def finance_source_is_claimed(conn, source_type, source_id):
     )
 
 
+def assert_finance_sources_mutable(conn, refs):
+    for source_type, source_id in refs:
+        if finance_source_is_claimed(conn, source_type, source_id):
+            raise ValueError(
+                "该发货记录已加入开票单，不能修改发货日期、数量或价格"
+            )
+
+
+def finance_source_refs_for_assembly_batch(conn, batch_id):
+    return [
+        ("assembly_item", int(row["id"]))
+        for row in conn.execute(
+            "SELECT id FROM assembly_shipment_items WHERE batch_id = ? ORDER BY id",
+            (batch_id,),
+        ).fetchall()
+    ]
+
+
+def finance_source_refs_for_order(conn, order_id):
+    refs = [
+        ("ordinary", int(row["id"]))
+        for row in conn.execute(
+            "SELECT id FROM product_order_shipments WHERE order_id = ? ORDER BY id",
+            (order_id,),
+        ).fetchall()
+    ]
+    refs.extend(
+        ("assembly_item", int(row["id"]))
+        for row in conn.execute(
+            """
+            SELECT DISTINCT assembly_shipment_items.id
+            FROM assembly_shipment_items
+            JOIN assembly_shipment_allocations
+              ON assembly_shipment_allocations.item_id = assembly_shipment_items.id
+            WHERE assembly_shipment_allocations.order_id = ?
+            ORDER BY assembly_shipment_items.id
+            """,
+            (order_id,),
+        ).fetchall()
+    )
+    return refs
+
+
+def finance_source_refs_for_manual(conn, manual_id):
+    refs = [
+        ("ordinary", int(row["id"]))
+        for row in conn.execute(
+            """
+            SELECT product_order_shipments.id
+            FROM product_order_shipments
+            JOIN product_orders ON product_orders.id = product_order_shipments.order_id
+            WHERE product_orders.manual_id = ?
+            ORDER BY product_order_shipments.id
+            """,
+            (manual_id,),
+        ).fetchall()
+    ]
+    refs.extend(
+        ("assembly_item", int(row["id"]))
+        for row in conn.execute(
+            "SELECT id FROM assembly_shipment_items WHERE manual_id = ? ORDER BY id",
+            (manual_id,),
+        ).fetchall()
+    )
+    return refs
+
+
 def mark_finance_invoice_invoiced(
     conn,
     invoice_id,
@@ -12044,6 +12111,12 @@ def edit_assembly_shipment(batch_id):
             if not batches:
                 abort(404)
             batch = batches[0]
+            batch["finance_claimed"] = any(
+                finance_source_is_claimed(conn, source_type, source_id)
+                for source_type, source_id in finance_source_refs_for_assembly_batch(
+                    conn, batch_id
+                )
+            )
             try:
                 preview = _assembly_edit_preview(conn, batch)
             except (AssemblyDefinitionNotFound, ValueError) as error:
@@ -12080,9 +12153,6 @@ def edit_assembly_shipment(batch_id):
     staged_images = []
     transaction_committed = False
     try:
-        staged_images = stage_assembly_shipment_images(
-            selected_shipment_images()
-        )
         overrides = _parse_assembly_shipment_item_overrides(request.form)
         with get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -12094,6 +12164,44 @@ def edit_assembly_shipment(batch_id):
             if not batches:
                 abort(404)
             batch = batches[0]
+            source_refs = finance_source_refs_for_assembly_batch(conn, batch_id)
+            claimed = any(
+                finance_source_is_claimed(conn, source_type, source_id)
+                for source_type, source_id in source_refs
+            )
+            if claimed:
+                existing_quantities = {
+                    int(item["manual_id"]): int(item["shipped_quantity"])
+                    for item in batch["items"]
+                }
+                if shipped_at != batch["shipped_at"] or overrides != existing_quantities:
+                    assert_finance_sources_mutable(conn, source_refs)
+                conn.execute(
+                    """
+                    UPDATE assembly_shipment_batches
+                    SET logistics_no = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        logistics_no,
+                        datetime.utcnow().isoformat(timespec="seconds"),
+                        batch_id,
+                    ),
+                )
+                conn.commit()
+                transaction_committed = True
+                return (
+                    jsonify(
+                        {
+                            "batch_id": batch_id,
+                            "redirect_url": url_for("shipped_orders"),
+                        }
+                    ),
+                    201,
+                )
+            staged_images = stage_assembly_shipment_images(
+                selected_shipment_images()
+            )
             preview = _assembly_edit_preview(conn, batch, overrides)
             definition_ids = {item["manual_id"] for item in preview["items"]}
             if set(overrides) != definition_ids:
@@ -12182,6 +12290,10 @@ def delete_assembly_shipment(batch_id):
             batches = _fetch_assembly_shipment_batches_by_ids(conn, [batch_id])
             if not batches:
                 abort(404)
+            assert_finance_sources_mutable(
+                conn,
+                finance_source_refs_for_assembly_batch(conn, batch_id),
+            )
             image_filenames = [
                 image["filename"] for image in batches[0]["images"]
             ]
@@ -12195,6 +12307,9 @@ def delete_assembly_shipment(batch_id):
             )
             for order_id in sorted(old_order_ids):
                 sync_order_shipment_summary(conn, order_id)
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("shipped_orders"))
     except sqlite3.DatabaseError:
         return jsonify({"error": "组装发货删除失败，所有更改已回滚"}), 500
     delete_assembly_shipment_image_files(batch_id, image_filenames)
@@ -12817,6 +12932,11 @@ def backfill_shipment_price(source_type, source_id):
         if row is None:
             flash(f"{source_label}不存在", "error")
             return redirect(url_for("shipped_orders"))
+        try:
+            assert_finance_sources_mutable(conn, [(source_type, source_id)])
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(url_for("shipped_orders"))
         if row["unit_price_minor"] is not None:
             flash(f"{source_label}已经记录价格，不能覆盖", "error")
             return redirect(url_for("shipped_orders"))
@@ -12846,6 +12966,8 @@ def backfill_shipment_price(source_type, source_id):
 @permission_required("shipped_manage")
 def edit_shipment(shipment_id):
     with get_db() as conn:
+        if request.method == "POST":
+            conn.execute("BEGIN IMMEDIATE")
         shipment = fetch_shipment_by_id(
             conn,
             shipment_id,
@@ -12873,6 +12995,33 @@ def edit_shipment(shipment_id):
             if shipped_quantity_value <= 0:
                 flash("发货数量必须大于 0", "error")
                 return redirect(url_for("edit_shipment", shipment_id=shipment_id))
+
+            claimed = finance_source_is_claimed(conn, "ordinary", shipment_id)
+            if claimed:
+                if (
+                    shipped_quantity_value != int(shipment["shipped_quantity"])
+                    or shipped_at != shipment["shipped_at"]
+                ):
+                    try:
+                        assert_finance_sources_mutable(
+                            conn,
+                            [("ordinary", shipment_id)],
+                        )
+                    except ValueError as error:
+                        flash(str(error), "error")
+                        return redirect(
+                            url_for("edit_shipment", shipment_id=shipment_id)
+                        )
+                conn.execute(
+                    """
+                    UPDATE product_order_shipments
+                    SET logistics_no = ?
+                    WHERE id = ?
+                    """,
+                    (logistics_no, shipment_id),
+                )
+                flash("物流备注已更新", "success")
+                return redirect(url_for("shipped_orders"))
 
             order = conn.execute(
                 """
@@ -12940,6 +13089,13 @@ def edit_shipment(shipment_id):
                 flash("该发货记录原已签收，修改后已重置签收状态并生成新的签字链接", "success")
             return redirect(url_for("shipped_orders"))
 
+        shipment = dict(shipment)
+        shipment["finance_claimed"] = finance_source_is_claimed(
+            conn,
+            "ordinary",
+            shipment_id,
+        )
+
     return render_template("shipment_edit.html", shipment=shipment)
 
 
@@ -12947,9 +13103,15 @@ def edit_shipment(shipment_id):
 @permission_required("shipped_manage")
 def delete_shipment(shipment_id):
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         shipment = fetch_shipment_by_id(conn, shipment_id)
         if shipment is None:
             flash("发货记录不存在", "error")
+            return redirect(url_for("shipped_orders"))
+        try:
+            assert_finance_sources_mutable(conn, [("ordinary", shipment_id)])
+        except ValueError as error:
+            flash(str(error), "error")
             return redirect(url_for("shipped_orders"))
         reverse_shipment_inventory_deduction(conn, shipment_id)
         delete_shipment_assets(conn, shipment_id, signature_image=shipment["signature_image"] or "")
@@ -13874,6 +14036,17 @@ def delete_order(order_id):
         ).fetchone()
         if order is None:
             abort(404)
+        try:
+            assert_finance_sources_mutable(
+                conn,
+                finance_source_refs_for_order(conn, order_id),
+            )
+        except ValueError:
+            flash(
+                "该产品或订单包含已进入财务的发货记录，不能删除",
+                "error",
+            )
+            return redirect(url_for("admin_orders"))
         if order["has_shipment_plan_reference"]:
             flash("已有计划发货记录的订单不能删除", "error")
             return redirect(url_for("admin_orders"))
@@ -14438,9 +14611,21 @@ def copy_manual(manual_id):
 @permission_required("product_edit")
 def delete_manual(manual_id):
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         manual = fetch_manual_by_id(conn, manual_id)
         if manual is None:
             abort(404)
+        try:
+            assert_finance_sources_mutable(
+                conn,
+                finance_source_refs_for_manual(conn, manual_id),
+            )
+        except ValueError:
+            flash(
+                "该产品或订单包含已进入财务的发货记录，不能删除",
+                "error",
+            )
+            return redirect(url_for("admin_index"))
         files = get_manual_files(conn, manual_id)
         if not files and manual["filename"]:
             files = [manual]
