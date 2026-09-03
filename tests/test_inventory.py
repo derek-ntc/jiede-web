@@ -103,11 +103,14 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("库存二维码", detail_html)
         self.assertNotIn("data-qr-code=", detail_html)
         self.assertIn("打印标签", detail_html)
-        self.assertIn("<h2>附件</h2>", detail_html)
-        self.assertLess(
-            detail_html.index("<h2>产品信息</h2>"),
-            detail_html.index("<h2>附件</h2>"),
-        )
+        self.assertIn("<h2>基本信息</h2>", detail_html)
+        self.assertNotIn("<h2>附件</h2>", detail_html)
+
+        technical_html = self.client.get(
+            f"/manual/{manual_id}/technical"
+        ).get_data(as_text=True)
+        self.assertIn("技术资料", technical_html)
+        self.assertIn("<h2>附件</h2>", technical_html)
 
         scan_response = self.client.get("/admin/inventory/api/product?code=P000001")
         self.assertEqual(scan_response.status_code, 200)

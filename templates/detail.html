@@ -8,15 +8,8 @@
     </div>
     <div class="form-actions">
       <a class="button secondary" href="{{ url_for('products_index') }}">返回列表</a>
-      {% if session.get("admin_logged_in") %}
+      {% if can_edit_products %}
         <a class="button secondary" href="{{ url_for('edit_manual', manual_id=manual.id) }}">编辑</a>
-      {% endif %}
-      {% if manual.filename %}
-        {% if manual.filename.lower().endswith(".pdf") %}
-          <button class="button" type="button" data-pdf-preview-url="{{ url_for('preview_manual', filename=manual.filename) }}" data-pdf-preview-name="{{ manual.original_filename or manual.product_name }}">预览PDF</button>
-        {% else %}
-          <a class="button" href="{{ url_for('preview_manual', filename=manual.filename) }}" target="_blank">打开文件</a>
-        {% endif %}
       {% endif %}
       {% if can_manage_warehouse_inventory %}
         <a class="button" href="{{ url_for('inventory_product_label', manual_id=manual.id) }}" target="_blank">打印标签</a>
@@ -24,181 +17,36 @@
     </div>
   </section>
 
-  <section class="detail-grid">
-    <div class="panel">
-      <h2>产品信息</h2>
-      <dl class="meta-list">
-        <div>
-          <dt>产品图号</dt>
-          <dd>{{ manual.drawing_no or "-" }}</dd>
-        </div>
-        <div>
-          <dt>产品名称</dt>
-          <dd>{{ manual.product_name }}</dd>
-        </div>
-        <div>
-          <dt>供应商</dt>
-          <dd>{{ manual.supplier or "-" }}</dd>
-        </div>
-        <div>
-          <dt>客户</dt>
-          <dd>{{ manual.customer or "-" }}</dd>
-        </div>
-        <div>
-          <dt>一箱数量</dt>
-          <dd>{{ manual.pack_quantity or "-" }}</dd>
-        </div>
-        <div>
-          <dt>箱子尺寸</dt>
-          <dd>{{ manual.pack_carton_size or "-" }}</dd>
-        </div>
-        <div>
-          <dt>一箱重量</dt>
-          <dd>{{ manual.pack_weight or "-" }}</dd>
-        </div>
-        <div>
-          <dt>SKU</dt>
-          <dd>{{ manual.sku or "-" }}</dd>
-        </div>
-        <div>
-          <dt>条码</dt>
-          <dd>{{ manual.barcode or "-" }}</dd>
-        </div>
-        <div>
-          <dt>库存编码</dt>
-          <dd>{{ inventory_code or "-" }}</dd>
-        </div>
-        <div>
-          <dt>当前库存</dt>
-          <dd>{{ inventory_total }}</dd>
-        </div>
-        <div>
-          <dt>默认库位</dt>
-          <dd>{% if default_location %}{{ default_location.code }} / {{ default_location.name }}{% else %}-{% endif %}</dd>
-        </div>
-        <div>
-          <dt>最低库存</dt>
-          <dd>{{ manual.min_stock or 0 }}</dd>
-        </div>
-        <div>
-          <dt>修改时间</dt>
-          <dd>{{ manual.updated_at | datetime }}</dd>
-        </div>
-        <div>
-          <dt>创建人</dt>
-          <dd>{{ manual.created_by or "-" }}</dd>
-        </div>
-        <div>
-          <dt>更新人</dt>
-          <dd>{{ manual.updated_by or "-" }}</dd>
-        </div>
-        <div>
-          <dt>备注</dt>
-          <dd>{{ manual.remark or "-" }}</dd>
-        </div>
-      </dl>
-    </div>
+  {% with mode="view", active_tab="basic" %}
+    {% include "product_tabs.html" %}
+  {% endwith %}
 
-    <div class="panel">
-      <h2>附件</h2>
-      <div class="attachment-stack">
-        {% for file in files %}
-          <div class="attachment-item">
-            <div class="attachment-head">
-              <strong>{{ file.original_filename }}</strong>
-              {% if file.filename.lower().endswith(".pdf") %}
-                <button class="button secondary" type="button" data-pdf-preview-url="{{ url_for('preview_manual', filename=file.filename) }}" data-pdf-preview-name="{{ file.original_filename }}">预览PDF</button>
-              {% else %}
-                <a class="button secondary" href="{{ url_for('preview_manual', filename=file.filename) }}" target="_blank">打开文件</a>
-              {% endif %}
-            </div>
-            {% if file.file_type == "image" %}
-              <a href="{{ url_for('preview_manual', filename=file.filename) }}" target="_blank">
-                <img class="detail-image" src="{{ url_for('preview_manual', filename=file.filename) }}" alt="{{ file.original_filename }}">
-              </a>
-            {% elif file.filename.lower().endswith(".pdf") %}
-              <div class="pdf-preview-placeholder">
-                点击“预览PDF”可悬浮查看、缩放或打印，不会自动下载。
-              </div>
-            {% else %}
-              <div class="file-box">
-                <span>点击打开文件，浏览器支持的格式会直接预览。</span>
-              </div>
-            {% endif %}
-          </div>
-        {% else %}
-          <p class="empty-text">暂无附件</p>
-        {% endfor %}
-      </div>
-    </div>
-  </section>
-
-  <section class="panel" id="product-materials">
-    <h2>材料信息</h2>
-    {% if materials %}
-      <div class="table-wrap product-material-detail-wrap">
-        <table class="product-material-detail-table">
-          <thead>
-            <tr>
-              <th>材质</th>
-              <th>材料厚度</th>
-              <th>表面类型</th>
-              <th>供应商</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for material in materials %}
-              <tr>
-                <td>{{ material.material or "-" }}</td>
-                <td>{{ material.thickness or "-" }}</td>
-                <td>{{ material.surface_type or "-" }}</td>
-                <td>{{ material.supplier or "-" }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% else %}
-      <p class="empty-text">暂无材料信息</p>
-    {% endif %}
-  </section>
-
-  <section class="panel" id="work-instruction">
-    <h2>作业指导书</h2>
-    {% if manual.description_html %}
-      <article class="rich-content">{{ manual.description_html | safe }}</article>
-    {% else %}
-      <p class="empty-text">暂无作业指导书</p>
-    {% endif %}
-  </section>
-
-  <section class="panel" id="inspection-requirements">
-    <h2>检验要求</h2>
-    {% if inspection_requirements %}
-      <div class="table-wrap inspection-requirements-table-wrap">
-        <table class="inspection-requirements-table">
-          <thead>
-            <tr>
-              <th>检验项目</th>
-              <th>标准要求</th>
-              <th>方法/工具</th>
-              <th>备注</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for requirement in inspection_requirements %}
-              <tr>
-                <td>{{ requirement.item_name or "-" }}</td>
-                <td>{{ requirement.standard or "-" }}</td>
-                <td>{{ requirement.method or "-" }}</td>
-                <td>{{ requirement.remark or "-" }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% else %}
-      <p class="empty-text">暂无检验要求</p>
-    {% endif %}
+  <section class="panel">
+    <h2>基本信息</h2>
+    <dl class="meta-list">
+      <div><dt>产品图号</dt><dd>{{ manual.drawing_no or "-" }}</dd></div>
+      <div><dt>产品名称</dt><dd>{{ manual.product_name }}</dd></div>
+      <div><dt>供应商</dt><dd>{{ manual.supplier or "-" }}</dd></div>
+      <div><dt>客户</dt><dd>{{ manual.customer or "-" }}</dd></div>
+      <div><dt>一箱数量</dt><dd>{{ manual.pack_quantity or "-" }}</dd></div>
+      <div><dt>箱子尺寸</dt><dd>{{ manual.pack_carton_size or "-" }}</dd></div>
+      <div><dt>一箱重量</dt><dd>{{ manual.pack_weight or "-" }}</dd></div>
+      <div><dt>SKU</dt><dd>{{ manual.sku or "-" }}</dd></div>
+      <div><dt>条码</dt><dd>{{ manual.barcode or "-" }}</dd></div>
+      <div><dt>库存编码</dt><dd>{{ inventory_code or "-" }}</dd></div>
+      <div><dt>当前库存</dt><dd>{{ inventory_total }}</dd></div>
+      <div><dt>默认库位</dt><dd>{% if default_location %}{{ default_location.code }} / {{ default_location.name }}{% else %}-{% endif %}</dd></div>
+      <div><dt>最低库存</dt><dd>{{ manual.min_stock or 0 }}</dd></div>
+      {% if can_view_prices %}
+        <div>
+          <dt>当前单价</dt>
+          <dd>{% if manual.unit_price_minor is not none %}{{ manual.unit_price_minor | money_minor(manual.currency) }} {{ manual.currency }}{% else %}-{% endif %}</dd>
+        </div>
+      {% endif %}
+      <div><dt>修改时间</dt><dd>{{ manual.updated_at | datetime }}</dd></div>
+      <div><dt>创建人</dt><dd>{{ manual.created_by or "-" }}</dd></div>
+      <div><dt>更新人</dt><dd>{{ manual.updated_by or "-" }}</dd></div>
+      <div><dt>备注</dt><dd>{{ manual.remark or "-" }}</dd></div>
+    </dl>
   </section>
 {% endblock %}

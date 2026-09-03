@@ -107,23 +107,17 @@ class InspectionReportTests(unittest.TestCase):
             self.assertIn('<option value="拉丝">拉丝</option>', admin_html)
             self.assertIn('<option value="材料供应商A">材料供应商A</option>', admin_html)
 
-            edit_html = client.get(f"/admin/{manual['id']}/edit").get_data(as_text=True)
+            edit_html = client.get(
+                f"/admin/{manual['id']}/edit/technical"
+            ).get_data(as_text=True)
             self.assertIn('<option value="Q235">Q235</option>', edit_html)
             self.assertIn('<option value="5mm">5mm</option>', edit_html)
             self.assertIn('<option value="喷砂">喷砂</option>', edit_html)
             self.assertIn('<option value="材料供应商B">材料供应商B</option>', edit_html)
 
             edit_response = client.post(
-                f"/admin/{manual['id']}/edit",
+                f"/admin/{manual['id']}/edit/technical",
                 data={
-                    "drawing_no": "MAT-001",
-                    "product_name": "材料测试产品",
-                    "supplier": "产品供应商",
-                    "customer": "",
-                    "pack_quantity": "",
-                    "pack_carton_size": "",
-                    "pack_weight": "",
-                    "remark": "",
                     "description_html": "",
                     "material": ["铝板"],
                     "material_thickness": ["1.5mm"],

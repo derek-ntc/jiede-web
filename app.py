@@ -95,6 +95,12 @@ from assembly_shipping import (
     parse_positive_int,
     preview_token,
 )
+from pricing import (
+    SUPPORTED_CURRENCIES,
+    format_money_minor,
+    normalize_currency,
+    parse_money_minor,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -323,6 +329,7 @@ def format_datetime(value):
 
 
 app.jinja_env.filters["datetime"] = format_datetime
+app.jinja_env.filters["money_minor"] = format_money_minor
 
 
 def format_bytes(size):
@@ -5807,7 +5814,15 @@ def products_index():
     sort, direction = sort_state()
 
     sql = """
-        SELECT manuals.*, COUNT(manual_files.id) AS file_count
+        SELECT manuals.id,
+               manuals.drawing_no,
+               manuals.product_name,
+               manuals.supplier,
+               manuals.customer,
+               manuals.updated_at,
+               manuals.remark,
+               manuals.filename,
+               COUNT(manual_files.id) AS file_count
         FROM manuals
         LEFT JOIN manual_files ON manual_files.manual_id = manuals.id
     """
@@ -6312,14 +6327,60 @@ def handle_feedback(feedback_id):
     return redirect(url_for("admin_feedbacks"))
 
 
+MANUAL_SAFE_COLUMNS = (
+    "id",
+    "product_name",
+    "customer",
+    "model",
+    "category",
+    "version",
+    "remark",
+    "filename",
+    "original_filename",
+    "created_at",
+    "updated_at",
+    "drawing_no",
+    "supplier",
+    "pack_quantity",
+    "pack_carton_size",
+    "pack_weight",
+    "description_html",
+    "file_type",
+    "created_by",
+    "updated_by",
+    "sku",
+    "barcode",
+    "qr_code",
+    "default_location_id",
+    "min_stock",
+)
+
+
+def fetch_manual_by_id(conn, manual_id, include_price=False):
+    columns = list(MANUAL_SAFE_COLUMNS)
+    if include_price:
+        columns.extend(("unit_price_minor", "currency"))
+    projection = ", ".join(columns)
+    return conn.execute(
+        f"SELECT {projection} FROM manuals WHERE id = ?",
+        (manual_id,),
+    ).fetchone()
+
+
+def posted_product_price(existing_unit_price_minor=None, existing_currency="CNY"):
+    if not user_can_view_prices():
+        return existing_unit_price_minor, existing_currency
+    currency = normalize_currency(request.form.get("currency", "CNY"))
+    unit_price_minor = parse_money_minor(request.form.get("unit_price", ""), currency)
+    return unit_price_minor, currency
+
+
 @app.route("/manual/<int:manual_id>")
 def manual_detail(manual_id):
+    include_price = user_can_view_prices()
     with get_db() as conn:
         ensure_product_inventory_code(conn, manual_id)
-        manual = conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)).fetchone()
-        files = get_manual_files(conn, manual_id)
-        inspection_requirements = get_manual_inspection_requirements(conn, manual_id)
-        materials = get_product_materials(conn, manual_id)
+        manual = fetch_manual_by_id(conn, manual_id, include_price=include_price)
         inventory_total = inventory_total_for_manual(conn, manual_id)
         inventory_locations = location_stock_map(conn, [manual_id]).get(manual_id, [])
         default_location = None
@@ -6330,9 +6391,6 @@ def manual_detail(manual_id):
     return render_template(
         "detail.html",
         manual=manual,
-        files=files,
-        inspection_requirements=inspection_requirements,
-        materials=materials,
         inventory_code=product_inventory_code(manual),
         inventory_total=inventory_total,
         inventory_locations=inventory_locations,
@@ -6340,10 +6398,28 @@ def manual_detail(manual_id):
     )
 
 
+@app.route("/manual/<int:manual_id>/technical")
+def manual_technical(manual_id):
+    with get_db() as conn:
+        manual = fetch_manual_by_id(conn, manual_id)
+        files = get_manual_files(conn, manual_id)
+        inspection_requirements = get_manual_inspection_requirements(conn, manual_id)
+        materials = get_product_materials(conn, manual_id)
+    if manual is None:
+        abort(404)
+    return render_template(
+        "detail_technical.html",
+        manual=manual,
+        files=files,
+        inspection_requirements=inspection_requirements,
+        materials=materials,
+    )
+
+
 @app.route("/manual/<int:manual_id>/preview")
 def manual_preview(manual_id):
     with get_db() as conn:
-        manual = conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)).fetchone()
+        manual = fetch_manual_by_id(conn, manual_id)
         files = get_manual_files(conn, manual_id)
     if manual is None:
         abort(404)
@@ -9772,9 +9848,12 @@ def inventory_overview_filters():
 
 def inventory_product_rows(conn, query="", status=""):
     ensure_all_product_inventory_codes(conn)
+    manual_projection = ", ".join(
+        f"manuals.{column}" for column in MANUAL_SAFE_COLUMNS
+    )
     rows = conn.execute(
-        """
-        SELECT manuals.*,
+        f"""
+        SELECT {manual_projection},
                COALESCE(SUM(inventory_balances.quantity), 0) AS total_stock
         FROM manuals
         LEFT JOIN inventory_balances ON inventory_balances.manual_id = manuals.id
@@ -10266,9 +10345,12 @@ def inventory_transactions():
 def inventory_product_label(manual_id):
     with get_db() as conn:
         ensure_product_inventory_code(conn, manual_id)
+        manual_projection = ", ".join(
+            f"manuals.{column}" for column in MANUAL_SAFE_COLUMNS
+        )
         product = conn.execute(
-            """
-            SELECT manuals.*, warehouse_locations.name AS location_name, warehouse_locations.code AS location_code
+            f"""
+            SELECT {manual_projection}, warehouse_locations.name AS location_name, warehouse_locations.code AS location_code
             FROM manuals
             LEFT JOIN warehouse_locations ON warehouse_locations.id = manuals.default_location_id
             WHERE manuals.id = ?
@@ -10296,9 +10378,12 @@ def inventory_labels():
     with get_db() as conn:
         for manual_id in manual_ids:
             ensure_product_inventory_code(conn, manual_id)
+        manual_projection = ", ".join(
+            f"manuals.{column}" for column in MANUAL_SAFE_COLUMNS
+        )
         products = conn.execute(
             f"""
-            SELECT manuals.*, warehouse_locations.name AS location_name, warehouse_locations.code AS location_code
+            SELECT {manual_projection}, warehouse_locations.name AS location_name, warehouse_locations.code AS location_code
             FROM manuals
             LEFT JOIN warehouse_locations ON warehouse_locations.id = manuals.default_location_id
             WHERE manuals.id IN ({placeholders})
@@ -10367,6 +10452,7 @@ def admin_index():
         materials=[],
         material_options=material_options,
         inspection_requirements=[],
+        supported_currencies=SUPPORTED_CURRENCIES,
     )
 
 
@@ -12672,7 +12758,11 @@ def upload_manual():
     if min_stock < 0:
         flash("最低库存不能小于 0", "error")
         return redirect(url_for("admin_index"))
-
+    try:
+        unit_price_minor, currency = posted_product_price()
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("admin_index"))
     try:
         saved_files = save_uploads(uploads)
     except ValueError:
@@ -12693,10 +12783,11 @@ def upload_manual():
                 sku, barcode, default_location_id, min_stock,
                 model, category, version, remark,
                 description_html, filename, original_filename, file_type,
+                unit_price_minor, currency,
                 created_by, updated_by,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 drawing_no,
@@ -12718,6 +12809,8 @@ def upload_manual():
                 filename,
                 original_filename,
                 file_type,
+                unit_price_minor,
+                currency,
                 current_user,
                 current_user,
                 now,
@@ -12780,8 +12873,9 @@ def upload_editor_images():
 @app.route("/admin/<int:manual_id>/edit", methods=["GET", "POST"])
 @permission_required("product_edit")
 def edit_manual(manual_id):
+    include_price = user_can_view_prices()
     with get_db() as conn:
-        manual = conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)).fetchone()
+        manual = fetch_manual_by_id(conn, manual_id, include_price=include_price)
     if manual is None:
         abort(404)
 
@@ -12797,12 +12891,7 @@ def edit_manual(manual_id):
         barcode = request.form.get("barcode", "").strip()
         default_location_id = parse_optional_int(request.form.get("default_location_id"))
         min_stock_text = request.form.get("min_stock", "0").strip()
-        model = ""
-        category = ""
         remark = request.form.get("remark", "").strip()
-        description_html = request.form.get("description_html", "").strip()
-        materials = posted_product_materials()
-        inspection_requirements = posted_inspection_requirements()
         assembly_drawing_numbers = request.form.getlist("assembly_drawing_no")
         assembly_quantities = request.form.getlist("assembly_quantity_per_set")
         submitted_assembly_components = [
@@ -12814,7 +12903,6 @@ def edit_manual(manual_id):
                 assembly_drawing_numbers, assembly_quantities, fillvalue=""
             )
         ]
-        uploads = selected_uploads()
         current_user = current_admin_username()
 
         if not all([drawing_no, product_name]):
@@ -12828,6 +12916,14 @@ def edit_manual(manual_id):
         if min_stock < 0:
             flash("最低库存不能小于 0", "error")
             return redirect(url_for("edit_manual", manual_id=manual_id))
+        if include_price:
+            try:
+                unit_price_minor, currency = posted_product_price(
+                    manual["unit_price_minor"], manual["currency"]
+                )
+            except ValueError as error:
+                flash(str(error), "error")
+                return render_edit_manual_page(manual, submitted_assembly_components)
         try:
             assembly_components = normalize_component_rows(
                 assembly_drawing_numbers, assembly_quantities
@@ -12856,54 +12952,73 @@ def edit_manual(manual_id):
                     manual, submitted_assembly_components
                 )
 
-        saved_files = []
-        if uploads:
-            try:
-                saved_files = save_uploads(uploads)
-            except ValueError:
-                flash("不支持该文件类型", "error")
-                return redirect(url_for("edit_manual", manual_id=manual_id))
-
         now = datetime.utcnow().isoformat(timespec="seconds")
         version = now
         with get_db() as conn:
-            conn.execute(
-                """
-                UPDATE manuals
-                SET drawing_no = ?, product_name = ?, supplier = ?, customer = ?,
-                    pack_quantity = ?, pack_carton_size = ?, pack_weight = ?,
-                    sku = ?, barcode = ?, default_location_id = ?, min_stock = ?,
-                    model = ?, category = ?, version = ?, remark = ?, description_html = ?,
-                    updated_by = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    drawing_no,
-                    product_name,
-                    supplier,
-                    customer,
-                    pack_quantity,
-                    pack_carton_size,
-                    pack_weight,
-                    sku,
-                    barcode,
-                    default_location_id,
-                    min_stock,
-                    model,
-                    category,
-                    version,
-                    remark,
-                    description_html,
-                    current_user,
-                    now,
-                    manual_id,
-                ),
-            )
+            if include_price:
+                conn.execute(
+                    """
+                    UPDATE manuals
+                    SET drawing_no = ?, product_name = ?, supplier = ?, customer = ?,
+                        pack_quantity = ?, pack_carton_size = ?, pack_weight = ?,
+                        sku = ?, barcode = ?, default_location_id = ?, min_stock = ?,
+                        version = ?, remark = ?, unit_price_minor = ?, currency = ?,
+                        updated_by = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        drawing_no,
+                        product_name,
+                        supplier,
+                        customer,
+                        pack_quantity,
+                        pack_carton_size,
+                        pack_weight,
+                        sku,
+                        barcode,
+                        default_location_id,
+                        min_stock,
+                        version,
+                        remark,
+                        unit_price_minor,
+                        currency,
+                        current_user,
+                        now,
+                        manual_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE manuals
+                    SET drawing_no = ?, product_name = ?, supplier = ?, customer = ?,
+                        pack_quantity = ?, pack_carton_size = ?, pack_weight = ?,
+                        sku = ?, barcode = ?, default_location_id = ?, min_stock = ?,
+                        version = ?, remark = ?, updated_by = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        drawing_no,
+                        product_name,
+                        supplier,
+                        customer,
+                        pack_quantity,
+                        pack_carton_size,
+                        pack_weight,
+                        sku,
+                        barcode,
+                        default_location_id,
+                        min_stock,
+                        version,
+                        remark,
+                        current_user,
+                        now,
+                        manual_id,
+                    ),
+                )
             ensure_product_inventory_code(conn, manual_id)
             ensure_customer_exists(conn, customer, now)
-            save_product_materials(conn, manual_id, materials)
             save_product_assembly_components(conn, manual_id, assembly_components, now)
-            save_manual_inspection_requirements(conn, manual_id, inspection_requirements)
             conn.execute(
                 """
                 UPDATE product_orders
@@ -12916,6 +13031,75 @@ def edit_manual(manual_id):
                     manual_id,
                 ),
             )
+        flash("产品资料已更新", "success")
+        return redirect(url_for("admin_index"))
+
+    return render_edit_manual_page(manual)
+
+
+def render_edit_manual_page(manual, assembly_components=None):
+    with get_db() as conn:
+        customers = get_customer_name_options(conn)
+        if assembly_components is None:
+            assembly_components = get_product_assembly_components(conn, manual["id"])
+        inventory_locations = conn.execute(
+            """
+            SELECT *
+            FROM warehouse_locations
+            WHERE enabled = 1
+            ORDER BY code COLLATE NOCASE ASC, id ASC
+            """
+        ).fetchall()
+    return render_template(
+        "edit.html",
+        manual=manual,
+        suppliers=get_suppliers(),
+        customers=customers,
+        assembly_components=assembly_components,
+        inventory_locations=inventory_locations,
+        supported_currencies=SUPPORTED_CURRENCIES,
+    )
+
+
+@app.route("/admin/<int:manual_id>/edit/technical", methods=["GET", "POST"])
+@permission_required("product_edit")
+def edit_manual_technical(manual_id):
+    with get_db() as conn:
+        manual = fetch_manual_by_id(conn, manual_id)
+    if manual is None:
+        abort(404)
+
+    if request.method == "POST":
+        description_html = request.form.get("description_html", "").strip()
+        materials = posted_product_materials()
+        inspection_requirements = posted_inspection_requirements()
+        uploads = selected_uploads()
+        saved_files = []
+        if uploads:
+            try:
+                saved_files = save_uploads(uploads)
+            except ValueError:
+                flash("不支持该文件类型", "error")
+                return redirect(url_for("edit_manual_technical", manual_id=manual_id))
+
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with get_db() as conn:
+            conn.execute(
+                """
+                UPDATE manuals
+                SET description_html = ?, version = ?, updated_by = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    description_html,
+                    now,
+                    current_admin_username(),
+                    now,
+                    manual_id,
+                ),
+            )
+            save_product_materials(conn, manual_id, materials)
+            save_manual_inspection_requirements(conn, manual_id, inspection_requirements)
             if saved_files:
                 conn.executemany(
                     """
@@ -12943,41 +13127,25 @@ def edit_manual(manual_id):
                         manual_id,
                     ),
                 )
-        flash("产品资料已更新", "success")
+        flash("产品技术资料已更新", "success")
         return redirect(url_for("admin_index"))
 
+    return render_edit_manual_technical_page(manual)
 
-    return render_edit_manual_page(manual)
 
-
-def render_edit_manual_page(manual, assembly_components=None):
+def render_edit_manual_technical_page(manual):
     with get_db() as conn:
         files = get_manual_files(conn, manual["id"])
-        customers = get_customer_name_options(conn)
         materials = get_product_materials(conn, manual["id"])
-        if assembly_components is None:
-            assembly_components = get_product_assembly_components(conn, manual["id"])
         material_options = get_product_material_options(conn)
         inspection_requirements = get_manual_inspection_requirements(conn, manual["id"])
-        inventory_locations = conn.execute(
-            """
-            SELECT *
-            FROM warehouse_locations
-            WHERE enabled = 1
-            ORDER BY code COLLATE NOCASE ASC, id ASC
-            """
-        ).fetchall()
     return render_template(
-        "edit.html",
+        "edit_technical.html",
         manual=manual,
         files=files,
-        suppliers=get_suppliers(),
-        customers=customers,
         materials=materials,
-        assembly_components=assembly_components,
         material_options=material_options,
         inspection_requirements=inspection_requirements,
-        inventory_locations=inventory_locations,
     )
 
 
@@ -12985,7 +13153,7 @@ def render_edit_manual_page(manual, assembly_components=None):
 @permission_required("product_edit")
 def delete_manual_file(manual_id, file_id):
     with get_db() as conn:
-        manual = conn.execute("SELECT * FROM manuals WHERE id = ?", (manual_id,)).fetchone()
+        manual = fetch_manual_by_id(conn, manual_id)
         if manual is None:
             abort(404)
         manual_file = conn.execute(
@@ -13000,7 +13168,7 @@ def delete_manual_file(manual_id, file_id):
         ).fetchone()["c"]
         if file_count <= 1:
             flash("至少需要保留一个文件", "error")
-            return redirect(url_for("edit_manual", manual_id=manual_id))
+            return redirect(url_for("edit_manual_technical", manual_id=manual_id))
 
         conn.execute("DELETE FROM manual_files WHERE id = ?", (file_id,))
         remaining = get_manual_files(conn, manual_id)[0]
@@ -13022,7 +13190,7 @@ def delete_manual_file(manual_id, file_id):
 
     delete_upload_file(manual_file["filename"])
     flash("附件已删除", "success")
-    return redirect(url_for("edit_manual", manual_id=manual_id))
+    return redirect(url_for("edit_manual_technical", manual_id=manual_id))
 
 
 @app.route("/admin/<int:manual_id>/copy", methods=["POST"])

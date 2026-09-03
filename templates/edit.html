@@ -1,9 +1,12 @@
 {% extends "base.html" %}
-{% block title %}编辑产品资料{% endblock %}
+{% block title %}编辑产品基本信息{% endblock %}
 {% block content %}
   <section class="panel">
     <h1>编辑产品资料</h1>
-    <form method="post" enctype="multipart/form-data" class="grid-form">
+    {% with mode="edit", active_tab="basic" %}
+      {% include "product_tabs.html" %}
+    {% endwith %}
+    <form method="post" class="grid-form">
       <label>
         产品图号
         <input type="text" name="drawing_no" value="{{ manual.drawing_no }}" required>
@@ -21,9 +24,7 @@
         <input type="text" name="customer" list="customer-options" value="{{ manual.customer }}" placeholder="选择或输入客户">
       </label>
       <datalist id="customer-options">
-          {% for customer in customers %}
-            <option value="{{ customer }}"></option>
-          {% endfor %}
+        {% for customer in customers %}<option value="{{ customer }}"></option>{% endfor %}
       </datalist>
       <label>
         一箱数量
@@ -58,6 +59,20 @@
         最低库存
         <input type="number" name="min_stock" min="0" step="1" value="{{ manual.min_stock or 0 }}">
       </label>
+      {% if can_view_prices %}
+        <label>
+          当前单价
+          <input type="text" name="unit_price" inputmode="decimal" value="{{ manual.unit_price_minor | money_minor(manual.currency) }}" placeholder="例如 12.34">
+        </label>
+        <label>
+          币种
+          <select name="currency">
+            {% for currency in supported_currencies %}
+              <option value="{{ currency }}" {% if manual.currency == currency %}selected{% endif %}>{{ currency }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      {% endif %}
       <label>
         修改时间
         <input type="text" value="{{ manual.updated_at | datetime }}" disabled>
@@ -67,133 +82,18 @@
         <textarea name="remark" rows="3">{{ manual.remark or "" }}</textarea>
       </label>
       <div class="wide">
-        {% include "product_materials_editor.html" %}
-      </div>
-      <div class="wide">
         {% include "assembly_components_editor.html" %}
       </div>
-      <label class="wide">
-        追加文件或图片
-        <span class="dropzone" data-dropzone>
-          <input type="file" name="uploads" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.txt,.zip,.rar,.7z" multiple>
-          <span class="dropzone-title">拖入文件到这里</span>
-          <span class="dropzone-hint">也可以点击选择文件，支持多个文件或图片</span>
-          <div class="dropzone-files" data-file-list data-empty-text="未选择新文件">未选择新文件</div>
-        </span>
-      </label>
-      <div class="wide current-files">
-        <span class="field-label">当前附件</span>
-        <div class="file-list">
-          {% for file in files %}
-            <div class="file-row">
-              <a href="{{ url_for('preview_manual', filename=file.filename) }}" target="_blank">{{ file.original_filename }}</a>
-              <button class="danger" type="submit" form="delete-file-{{ file.id }}">删除</button>
-            </div>
-          {% else %}
-            <p class="empty-text">暂无附件</p>
-          {% endfor %}
-        </div>
-      </div>
-      <div class="wide">
-        <span class="field-label">作业指导书编辑</span>
-        {% include "editor.html" %}
-      </div>
-      <div class="wide">
-        {% include "inspection_requirements_editor.html" %}
-      </div>
       <div class="wide form-actions">
-        <button type="submit">保存</button>
+        <button type="submit">保存基本信息</button>
         <a class="button secondary" href="{{ url_for('admin_index') }}">返回</a>
       </div>
       <datalist id="supplier-options">
-        {% for supplier in suppliers %}
-          <option value="{{ supplier }}"></option>
-        {% endfor %}
+        {% for supplier in suppliers %}<option value="{{ supplier }}"></option>{% endfor %}
       </datalist>
     </form>
-    {% for file in files %}
-      <form id="delete-file-{{ file.id }}" method="post" action="{{ url_for('delete_manual_file', manual_id=manual.id, file_id=file.id) }}" onsubmit="return confirm('确定删除这个附件吗？');"></form>
-    {% endfor %}
   </section>
 {% endblock %}
 {% block scripts %}
-  <script src="{{ url_for('static', filename='editor.js', v=static_version) }}"></script>
   <script src="{{ url_for('static', filename='assembly_shipping.js', v=static_version) }}"></script>
-  <script>
-    document.querySelectorAll("[data-inspection-editor]").forEach((editor) => {
-      const rows = editor.querySelector("[data-inspection-rows]");
-      const template = editor.querySelector("[data-empty-inspection-row]");
-      const addButton = editor.querySelector("[data-add-inspection-row]");
-
-      function bindRemove(row) {
-        const button = row.querySelector("[data-remove-inspection-row]");
-        if (!button) return;
-        button.addEventListener("click", () => {
-          const visibleRows = Array.from(rows.querySelectorAll("tr")).filter((item) => !item.hidden);
-          if (visibleRows.length <= 1) {
-            row.querySelectorAll("input, textarea").forEach((input) => { input.value = ""; });
-            return;
-          }
-          row.remove();
-        });
-      }
-
-      rows.querySelectorAll("tr").forEach(bindRemove);
-      addButton?.addEventListener("click", () => {
-        const clone = template.cloneNode(true);
-        clone.hidden = false;
-        clone.removeAttribute("data-empty-inspection-row");
-        clone.querySelectorAll("input, textarea").forEach((input) => { input.value = ""; });
-        bindRemove(clone);
-        rows.appendChild(clone);
-      });
-    });
-
-    document.querySelectorAll("[data-product-material-editor]").forEach((editor) => {
-      const rows = editor.querySelector("[data-material-rows]");
-      const template = editor.querySelector("[data-empty-material-row]");
-      const addButton = editor.querySelector("[data-add-material-row]");
-
-      function bindHistorySelect(row) {
-        row.querySelectorAll("[data-material-history-select]").forEach((select) => {
-          select.addEventListener("change", () => {
-            const targetName = select.dataset.targetName;
-            const target = Array.from(row.querySelectorAll("input")).find((input) => input.name === targetName);
-            if (!target || !select.value) return;
-            target.value = select.value;
-            select.value = "";
-            target.dispatchEvent(new Event("input", { bubbles: true }));
-          });
-        });
-      }
-
-      function bindRemove(row) {
-        const button = row.querySelector("[data-remove-material-row]");
-        if (!button) return;
-        button.addEventListener("click", () => {
-          const visibleRows = Array.from(rows.querySelectorAll("tr")).filter((item) => !item.hidden);
-          if (visibleRows.length <= 1) {
-            row.querySelectorAll("input").forEach((input) => { input.value = ""; });
-            return;
-          }
-          row.remove();
-        });
-      }
-
-      rows.querySelectorAll("tr").forEach((row) => {
-        bindRemove(row);
-        bindHistorySelect(row);
-      });
-      addButton?.addEventListener("click", () => {
-        const clone = template.cloneNode(true);
-        clone.hidden = false;
-        clone.removeAttribute("data-empty-material-row");
-        clone.querySelectorAll("input").forEach((input) => { input.value = ""; });
-        clone.querySelectorAll("select").forEach((select) => { select.value = ""; });
-        bindRemove(clone);
-        bindHistorySelect(clone);
-        rows.appendChild(clone);
-      });
-    });
-  </script>
 {% endblock %}

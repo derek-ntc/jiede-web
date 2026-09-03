@@ -121,7 +121,7 @@ class PdfPreviewTests(unittest.TestCase):
     def test_pdf_pages_expose_shared_preview_contract_without_download(self):
         pages = [
             self.client.get("/admin/production-followups").get_data(as_text=True),
-            self.client.get(f"/manual/{self.manual_id}").get_data(as_text=True),
+            self.client.get(f"/manual/{self.manual_id}/technical").get_data(as_text=True),
             self.client.get(f"/manual/{self.manual_id}/preview").get_data(as_text=True),
         ]
 

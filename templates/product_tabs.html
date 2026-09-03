@@ -1,0 +1,9 @@
+<nav class="product-tabs" aria-label="产品资料页面">
+  {% if mode == "edit" %}
+    <a class="product-tab{% if active_tab == 'basic' %} active{% endif %}" href="{{ url_for('edit_manual', manual_id=manual.id) }}">基本信息</a>
+    <a class="product-tab{% if active_tab == 'technical' %} active{% endif %}" href="{{ url_for('edit_manual_technical', manual_id=manual.id) }}">技术资料</a>
+  {% else %}
+    <a class="product-tab{% if active_tab == 'basic' %} active{% endif %}" href="{{ url_for('manual_detail', manual_id=manual.id) }}">基本信息</a>
+    <a class="product-tab{% if active_tab == 'technical' %} active{% endif %}" href="{{ url_for('manual_technical', manual_id=manual.id) }}">技术资料</a>
+  {% endif %}
+</nav>

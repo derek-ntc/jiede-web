@@ -184,3 +184,366 @@ class ProductPricePermissionTests(unittest.TestCase):
                 "SELECT can_view_prices, can_manage_finance FROM users WHERE username = 'form-user'"
             ).fetchone()
         self.assertEqual((user["can_view_prices"], user["can_manage_finance"]), (1, 0))
+
+
+class ProductPageTestCase(unittest.TestCase):
+    def setUp(self):
+        self.original_db_path = app.DB_PATH
+        self.original_database_ready = app.DATABASE_READY
+        self.original_testing = app.app.config["TESTING"]
+        self.original_secret_key = app.app.config["SECRET_KEY"]
+        self.tmpdir = tempfile.TemporaryDirectory()
+        app.DB_PATH = Path(self.tmpdir.name) / "manuals.db"
+        app.DATABASE_READY = False
+        app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        app.init_db()
+
+        now = "2026-09-03T10:00:00"
+        with app.get_db() as conn:
+            self.manual_id = conn.execute(
+                """
+                INSERT INTO manuals (
+                    drawing_no, product_name, supplier, customer,
+                    pack_quantity, pack_carton_size, pack_weight,
+                    sku, barcode, min_stock, remark, description_html,
+                    unit_price_minor, currency, model, category, version,
+                    filename, original_filename, created_at, updated_at
+                ) VALUES (
+                    'P-100', '分栏产品', '供应商甲', '客户甲',
+                    '40PCS', '31x31x31.5CM', '12KG',
+                    'SKU-100', 'BAR-100', 5, '基本备注', '<p>装配步骤甲</p>',
+                    1234, 'CNY', '', '', '', '', '', ?, ?
+                )
+                """,
+                (now, now),
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO product_materials (
+                    manual_id, material, thickness, surface_type, supplier,
+                    created_at, updated_at
+                ) VALUES (?, 'Q235', '1.2mm', '喷粉', '材料商甲', ?, ?)
+                """,
+                (self.manual_id, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO manual_inspection_requirements (
+                    manual_id, item_name, standard, method, remark,
+                    sort_order, created_at, updated_at
+                ) VALUES (?, '外观', '无划痕', '目视', '', 0, ?, ?)
+                """,
+                (self.manual_id, now, now),
+            )
+            self.file_ids = [
+                conn.execute(
+                    """
+                    INSERT INTO manual_files (
+                        manual_id, filename, original_filename, file_type, created_at
+                    ) VALUES (?, ?, ?, 'file', ?)
+                    """,
+                    (self.manual_id, filename, original_filename, now),
+                ).lastrowid
+                for filename, original_filename in (
+                    ("drawing-a.dwg", "图纸甲.dwg"),
+                    ("drawing-b.dwg", "图纸乙.dwg"),
+                )
+            ]
+            conn.execute(
+                """
+                UPDATE manuals
+                SET filename = 'drawing-a.dwg', original_filename = '图纸甲.dwg', file_type = 'file'
+                WHERE id = ?
+                """,
+                (self.manual_id,),
+            )
+            self.create_user(conn, "price-editor", can_edit_products=1, can_view_prices=1)
+            self.create_user(conn, "plain-editor", can_edit_products=1)
+            self.create_user(conn, "price-reader", can_view_prices=1)
+            self.create_user(conn, "price-creator", can_create_products=1, can_view_prices=1)
+            self.create_user(conn, "plain-creator", can_create_products=1)
+
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.DB_PATH = self.original_db_path
+        app.DATABASE_READY = self.original_database_ready
+        app.app.config.update(TESTING=self.original_testing, SECRET_KEY=self.original_secret_key)
+        self.tmpdir.cleanup()
+
+    def create_user(
+        self,
+        conn,
+        username,
+        can_edit_products=0,
+        can_create_products=0,
+        can_view_prices=0,
+    ):
+        now = "2026-09-03T10:00:00"
+        conn.execute(
+            """
+            INSERT INTO users (
+                username, password_hash, role, active,
+                can_manage_products, can_create_products, can_edit_products,
+                can_view_prices, can_manage_finance, created_at, updated_at
+            ) VALUES (?, 'hash', 'operator', 1, 0, ?, ?, ?, 0, ?, ?)
+            """,
+            (
+                username,
+                can_create_products,
+                can_edit_products,
+                can_view_prices,
+                now,
+                now,
+            ),
+        )
+
+    def login_as(self, username):
+        with self.client.session_transaction() as session:
+            session.clear()
+            session["admin_logged_in"] = True
+            session["admin_username"] = username
+            session["admin_role"] = "operator"
+
+    def valid_basic_form(self, **overrides):
+        data = {
+            "drawing_no": "P-100",
+            "product_name": "分栏产品",
+            "supplier": "供应商甲",
+            "customer": "客户甲",
+            "pack_quantity": "40PCS",
+            "pack_carton_size": "31x31x31.5CM",
+            "pack_weight": "12KG",
+            "sku": "SKU-100",
+            "barcode": "BAR-100",
+            "default_location_id": "",
+            "min_stock": "5",
+            "remark": "基本备注",
+        }
+        data.update(overrides)
+        return data
+
+
+class ProductPageSplitTests(ProductPageTestCase):
+    def test_public_basic_and_technical_pages_show_only_their_owned_sections(self):
+        response = self.client.get(f"/manual/{self.manual_id}")
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("基本信息", html)
+        self.assertNotIn("作业指导书", html)
+        self.assertNotIn("装配步骤甲", html)
+        self.assertNotIn("Q235", html)
+
+        response = self.client.get(f"/manual/{self.manual_id}/technical")
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("技术资料", html)
+        self.assertIn("作业指导书", html)
+        self.assertIn("装配步骤甲", html)
+        self.assertIn("Q235", html)
+        self.assertNotIn("基本备注", html)
+
+    def test_edit_pages_show_only_fields_owned_by_the_active_tab(self):
+        self.login_as("plain-editor")
+
+        basic_html = self.client.get(
+            f"/admin/{self.manual_id}/edit"
+        ).get_data(as_text=True)
+        self.assertIn("基本信息", basic_html)
+        self.assertIn('name="product_name"', basic_html)
+        self.assertIn('name="assembly_drawing_no"', basic_html)
+        self.assertNotIn('name="description_html"', basic_html)
+        self.assertNotIn('name="material"', basic_html)
+        self.assertNotIn('name="uploads"', basic_html)
+
+        technical_html = self.client.get(
+            f"/admin/{self.manual_id}/edit/technical"
+        ).get_data(as_text=True)
+        self.assertIn("技术资料", technical_html)
+        self.assertIn('name="description_html"', technical_html)
+        self.assertIn('name="material"', technical_html)
+        self.assertIn('name="uploads"', technical_html)
+        self.assertNotIn('name="product_name"', technical_html)
+        self.assertNotIn('name="assembly_drawing_no"', technical_html)
+
+    def test_each_edit_post_updates_only_fields_owned_by_its_tab(self):
+        self.login_as("plain-editor")
+
+        response = self.client.post(
+            f"/admin/{self.manual_id}/edit",
+            data=self.valid_basic_form(
+                product_name="基础更新产品",
+                description_html="<p>不应覆盖技术资料</p>",
+                material="不应覆盖材料",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            manual = conn.execute(
+                "SELECT product_name, description_html FROM manuals WHERE id = ?",
+                (self.manual_id,),
+            ).fetchone()
+            materials = app.get_product_materials(conn, self.manual_id)
+        self.assertEqual(manual["product_name"], "基础更新产品")
+        self.assertEqual(manual["description_html"], "<p>装配步骤甲</p>")
+        self.assertEqual(materials[0]["material"], "Q235")
+
+        response = self.client.post(
+            f"/admin/{self.manual_id}/edit/technical",
+            data={
+                "product_name": "不应覆盖基础信息",
+                "description_html": "<p>技术资料已更新</p>",
+                "material": ["304"],
+                "material_thickness": ["2mm"],
+                "surface_type": ["拉丝"],
+                "material_supplier": ["材料商乙"],
+                "inspection_item_name": ["尺寸"],
+                "inspection_standard": ["±0.1mm"],
+                "inspection_method": ["卡尺"],
+                "inspection_remark": [""],
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            manual = conn.execute(
+                "SELECT product_name, description_html FROM manuals WHERE id = ?",
+                (self.manual_id,),
+            ).fetchone()
+            materials = app.get_product_materials(conn, self.manual_id)
+        self.assertEqual(manual["product_name"], "基础更新产品")
+        self.assertEqual(manual["description_html"], "<p>技术资料已更新</p>")
+        self.assertEqual(materials[0]["material"], "304")
+
+    def test_attachment_deletion_redirects_to_technical_edit(self):
+        self.login_as("plain-editor")
+        response = self.client.post(
+            f"/admin/{self.manual_id}/files/{self.file_ids[1]}/delete"
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            f"/admin/{self.manual_id}/edit/technical",
+        )
+
+
+class ProductCurrentPriceTests(ProductPageTestCase):
+    def test_create_form_and_write_are_gated_by_price_permission(self):
+        self.login_as("plain-creator")
+        plain_html = self.client.get("/admin").get_data(as_text=True)
+        self.assertNotIn('name="unit_price"', plain_html)
+        self.assertNotIn('name="currency"', plain_html)
+        response = self.client.post(
+            "/admin/upload",
+            data=self.valid_basic_form(
+                drawing_no="P-PLAIN",
+                product_name="无价格权限新产品",
+                unit_price="0.01",
+                currency="USD",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            plain_manual = conn.execute(
+                "SELECT unit_price_minor, currency FROM manuals WHERE drawing_no = 'P-PLAIN'"
+            ).fetchone()
+        self.assertEqual(
+            (plain_manual["unit_price_minor"], plain_manual["currency"]),
+            (None, "CNY"),
+        )
+
+        self.login_as("price-creator")
+        priced_html = self.client.get("/admin").get_data(as_text=True)
+        self.assertIn('name="unit_price"', priced_html)
+        self.assertIn('name="currency"', priced_html)
+        response = self.client.post(
+            "/admin/upload",
+            data=self.valid_basic_form(
+                drawing_no="P-PRICED",
+                product_name="可定价新产品",
+                unit_price="12.34",
+                currency="CNY",
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            priced_manual = conn.execute(
+                "SELECT unit_price_minor, currency FROM manuals WHERE drawing_no = 'P-PRICED'"
+            ).fetchone()
+        self.assertEqual(
+            (priced_manual["unit_price_minor"], priced_manual["currency"]),
+            (1234, "CNY"),
+        )
+
+    def test_price_projection_is_opt_in(self):
+        with app.get_db() as conn:
+            safe_manual = app.fetch_manual_by_id(conn, self.manual_id)
+            priced_manual = app.fetch_manual_by_id(conn, self.manual_id, include_price=True)
+
+        self.assertNotIn("unit_price_minor", safe_manual.keys())
+        self.assertNotIn("currency", safe_manual.keys())
+        self.assertEqual(
+            (priced_manual["unit_price_minor"], priced_manual["currency"]),
+            (1234, "CNY"),
+        )
+
+    def test_only_price_readers_see_current_price(self):
+        public_html = self.client.get(
+            f"/manual/{self.manual_id}"
+        ).get_data(as_text=True)
+        self.assertNotIn("当前单价", public_html)
+        self.assertNotIn("12.34 CNY", public_html)
+
+        self.login_as("plain-editor")
+        unauthorized_html = self.client.get(
+            f"/admin/{self.manual_id}/edit"
+        ).get_data(as_text=True)
+        self.assertNotIn("当前单价", unauthorized_html)
+        self.assertNotIn("12.34 CNY", unauthorized_html)
+        self.assertNotIn('name="unit_price"', unauthorized_html)
+        self.assertNotIn('name="currency"', unauthorized_html)
+
+        self.login_as("price-reader")
+        reader_html = self.client.get(
+            f"/manual/{self.manual_id}"
+        ).get_data(as_text=True)
+        self.assertIn("当前单价", reader_html)
+        self.assertIn("12.34 CNY", reader_html)
+
+    def test_authorized_editor_can_update_current_price(self):
+        with app.get_db() as conn:
+            conn.execute(
+                "UPDATE manuals SET unit_price_minor = NULL, currency = 'CNY' WHERE id = ?",
+                (self.manual_id,),
+            )
+        self.login_as("price-editor")
+        response = self.client.post(
+            f"/admin/{self.manual_id}/edit",
+            data=self.valid_basic_form(unit_price="12.34", currency="CNY"),
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            manual = conn.execute(
+                "SELECT unit_price_minor, currency FROM manuals WHERE id = ?",
+                (self.manual_id,),
+            ).fetchone()
+        self.assertEqual(
+            (manual["unit_price_minor"], manual["currency"]),
+            (1234, "CNY"),
+        )
+
+    def test_editor_without_price_permission_cannot_alter_price_by_direct_post(self):
+        self.login_as("plain-editor")
+        response = self.client.post(
+            f"/admin/{self.manual_id}/edit",
+            data=self.valid_basic_form(unit_price="0.01", currency="USD"),
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            manual = conn.execute(
+                "SELECT unit_price_minor, currency FROM manuals WHERE id = ?",
+                (self.manual_id,),
+            ).fetchone()
+        self.assertEqual(
+            (manual["unit_price_minor"], manual["currency"]),
+            (1234, "CNY"),
+        )
