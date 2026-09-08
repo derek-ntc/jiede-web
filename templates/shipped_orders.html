@@ -52,6 +52,15 @@
       <div class="shipped-toolbar">
         <div class="toolbar-actions">
           <a class="button secondary" href="{{ url_for('export_shipped_orders', format='xlsx', q=query, customer=selected_customer, shipped_at=selected_shipped_at) }}">导出 Excel</a>
+          {% if can_manage_shipped and can_view_prices %}
+            <form method="post" action="{{ url_for('preview_shipment_prices_bulk') }}">
+              <input type="hidden" name="csrf_token" value="{{ shipment_price_csrf_token() }}">
+              <input type="hidden" name="q" value="{{ query }}">
+              <input type="hidden" name="customer" value="{{ selected_customer }}">
+              <input type="hidden" name="shipped_at" value="{{ selected_shipped_at }}">
+              <button class="secondary" type="submit">按现价批量补齐缺价（预览）</button>
+            </form>
+          {% endif %}
           {% if can_manage_finance %}
             <button type="submit" form="reconciliation-create-form">生成对账单</button>
             <a class="button secondary" href="{{ url_for('reconciliation_statements') }}">对账单列表</a>

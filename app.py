@@ -75,6 +75,7 @@ from flask.wrappers import Request as FlaskRequest
 from itsdangerous import BadSignature
 from itsdangerous import URLSafeSerializer
 from itsdangerous import URLSafeTimedSerializer
+import shipment_price_backfill
 import xlrd
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -14743,6 +14744,93 @@ def shipped_orders():
         selected_customer=selected_customer,
         selected_shipped_at=shipped_at,
     )
+
+
+def shipment_price_csrf_token():
+    token = session.get("shipment_price_csrf_token")
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        session["shipment_price_csrf_token"] = token
+    return token
+
+
+@app.context_processor
+def inject_shipment_price_csrf_helper():
+    return {"shipment_price_csrf_token": shipment_price_csrf_token}
+
+
+def require_shipment_price_csrf():
+    expected = session.get("shipment_price_csrf_token", "")
+    submitted = request.form.get("csrf_token", "")
+    if not isinstance(expected, str) or not expected or not submitted or not secrets.compare_digest(
+        expected.encode("utf-8"), submitted.encode("utf-8")
+    ):
+        abort(403, description="请求已失效，请刷新页面后重试")
+
+
+def shipment_price_source_refs(conn, filters):
+    """Use exactly the list's filters, including all items of matching assembly batches."""
+    kwargs = dict(query=filters["q"], selected_customer=filters["customer"], shipped_at=filters["shipped_at"])
+    refs = [("ordinary", row["id"]) for row in fetch_shipped_orders(conn, **kwargs)]
+    refs.extend(("assembly_item", item["id"])
+                for batch in fetch_assembly_shipment_batches(conn, **kwargs)
+                for item in batch["items"])
+    return shipment_price_backfill.normalize_sources(refs)
+
+
+def shipment_price_preview_serializer():
+    return URLSafeTimedSerializer(app.secret_key, salt="shipment-price-bulk-v1")
+
+
+@app.route("/admin/shipped-orders/prices/bulk/preview", methods=["POST"])
+@permission_required("shipped_manage")
+def preview_shipment_prices_bulk():
+    if not user_can_view_prices():
+        abort(403)
+    require_shipment_price_csrf()
+    filters = {key: request.form.get(key, "").strip() for key in ("q", "customer", "shipped_at")}
+    operator = current_admin_username()
+    with get_db() as conn:
+        plan = shipment_price_backfill.build_plan(conn, shipment_price_source_refs(conn, filters), operator)
+    token = shipment_price_preview_serializer().dumps({
+        "sources": plan["sources"], "digest": plan["digest"], "operator": operator, "filters": filters,
+    })
+    return render_template("shipment_price_backfill.html", plan=plan, token=token, filters=filters)
+
+
+@app.route("/admin/shipped-orders/prices/bulk/apply", methods=["POST"])
+@permission_required("shipped_manage")
+def apply_shipment_prices_bulk():
+    if not user_can_view_prices():
+        abort(403)
+    require_shipment_price_csrf()
+    try:
+        plan = shipment_price_preview_serializer().loads(request.form.get("token", ""), max_age=900)
+        filters = plan["filters"]
+        refs = shipment_price_backfill.normalize_sources(plan["sources"])
+        if not isinstance(plan["digest"], str) or set(filters) != {"q", "customer", "shipped_at"}:
+            raise ValueError("invalid preview")
+    except (BadSignature, ValueError, KeyError, TypeError):
+        abort(400, description="预览无效或已过期，请重新预览")
+    operator = current_admin_username()
+    if plan["operator"] != operator:
+        abort(403)
+
+    def assert_mutable(conn, sources):
+        assert_finance_sources_mutable(conn, sources)
+        assert_reconciliation_sources_mutable(conn, sources)
+
+    try:
+        with get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if shipment_price_source_refs(conn, filters) != refs:
+                raise ValueError("筛选内发货来源已变化，请重新预览")
+            result = shipment_price_backfill.apply_plan(conn, plan, operator, assert_mutable)
+    except ValueError as error:
+        # Catch outside get_db: any price/audit writes must roll back together.
+        abort(409, description=str(error))
+    flash(f"按产品现价补齐完成：更新 {result['updated_count']} 条历史发货价格", "success")
+    return redirect(url_for("shipped_orders", **filters))
 
 
 @app.route("/admin/shipped-orders/assembly-options")

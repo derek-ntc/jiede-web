@@ -53,6 +53,23 @@ def ensure_shipping_workflow_tables(conn):
             if column_name not in existing:
                 conn.execute(statement)
 
+    conn.execute("""CREATE TABLE IF NOT EXISTS shipment_price_backfill_runs (
+        digest TEXT PRIMARY KEY, operator TEXT NOT NULL, recorded_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS shipment_price_backfill_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        digest TEXT NOT NULL,
+        source_type TEXT NOT NULL CHECK (source_type IN ('ordinary', 'assembly_item')),
+        source_id INTEGER NOT NULL,
+        manual_id INTEGER NOT NULL,
+        unit_price_minor INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        operator TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        UNIQUE (digest, source_type, source_id)
+    )""")
+
 
 def normalize_recipient_fields(recipient_name, recipient_phone):
     recipient_name = str(recipient_name or "").strip()

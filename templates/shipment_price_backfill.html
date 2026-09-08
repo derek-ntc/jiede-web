@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}历史发货批量补价预览{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>历史发货按产品现价补齐</h1>
+  <p role="alert">当前价不等于历史成交价。此操作将产品当前价格记录为历史发货价格，请核实后确认；仅补齐缺失价格，不覆盖已存价格（含零价格）。</p>
+  <p>客户：{{ filters.customer or '全部' }} · 关键词：{{ filters.q or '全部' }} · 日期：{{ filters.shipped_at or '全部' }}</p>
+  <p>可补 {{ plan.eligible|length }} 条，跳过 {{ plan.skipped|length }} 条。预览有效期 15 分钟；价格或发货状态变化后需重新预览。</p>
+  {% for currency, total in plan.totals|dictsort %}
+    <p>{{ currency }} 补价金额：{{ total|money_minor(currency) }}（各币种分别统计，不换算、不混合合计）</p>
+  {% endfor %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>来源</th><th>产品</th><th>数量</th><th>当前单价</th><th>金额</th><th>结果</th></tr></thead>
+    <tbody>
+    {% for item in plan.eligible %}
+      <tr><td>{{ '普通发货' if item.source_type == 'ordinary' else '组装配件' }} #{{ item.source_id }}</td><td>{{ item.drawing_no }} {{ item.product_name }}</td><td>{{ item.quantity }}</td><td>{{ item.unit_price_minor|money_minor(item.currency) }} {{ item.currency }}</td><td>{{ item.line_total_minor|money_minor(item.currency) }} {{ item.currency }}</td><td>可补齐</td></tr>
+    {% endfor %}
+    {% for item in plan.skipped %}
+      <tr><td>{{ '普通发货' if item.source_type == 'ordinary' else '组装配件' }} #{{ item.source_id }}</td><td>{{ item.drawing_no }} {{ item.product_name }}</td><td>—</td><td>—</td><td>—</td><td>{{ item.reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  <form method="post" action="{{ url_for('apply_shipment_prices_bulk') }}">
+    <input type="hidden" name="csrf_token" value="{{ shipment_price_csrf_token() }}">
+    <input type="hidden" name="token" value="{{ token }}">
+    <button type="submit" {% if not plan.eligible %}disabled{% endif %}>确认按产品现价补齐 {{ plan.eligible|length }} 条</button>
+    <a class="button secondary" href="{{ url_for('shipped_orders', **filters) }}">取消并返回清单</a>
+  </form>
+</section>
+{% endblock %}
