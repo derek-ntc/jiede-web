@@ -117,6 +117,11 @@ from reconciliation import (
     format_unit_price_ex_tax_scaled,
 )
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
+from shipping_workflow import (
+    current_specification_snapshots,
+    ensure_shipping_workflow_tables,
+    normalize_recipient_fields,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -544,6 +549,7 @@ def init_db():
         ensure_arrival_record_tables(conn)
         ensure_inventory_tables(conn)
         ensure_assembly_shipping_tables(conn)
+        ensure_shipping_workflow_tables(conn)
         ensure_finance_tables(conn)
         ensure_reconciliation_tables(conn)
         ensure_feedback_table(conn)
@@ -4166,7 +4172,16 @@ def get_shipped_orders_query(include_prices=False):
             manuals.product_name,
             manuals.remark AS product_remark,
             manuals.customer AS product_customer,
-            manuals.supplier AS supplier
+            CASE
+                WHEN product_order_shipments.specification_snapshot IS NULL
+                THEN COALESCE(manuals.supplier, '')
+                ELSE product_order_shipments.specification_snapshot
+            END AS specification,
+            CASE
+                WHEN product_order_shipments.specification_snapshot IS NULL
+                THEN COALESCE(manuals.supplier, '')
+                ELSE product_order_shipments.specification_snapshot
+            END AS supplier
             {price_columns}
         FROM product_order_shipments
         LEFT JOIN product_orders ON product_orders.id = product_order_shipments.order_id
@@ -5302,6 +5317,10 @@ def _save_assembly_shipment_items(
         recorded_by,
         now,
     )
+    current_specifications = current_specification_snapshots(
+        conn,
+        introduced_manual_ids,
+    )
     affected_order_ids = set()
     for preview_item, manual_id in zip(preview["items"], manual_ids):
         quantity_per_set = parse_positive_int(
@@ -5332,8 +5351,10 @@ def _save_assembly_shipment_items(
             raise ValueError("组装发货订单分配数量无效")
         if manual_id in existing_price_snapshots:
             price_snapshot = existing_price_snapshots[manual_id]
+            specification_snapshot = price_snapshot.get("specification_snapshot")
         else:
             price_snapshot = current_price_snapshots[manual_id]
+            specification_snapshot = current_specifications[manual_id]
 
         item_id = conn.execute(
             """
@@ -5341,9 +5362,10 @@ def _save_assembly_shipment_items(
                 batch_id, manual_id, drawing_no, product_name,
                 quantity_per_set, calculated_quantity, shipped_quantity,
                 inventory_deducted_quantity, inventory_shortage_quantity,
+                specification_snapshot,
                 unit_price_minor, currency, price_recorded_by, price_recorded_at,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -5355,6 +5377,7 @@ def _save_assembly_shipment_items(
                 shipped_quantity,
                 expected_deducted,
                 expected_shortage,
+                specification_snapshot,
                 price_snapshot["unit_price_minor"],
                 price_snapshot["currency"],
                 price_snapshot["price_recorded_by"],
@@ -5688,7 +5711,11 @@ def fetch_shipped_orders(
                 OR manuals.drawing_no LIKE ?
                 OR manuals.product_name LIKE ?
                 OR manuals.customer LIKE ?
-                OR manuals.supplier LIKE ?
+                OR CASE
+                    WHEN product_order_shipments.specification_snapshot IS NULL
+                    THEN COALESCE(manuals.supplier, '')
+                    ELSE product_order_shipments.specification_snapshot
+                   END LIKE ?
             )
             """
         )
@@ -5738,21 +5765,41 @@ def _fetch_assembly_shipment_batches_by_ids(
     item_price_columns = ""
     if include_prices:
         item_price_columns = """,
-                unit_price_minor, currency, price_recorded_by, price_recorded_at,
-                unit_price_minor * shipped_quantity AS line_total_minor
+                assembly_shipment_items.unit_price_minor,
+                assembly_shipment_items.currency,
+                assembly_shipment_items.price_recorded_by,
+                assembly_shipment_items.price_recorded_at,
+                assembly_shipment_items.unit_price_minor
+                    * assembly_shipment_items.shipped_quantity AS line_total_minor
         """
     items = [
         dict(row)
         for row in conn.execute(
             f"""
-            SELECT id, batch_id, manual_id, drawing_no, product_name,
-                   quantity_per_set, calculated_quantity, shipped_quantity,
-                   inventory_deducted_quantity, inventory_shortage_quantity,
-                   created_at, updated_at
+            SELECT assembly_shipment_items.id,
+                   assembly_shipment_items.batch_id,
+                   assembly_shipment_items.manual_id,
+                   assembly_shipment_items.drawing_no,
+                   assembly_shipment_items.product_name,
+                   assembly_shipment_items.quantity_per_set,
+                   assembly_shipment_items.calculated_quantity,
+                   assembly_shipment_items.shipped_quantity,
+                   assembly_shipment_items.inventory_deducted_quantity,
+                   assembly_shipment_items.inventory_shortage_quantity,
+                   assembly_shipment_items.created_at,
+                   assembly_shipment_items.updated_at,
+                   assembly_shipment_items.specification_snapshot,
+                   CASE
+                       WHEN assembly_shipment_items.specification_snapshot IS NULL
+                       THEN COALESCE(manuals.supplier, '')
+                       ELSE assembly_shipment_items.specification_snapshot
+                   END AS specification
                    {item_price_columns}
             FROM assembly_shipment_items
+            LEFT JOIN manuals ON manuals.id = assembly_shipment_items.manual_id
             WHERE batch_id IN ({placeholders})
-            ORDER BY batch_id ASC, id ASC
+            ORDER BY assembly_shipment_items.batch_id ASC,
+                     assembly_shipment_items.id ASC
             """,
             batch_ids,
         ).fetchall()
@@ -5842,12 +5889,21 @@ def fetch_assembly_shipment_batches(
                       AND (
                           assembly_shipment_items.drawing_no LIKE ?
                           OR assembly_shipment_items.product_name LIKE ?
+                          OR CASE
+                              WHEN assembly_shipment_items.specification_snapshot IS NULL
+                              THEN COALESCE(
+                                  (SELECT supplier FROM manuals
+                                   WHERE manuals.id = assembly_shipment_items.manual_id),
+                                  ''
+                              )
+                              ELSE assembly_shipment_items.specification_snapshot
+                             END LIKE ?
                       )
                 )
             )
             """
         )
-        params.extend([like, like, like, like, like])
+        params.extend([like, like, like, like, like, like])
     if selected_customer:
         conditions.append("assembly_shipment_batches.customer = ?")
         params.append(selected_customer)
@@ -7641,7 +7697,7 @@ def build_shipped_orders_workbook(shipped_orders, query, selected_customer, ship
     worksheet["A2"].font = Font(italic=True, color="666666")
     worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=9)
     worksheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=9)
-    headers = ["发货时间", "发货产品", "发货数量", "订单号", "客户名称", "供应商", "产品图号", "订单下单时间", "订单计划发货时间"]
+    headers = ["发货时间", "发货产品", "发货数量", "订单号", "客户名称", "规格型号", "产品图号", "订单下单时间", "订单计划发货时间"]
     for col_index, header in enumerate(headers, start=1):
         cell = worksheet.cell(row=3, column=col_index)
         cell.value = header
@@ -7652,12 +7708,17 @@ def build_shipped_orders_workbook(shipped_orders, query, selected_customer, ship
     row_index = 4
     if shipped_orders:
         for shipment in shipped_orders:
+            specification = (
+                shipment["specification"]
+                if "specification" in shipment.keys()
+                else shipment["supplier"]
+            )
             worksheet.cell(row=row_index, column=1, value=shipment["shipped_at"])
             worksheet.cell(row=row_index, column=2, value=shipment["product_name"])
             worksheet.cell(row=row_index, column=3, value=shipment["shipped_quantity"])
             worksheet.cell(row=row_index, column=4, value=shipment["order_no"])
             worksheet.cell(row=row_index, column=5, value=shipment["order_customer"] or shipment["product_customer"] or "")
-            worksheet.cell(row=row_index, column=6, value=shipment["supplier"] or "")
+            worksheet.cell(row=row_index, column=6, value=specification or "")
             worksheet.cell(row=row_index, column=7, value=shipment["drawing_no"] or "")
             worksheet.cell(row=row_index, column=8, value=shipment["ordered_at"])
             worksheet.cell(row=row_index, column=9, value=shipment["planned_ship_at"])
@@ -9522,6 +9583,14 @@ def admin_customers():
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         contact = request.form.get("contact", "").strip()
+        try:
+            recipient_name, recipient_phone = normalize_recipient_fields(
+                request.form.get("recipient_name"),
+                request.form.get("recipient_phone"),
+            )
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(url_for("admin_customers"))
         address = request.form.get("address", "").strip()
         email = request.form.get("email", "").strip()
         phone = request.form.get("phone", "").strip()
@@ -9537,12 +9606,24 @@ def admin_customers():
                 conn.execute(
                     """
                     INSERT INTO customers (
-                        name, contact, address, email, phone, remark,
+                        name, contact, recipient_name, recipient_phone,
+                        address, email, phone, remark,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, contact, address, email, phone, remark, now, now),
+                    (
+                        name,
+                        contact,
+                        recipient_name,
+                        recipient_phone,
+                        address,
+                        email,
+                        phone,
+                        remark,
+                        now,
+                        now,
+                    ),
                 )
         except sqlite3.IntegrityError:
             flash("该客户名称已存在", "error")
@@ -9558,6 +9639,8 @@ def admin_customers():
         sql += """
             WHERE name LIKE ?
                OR contact LIKE ?
+               OR recipient_name LIKE ?
+               OR recipient_phone LIKE ?
                OR address LIKE ?
                OR email LIKE ?
                OR phone LIKE ?
@@ -9566,7 +9649,7 @@ def admin_customers():
                OR tax_id LIKE ?
         """
         like = f"%{query}%"
-        params.extend([like, like, like, like, like, like, like, like])
+        params.extend([like, like, like, like, like, like, like, like, like, like])
     sql += " ORDER BY name COLLATE NOCASE ASC, id DESC"
     with get_db() as conn:
         customers = conn.execute(sql, params).fetchall()
@@ -9578,6 +9661,14 @@ def admin_customers():
 def edit_customer(customer_id):
     name = request.form.get("name", "").strip()
     contact = request.form.get("contact", "").strip()
+    try:
+        recipient_name, recipient_phone = normalize_recipient_fields(
+            request.form.get("recipient_name"),
+            request.form.get("recipient_phone"),
+        )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("admin_customers"))
     address = request.form.get("address", "").strip()
     email = request.form.get("email", "").strip()
     phone = request.form.get("phone", "").strip()
@@ -9600,11 +9691,22 @@ def edit_customer(customer_id):
             conn.execute(
                 """
                 UPDATE customers
-                SET name = ?, contact = ?, address = ?, email = ?,
-                    phone = ?, remark = ?, updated_at = ?
+                SET name = ?, contact = ?, recipient_name = ?, recipient_phone = ?,
+                    address = ?, email = ?, phone = ?, remark = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (name, contact, address, email, phone, remark, now, customer_id),
+                (
+                    name,
+                    contact,
+                    recipient_name,
+                    recipient_phone,
+                    address,
+                    email,
+                    phone,
+                    remark,
+                    now,
+                    customer_id,
+                ),
             )
             if name != previous_name:
                 conn.execute(
@@ -14698,6 +14800,7 @@ def edit_assembly_shipment(batch_id):
                     "currency": item["currency"],
                     "price_recorded_by": item["price_recorded_by"],
                     "price_recorded_at": item["price_recorded_at"],
+                    "specification_snapshot": item["specification_snapshot"],
                 }
                 for item in batch["items"]
             }
@@ -14863,6 +14966,9 @@ def create_shipment_from_shipped_page():
 
         for order_id_value, shipped_quantity_value in requested_items:
             order = orders_by_id[order_id_value]
+            specification_snapshot = current_specification_snapshots(
+                conn, [order["manual_id"]]
+            )[int(order["manual_id"])]
             price_snapshot = current_product_price_snapshot(
                 conn,
                 order["manual_id"],
@@ -14877,9 +14983,10 @@ def create_shipment_from_shipped_page():
                 INSERT INTO product_order_shipments (
                     order_id, shipped_quantity, shipped_at, created_at, email_sent_at, logistics_no,
                     signature_token, signature_status, signature_expires_at, photo_upload_token,
+                    specification_snapshot,
                     unit_price_minor, currency, price_recorded_by, price_recorded_at
                 )
-                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_id_value,
@@ -14890,6 +14997,7 @@ def create_shipment_from_shipped_page():
                     signature_token,
                     signature_expires,
                     photo_upload_token,
+                    specification_snapshot,
                     price_snapshot["unit_price_minor"],
                     price_snapshot["currency"],
                     price_snapshot["price_recorded_by"],
@@ -15145,6 +15253,7 @@ def approve_shipment_plan(plan_id):
         rows = conn.execute(
             f"""
             SELECT shipment_plan_items.*,
+                   product_orders.manual_id AS manual_id,
                    product_orders.quantity - COALESCE(shipments.shipped_total, product_orders.shipped_quantity, 0) AS unshipped_quantity
             FROM shipment_plan_items
             JOIN product_orders ON product_orders.id = shipment_plan_items.order_id
@@ -15183,6 +15292,9 @@ def approve_shipment_plan(plan_id):
             if quantity_value <= 0:
                 continue
             item = items_by_id[item_id]
+            specification_snapshot = current_specification_snapshots(
+                conn, [item["manual_id"]]
+            )[int(item["manual_id"])]
             signature_token = unique_signature_token(conn)
             photo_upload_token = unique_shipment_photo_token(conn)
             signature_expires = signature_expires_at()
@@ -15190,9 +15302,10 @@ def approve_shipment_plan(plan_id):
                 """
                 INSERT INTO product_order_shipments (
                     order_id, shipped_quantity, shipped_at, created_at, email_sent_at, logistics_no,
-                    signature_token, signature_status, signature_expires_at, photo_upload_token
+                    signature_token, signature_status, signature_expires_at, photo_upload_token,
+                    specification_snapshot
                 )
-                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?)
+                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?)
                 """,
                 (
                     item["order_id"],
@@ -15203,6 +15316,7 @@ def approve_shipment_plan(plan_id):
                     signature_token,
                     signature_expires,
                     photo_upload_token,
+                    specification_snapshot,
                 ),
             )
             shipment_id = cursor.lastrowid

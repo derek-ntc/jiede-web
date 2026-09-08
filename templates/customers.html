@@ -4,7 +4,7 @@
   <section class="page-head">
     <div>
       <h1>客户信息管理</h1>
-      <p>维护客户联系人、地址、邮箱和电话等资料。</p>
+      <p>维护客户业务联系人、默认收货人、地址、邮箱和电话等资料。</p>
     </div>
     <div class="head-stat">
       <strong>{{ customers|length }}</strong>
@@ -22,6 +22,14 @@
       <label>
         联系人
         <input type="text" name="contact">
+      </label>
+      <label>
+        收货人
+        <input type="text" name="recipient_name" maxlength="100">
+      </label>
+      <label>
+        收货人联系方式
+        <input type="text" name="recipient_phone" maxlength="100">
       </label>
       <label>
         邮箱
@@ -49,7 +57,7 @@
     <div class="section-head">
       <h2>客户列表</h2>
       <form class="search compact-search" method="get">
-        <input type="search" name="q" value="{{ query }}" placeholder="搜索客户、联系人、地址、邮箱、电话、开票抬头或税号">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索客户、联系人、收货人、收货电话、地址、邮箱、电话、开票抬头或税号">
         <button type="submit">搜索</button>
         {% if query %}
           <a class="button secondary" href="{{ url_for('admin_customers') }}">清除</a>
@@ -62,6 +70,8 @@
           <tr>
             <th>客户名称</th>
             <th>联系人</th>
+            <th>收货人</th>
+            <th>收货人联系方式</th>
             <th>地址</th>
             <th>邮箱</th>
             <th>电话</th>
@@ -78,6 +88,12 @@
               </td>
               <td data-label="联系人">
                 <input form="customer-form-{{ customer.id }}" type="text" name="contact" value="{{ customer.contact or '' }}">
+              </td>
+              <td data-label="收货人">
+                <input form="customer-form-{{ customer.id }}" type="text" name="recipient_name" maxlength="100" value="{{ customer.recipient_name or '' }}">
+              </td>
+              <td data-label="收货人联系方式">
+                <input form="customer-form-{{ customer.id }}" type="text" name="recipient_phone" maxlength="100" value="{{ customer.recipient_phone or '' }}">
               </td>
               <td data-label="地址">
                 <input form="customer-form-{{ customer.id }}" type="text" name="address" value="{{ customer.address or '' }}">
@@ -105,7 +121,7 @@
             </tr>
           {% else %}
             <tr>
-              <td colspan="8" class="empty">暂无客户信息</td>
+              <td colspan="10" class="empty">暂无客户信息</td>
             </tr>
           {% endfor %}
         </tbody>

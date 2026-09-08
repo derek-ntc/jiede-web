@@ -20,12 +20,12 @@
       <form class="product-query-form" method="get" aria-label="产品查询">
         <div class="product-filter-field product-keyword-field">
           <label for="product-query">关键词</label>
-          <input id="product-query" type="search" name="q" value="{{ query }}" placeholder="产品图号 / 名称 / 组装图号" data-auto-submit-search>
+          <input id="product-query" type="search" name="q" value="{{ query }}" placeholder="产品图号 / 名称 / 规格型号 / 组装图号" data-auto-submit-search>
         </div>
         <div class="product-filter-field">
-          <label for="product-supplier">供应商</label>
-          <select id="product-supplier" name="supplier" aria-label="供应商分类" onchange="this.form.submit()">
-          <option value="">全部供应商</option>
+          <label for="product-supplier">规格型号</label>
+          <select id="product-supplier" name="supplier" aria-label="规格型号分类" onchange="this.form.submit()">
+          <option value="">全部规格型号</option>
           {% for supplier in suppliers %}
             <option value="{{ supplier }}" {% if supplier == selected_supplier %}selected{% endif %}>{{ supplier }}</option>
           {% endfor %}
@@ -45,7 +45,7 @@
         <div class="product-query-actions">
           <button type="submit"><span aria-hidden="true" class="product-search-icon"></span>搜索</button>
           <a class="button secondary" href="{{ url_for('products_index') }}"><span aria-hidden="true">×</span>清空</a>
-          <span class="product-query-hint">支持图号、名称、组装图号及材料信息查询</span>
+          <span class="product-query-hint">支持图号、名称、规格型号、组装图号及材料信息查询</span>
         </div>
       </form>
     </section>
@@ -117,7 +117,7 @@
           {% endif %}
           <th>{{ sort_link("产品图号", "drawing_no") }}</th>
           <th>{{ sort_link("产品名称", "product_name") }}</th>
-          <th>{{ sort_link("供应商", "supplier") }}</th>
+          <th>{{ sort_link("规格型号", "supplier") }}</th>
           <th>{{ sort_link("客户", "customer") }}</th>
           <th>单位</th>
           <th>所属组装件</th>
@@ -137,7 +137,7 @@
             {% endif %}
             <td data-label="产品图号"><a class="product-drawing-link product-cell-text" href="{{ url_for('manual_detail', manual_id=manual.id) }}" title="{{ manual.drawing_no or '-' }}">{{ manual.drawing_no or "-" }}</a></td>
             <td data-label="产品名称"><span class="product-wrap-text">{{ manual.product_name }}</span></td>
-            <td data-label="供应商"><span class="product-wrap-text">{{ manual.supplier or "-" }}</span></td>
+            <td data-label="规格型号"><span class="product-wrap-text">{{ manual.supplier or "-" }}</span></td>
             <td data-label="客户"><span class="product-wrap-text">{{ manual.customer or "-" }}</span></td>
             <td data-label="单位"><span class="product-cell-text">{{ manual.unit or "-" }}</span></td>
             <td data-label="所属组装件">

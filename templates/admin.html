@@ -72,7 +72,7 @@
     {% if can_create_products %}
       <a class="module-card" href="{{ url_for('admin_index') }}#new-product">
         <strong>新产品输入模块</strong>
-        <span>录入产品图号、名称、供应商、客户和技术资料。</span>
+        <span>录入产品图号、名称、规格型号、客户和技术资料。</span>
       </a>
     {% endif %}
     <a class="module-card" href="{{ url_for('products_index') }}">
@@ -94,8 +94,8 @@
           <input type="text" name="product_name" required>
         </label>
         <label>
-          供应商
-          <input type="text" name="supplier" list="supplier-options" placeholder="选择或输入供应商">
+          规格型号
+          <input type="text" name="supplier" list="supplier-options" placeholder="选择或输入规格型号">
         </label>
         <label>
           客户

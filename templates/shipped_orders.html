@@ -25,7 +25,7 @@
       <form class="erp-query-form erp-shipped-query" method="get">
         <div class="erp-filter-field erp-keyword-field">
           <label for="shipment-query">关键词</label>
-          <input id="shipment-query" type="search" name="q" value="{{ query }}" placeholder="发货时间 / 订单号 / 产品 / 供应商等" data-auto-submit-search>
+          <input id="shipment-query" type="search" name="q" value="{{ query }}" placeholder="发货时间 / 订单号 / 产品 / 规格型号等" data-auto-submit-search>
         </div>
         <div class="erp-filter-field">
           <label for="shipment-customer">客户</label>
@@ -113,6 +113,7 @@
                     <tr>
                       <th>配件图号</th>
                       <th>产品名称</th>
+                      <th>规格型号</th>
                       <th>每套用量</th>
                       <th>计算数量</th>
                       <th>实际数量</th>
@@ -130,6 +131,7 @@
                       <tr>
                         <td data-label="配件图号">{{ item.drawing_no or "-" }}</td>
                         <td data-label="产品名称">{{ item.product_name or "-" }}</td>
+                        <td data-label="规格型号">{{ item.specification or "-" }}</td>
                         <td data-label="每套用量">{{ item.quantity_per_set }}</td>
                         <td data-label="计算数量">{{ item.calculated_quantity }}</td>
                         <td data-label="实际数量">{{ item.shipped_quantity }}</td>
@@ -225,6 +227,7 @@
             <th>发货时间</th>
             <th>产品图号</th>
             <th>发货产品</th>
+            <th>规格型号</th>
             <th>发货数量</th>
             {% if can_view_prices %}
               <th>发货单价</th>
@@ -258,6 +261,7 @@
                 {% endif %}
               </td>
               <td data-label="发货产品">{{ shipment.product_name or "-" }}</td>
+              <td data-label="规格型号">{{ shipment.specification or "-" }}</td>
               <td data-label="发货数量">{{ shipment.shipped_quantity }}</td>
               {% if can_view_prices %}
                 <td data-label="发货单价" class="shipment-price-cell">
