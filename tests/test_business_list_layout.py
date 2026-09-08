@@ -166,7 +166,7 @@ class BusinessListLayoutTests(unittest.TestCase):
         with app.get_db() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipments').fetchone()[0], 1)
 
-    def test_successful_shipping_opens_history_with_saved_record(self):
+    def test_successful_shipping_opens_delivery_result_with_saved_record_in_history(self):
         with app.get_db() as conn:
             manual_id = conn.execute('SELECT manual_id FROM product_orders WHERE id = ?', (self.order,)).fetchone()[0]
             location = app.get_or_create_default_location(conn)
@@ -176,8 +176,11 @@ class BusinessListLayoutTests(unittest.TestCase):
             'shipped_at': '2026-09-04', 'order_id': str(self.order), 'shipped_quantity': '2',
         })
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(urlsplit(response.location).path, '/admin/shipped-orders')
+        self.assertRegex(urlsplit(response.location).path, r'^/admin/delivery-notes/operations/\d+$')
         page = self.page(response.location)
+        self.assertEqual(len(page.find('tr')), 2)
+        self.assertTrue(any(a.get('href', '').endswith('.pdf') for a in page.find('a')))
+        page = self.page('/admin/shipped-orders')
         self.assertEqual(len(page.find('input', name='shipment_id')), 2)
         self.assertFalse(page.find('form', **{'data-shipment-create-form': None}))
 

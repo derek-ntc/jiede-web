@@ -1460,7 +1460,8 @@ class AssemblySaveTests(AssemblyAppTestCase):
         self.assertEqual(response.status_code, 201)
         body = response.get_json()
         self.assertGreater(body["batch_id"], 0)
-        self.assertEqual(body["redirect_url"], "/admin/shipped-orders")
+        self.assertRegex(body["redirect_url"], r"^/admin/delivery-notes/operations/\d+$")
+        self.assertEqual(self.client.get(body["redirect_url"]).status_code, 200)
         with app.get_db() as conn:
             batch = conn.execute("SELECT * FROM assembly_shipment_batches").fetchone()
             item = conn.execute("SELECT * FROM assembly_shipment_items").fetchone()

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}发货结果与送货单{% endblock %}
+{% block content %}
+<section class="page-head"><div><h1>发货已保存</h1><p>同一次提交按客户生成送货单。下载失败可直接重试，不会再次扣库存。</p></div></section>
+<div class="form-actions"><a class="button secondary" href="{{ url_for('shipped_orders') }}">返回已发货清单</a><a class="button" href="{{ url_for('shipment_operations') }}">继续新增发货</a></div>
+{% for note in notes %}
+<section class="panel">
+  <h2>{{ note.customer or '未填写客户' }} · {{ note.document_no }}</h2>
+  <p>收货人：{{ note.recipient_name or '未填写' }}　收货电话：{{ note.recipient_phone or '未填写' }}</p>
+  <p>收货地址：{{ note.address or '未填写' }}</p>
+  <p>创建时间：{{ note.created_at|delivery_timestamp }}　明细更新时间：{{ note.updated_at|delivery_timestamp }}</p>
+  {% if note.invalidated %}<p role="alert">送货单已失效：发货来源已删除或不再匹配，不能下载有效送货单。</p>
+  {% else %}
+  {% if note.missing_recipient %}<p role="status">提示：收货资料未完整填写，请与客户核对。已保存的收货快照不会随客户资料变更。</p>{% endif %}
+  <div class="table-wrap"><table><thead><tr><th>产品图号</th><th>产品名称</th><th>规格型号</th><th>单位</th><th>数量</th></tr></thead>
+  <tbody>{% for item in note['items'] %}<tr><td>{{ item.drawing_no }}</td><td>{{ item.product_name }}</td><td>{{ item.specification }}</td><td>{{ item.unit }}</td><td>{{ item.shipped_quantity }}</td></tr>{% endfor %}</tbody></table></div>
+  <a class="button" href="{{ url_for('download_delivery_note', note_id=note.id) }}">下载送货单 PDF</a>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}

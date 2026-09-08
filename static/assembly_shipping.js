@@ -363,6 +363,15 @@ function initializeAssemblyShipmentForm(form) {
   });
 
   customer.addEventListener("change", async () => {
+    const recipientFields = form.querySelector('[data-assembly-recipient-fields]');
+    if (recipientFields) {
+      const defaults = JSON.parse(form.querySelector('[data-assembly-recipient-defaults]').textContent);
+      const recipient = defaults[customer.value.trim()] || {};
+      recipientFields.hidden = !customer.value.trim();
+      ['recipient_name', 'recipient_phone', 'address'].forEach(key => {
+        recipientFields.querySelector(`[name="${key}"]`).value = recipient[key] || '';
+      });
+    }
     const generation = ++optionsGeneration;
     optionsController?.abort();
     optionsController = new AbortController();

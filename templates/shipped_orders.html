@@ -74,7 +74,7 @@
       <input type="hidden" name="customer" value="{{ selected_customer }}">
       <input type="hidden" name="shipped_at" value="{{ selected_shipped_at }}">
       <div class="shipped-export-bar">
-        <span class="empty-text">勾选发货记录后导出 PDF 送货单</span>
+        <span class="empty-text">勾选可导出旧式 PDF（缺少收货快照）；新发货请打开记录上的送货单号。</span>
         <button type="submit" class="secondary">导出选中 PDF</button>
       </div>
     </form>
@@ -100,6 +100,8 @@
                 <div>
                   <strong>{{ batch.assembly_drawing_no }}</strong>
                   <span>{{ batch.set_quantity }} 套</span>
+                  {% set note = delivery_source_notes.get(('assembly', batch.id)) %}
+                  {% if note and can_view_shipped %}<a href="{{ url_for('delivery_note_result', operation_id=note.operation_id) }}">{{ note.document_no }}</a>{% endif %}
                 </div>
                 <dl class="assembly-history-meta">
                   <div><dt>客户</dt><dd>{{ batch.customer }}</dd></div>
@@ -263,7 +265,10 @@
         <tbody>
           {% for shipment in shipped_orders %}
             <tr>
-              <td data-label="发货时间">{{ shipment.shipped_at }}</td>
+              <td data-label="发货时间">{{ shipment.shipped_at }}
+                {% set note = delivery_source_notes.get(('ordinary', shipment.id)) %}
+                {% if note and can_view_shipped %}<br><a href="{{ url_for('delivery_note_result', operation_id=note.operation_id) }}">{{ note.document_no }}</a>{% endif %}
+              </td>
               <td data-label="产品图号">
                 {% if shipment.manual_id %}
                   <a href="{{ url_for('manual_detail', manual_id=shipment.manual_id) }}">{{ shipment.drawing_no or "-" }}</a>

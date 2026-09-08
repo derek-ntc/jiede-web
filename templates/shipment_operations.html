@@ -28,6 +28,9 @@
     </div>
     <div id="shipment-order-mode" data-shipment-mode-panel="order">
     <form method="post" action="{{ url_for('create_shipment_from_shipped_page') }}" class="grid-form shipment-create-form" enctype="multipart/form-data" data-shipment-create-form>
+      <input type="hidden" name="operation_token" value="{{ ordinary_operation_token }}">
+      <input type="hidden" name="recipient_overrides" value="{}" data-recipient-overrides>
+      <script type="application/json" data-recipient-defaults>{{ recipient_defaults|tojson }}</script>
       <label class="shipment-create-search-order">
         订单号搜索
         <input type="search" placeholder="输入订单号" data-shipment-order-search>
@@ -77,6 +80,7 @@
         发货时间
         <input type="date" name="shipped_at" value="{{ default_shipped_at }}" required>
       </label>
+      <div class="wide" data-recipient-groups></div>
       <label class="shipment-create-images">
         发货图片
         <input type="file" name="images" accept="image/*" multiple>
@@ -110,6 +114,45 @@
       const orderSearch = form.querySelector("[data-shipment-order-search]");
       const customerSearch = form.querySelector("[data-shipment-customer-search]");
       const productSearch = form.querySelector("[data-shipment-product-search]");
+      const recipientDefaults = JSON.parse(form.querySelector('[data-recipient-defaults]').textContent);
+      const recipientGroups = form.querySelector('[data-recipient-groups]');
+      const recipientOverrides = form.querySelector('[data-recipient-overrides]');
+      const recipientEdits = new Map();
+
+      function syncRecipients() {
+        const customers = [...new Set(shipmentLines().map(line => {
+          const select = line.querySelector('[data-shipment-order-select]');
+          return select.value ? select.selectedOptions[0]?.dataset.customer || '' : null;
+        }).filter(value => value !== null))];
+        recipientGroups.replaceChildren();
+        const active = {};
+        customers.forEach(customer => {
+          if (!recipientEdits.has(customer)) recipientEdits.set(customer, {...(recipientDefaults[customer] || {})});
+          const values = recipientEdits.get(customer);
+          active[customer] = Object.fromEntries(['recipient_name', 'recipient_phone', 'address'].map(key => [key, values[key] || '']));
+          const group = document.createElement('fieldset');
+          const legend = document.createElement('legend');
+          legend.textContent = `${customer || '未填写客户'} · 本次收货资料`;
+          group.append(legend);
+          [['recipient_name', '收货人'], ['recipient_phone', '收货电话'], ['address', '收货地址']].forEach(([key, title]) => {
+            const label = document.createElement('label');
+            label.textContent = title;
+            const input = document.createElement('input');
+            input.value = values[key] || '';
+            input.maxLength = key === 'address' ? 1000 : 100;
+            input.addEventListener('input', () => {
+              values[key] = input.value;
+              active[customer][key] = input.value;
+              recipientOverrides.value = JSON.stringify(active);
+            });
+            label.append(input); group.append(label);
+          });
+          const hint = document.createElement('p');
+          hint.textContent = '可留空；仅保存到本次送货单，不修改客户资料。';
+          group.append(hint); recipientGroups.append(group);
+        });
+        recipientOverrides.value = JSON.stringify(active);
+      }
 
       function shipmentLines() {
         return Array.from(form.querySelectorAll("[data-shipment-line]"));
@@ -166,16 +209,18 @@
             syncQuantityLimit(line);
           }
         });
+        syncRecipients();
       }
 
       function bindLine(line) {
         const select = line.querySelector("[data-shipment-order-select]");
         const removeButton = line.querySelector("[data-remove-shipment-line]");
-        select.addEventListener("change", () => syncQuantityLimit(line));
+        select.addEventListener("change", () => { syncQuantityLimit(line); syncRecipients(); });
         removeButton.addEventListener("click", () => {
           if (shipmentLines().length <= 1) return;
           line.remove();
           updateRemoveButtons();
+          syncRecipients();
         });
         syncQuantityLimit(line);
       }

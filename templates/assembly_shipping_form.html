@@ -5,6 +5,8 @@
   enctype="multipart/form-data"
   data-assembly-shipment-form
 >
+  <input type="hidden" name="operation_token" value="{{ assembly_operation_token }}">
+  <script type="application/json" data-assembly-recipient-defaults>{{ recipient_defaults|tojson }}</script>
   <label>
     客户
     <select name="customer" required data-assembly-customer>
@@ -36,6 +38,13 @@
     发货备注
     <input type="text" name="logistics_no" placeholder="可选">
   </label>
+  <fieldset class="wide" data-assembly-recipient-fields hidden>
+    <legend>本次收货资料</legend>
+    <label>收货人<input name="recipient_name" maxlength="100"></label>
+    <label>收货电话<input name="recipient_phone" maxlength="100"></label>
+    <label>收货地址<input name="address" maxlength="1000"></label>
+    <p class="empty-text">可留空；仅保存到本次送货单，不修改客户资料。</p>
+  </fieldset>
 
   <div class="wide assembly-shipment-feedback">
     <p class="empty-text" aria-live="polite" data-assembly-status>请选择客户、组装件图号和套数后预览。</p>

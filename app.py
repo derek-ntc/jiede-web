@@ -120,6 +120,14 @@ from reconciliation import (
 )
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
 from shipping_workflow import (
+    DeliveryOperationConflict,
+    create_delivery_notes,
+    delivery_request_identity,
+    find_delivery_operation,
+    format_delivery_timestamp,
+    load_delivery_note,
+    parse_recipient_overrides,
+    start_delivery_operation,
     current_specification_snapshots,
     ensure_shipping_workflow_tables,
     normalize_recipient_fields,
@@ -365,6 +373,7 @@ def format_datetime(value):
 
 app.jinja_env.filters["datetime"] = format_datetime
 app.jinja_env.filters["money_minor"] = format_money_minor
+app.jinja_env.filters["delivery_timestamp"] = format_delivery_timestamp
 
 
 def format_bytes(size):
@@ -4193,6 +4202,7 @@ def get_shipped_orders_query(include_prices=False):
             manuals.drawing_no,
             manuals.product_name,
             manuals.remark AS product_remark,
+            manuals.unit,
             manuals.customer AS product_customer,
             CASE
                 WHEN product_order_shipments.specification_snapshot IS NULL
@@ -8002,7 +8012,7 @@ def shipped_order_signature_flowable(shipped_orders, small_style):
     )
 
 
-def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_at, document_no=None):
+def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_at, document_no=None, recipient_metadata=None):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -8063,10 +8073,17 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
     ]
 
     meta_data = [
-        [Paragraph("客户名称", info_style), Paragraph(customer_name or "-", info_style), Paragraph("送货单号", info_style), Paragraph(document_no, info_style)],
-        [Paragraph("发货日期", info_style), Paragraph(ship_date or "-", info_style), Paragraph("制单时间", info_style), Paragraph(datetime.now().strftime('%Y-%m-%d %H:%M:%S'), info_style)],
-        [Paragraph("筛选条件", info_style), Paragraph(filter_text or "-", info_style), Paragraph("备注", info_style), Paragraph("", info_style)],
+        [Paragraph("客户名称", info_style), Paragraph(xml_escape(customer_name or "-"), info_style), Paragraph("送货单号", info_style), Paragraph(xml_escape(document_no), info_style)],
+        [Paragraph("发货日期", info_style), Paragraph(xml_escape(ship_date or "-"), info_style), Paragraph("制单时间", info_style), Paragraph(format_delivery_timestamp(datetime.now().astimezone().isoformat()), info_style)],
+        [Paragraph("筛选条件", info_style), Paragraph(xml_escape(filter_text or "-"), info_style), Paragraph("备注", info_style), Paragraph("", info_style)],
     ]
+    recipient = recipient_metadata or {}
+    meta_data.extend([
+        [Paragraph('收货人', info_style), Paragraph(xml_escape(recipient.get('recipient_name') or '未填写'), info_style),
+         Paragraph('收货电话', info_style), Paragraph(xml_escape(recipient.get('recipient_phone') or '未填写'), info_style)],
+        [Paragraph('收货地址', info_style), Paragraph(xml_escape(recipient.get('address') or '未填写'), info_style),
+         Paragraph('明细更新时间', info_style), Paragraph(format_delivery_timestamp(recipient.get('updated_at')), info_style)],
+    ])
     meta_table = Table(meta_data, colWidths=[24 * mm, 52 * mm, 24 * mm, 76 * mm])
     meta_table.setStyle(
         TableStyle(
@@ -8085,30 +8102,36 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
         )
     )
     story.extend([meta_table, Spacer(1, 4 * mm)])
+    if any(not recipient.get(field) for field in ('recipient_name', 'recipient_phone', 'address')):
+        story.extend([Paragraph('提示：收货资料未完整填写，请发货人员核对。旧记录导出不代表已保存收货快照。', small_style), Spacer(1, 3 * mm)])
 
     data = [[
         "序号",
         "产品图号",
         "产品名称",
+        "规格型号",
+        "单位",
+        "数量",
         "订单号",
         "发货时间",
-        "发货数量",
     ]]
     for index, shipment in enumerate(shipped_orders, start=1):
         data.append([
             Paragraph(str(index), cell_style),
-            Paragraph(shipment["drawing_no"] or "-", cell_style),
-            Paragraph(shipment["product_name"] or "-", cell_style),
-            Paragraph(shipment["order_no"] or "-", cell_style),
-            Paragraph(shipment["shipped_at"] or "-", cell_style),
+            Paragraph(xml_escape(shipment["drawing_no"] or "-"), cell_style),
+            Paragraph(xml_escape(shipment["product_name"] or "-"), cell_style),
+            Paragraph(xml_escape(str(shipment['specification'] if 'specification' in shipment.keys() else (shipment['supplier'] if 'supplier' in shipment.keys() else ''))), cell_style),
+            Paragraph(xml_escape(str(shipment['unit'] or '') if 'unit' in shipment.keys() else ''), cell_style),
             Paragraph(str(shipment["shipped_quantity"] or 0), cell_style),
+            Paragraph(xml_escape(shipment["order_no"] or "-"), cell_style),
+            Paragraph(xml_escape(shipment["shipped_at"] or "-"), cell_style),
         ])
     if len(data) == 1:
-        data.append([Paragraph("暂无发货记录", cell_style)] + [""] * 5)
+        data.append([Paragraph("暂无发货记录", cell_style)] + [""] * 7)
 
     table = Table(
         data,
-        colWidths=[14 * mm, 28 * mm, 58 * mm, 32 * mm, 26 * mm, 18 * mm],
+        colWidths=[10 * mm, 25 * mm, 35 * mm, 46 * mm, 12 * mm, 12 * mm, 24 * mm, 20 * mm],
         repeatRows=1,
     )
     table.setStyle(
@@ -14693,12 +14716,48 @@ def shipment_operations():
     with get_db() as conn:
         customers = get_shipment_customer_options(conn)
         unshipped_orders = get_unshipped_order_options(conn)
+        recipient_defaults = {row['name']: dict(row) for row in conn.execute(
+            'SELECT name, recipient_name, recipient_phone, address FROM customers')}
     return render_template(
         "shipment_operations.html",
         customers=customers,
         unshipped_orders=unshipped_orders,
         default_shipped_at=datetime.now().date().isoformat(),
+        recipient_defaults=recipient_defaults,
+        ordinary_operation_token=uuid.uuid4().hex,
+        assembly_operation_token=uuid.uuid4().hex,
     )
+
+
+@app.route('/admin/delivery-notes/operations/<int:operation_id>')
+@permission_required('shipped_view')
+def delivery_note_result(operation_id):
+    with get_db() as conn:
+        operation = conn.execute('SELECT * FROM delivery_operations WHERE id=?', (operation_id,)).fetchone()
+        if operation is None:
+            abort(404)
+        notes = [load_delivery_note(conn, row['id']) for row in conn.execute(
+            'SELECT id FROM delivery_notes WHERE operation_id=? ORDER BY id', (operation_id,))]
+    return render_template('delivery_note_result.html', operation=operation, notes=notes)
+
+
+@app.route('/admin/delivery-notes/<int:note_id>.pdf')
+@permission_required('shipped_view')
+def download_delivery_note(note_id):
+    with get_db() as conn:
+        note = load_delivery_note(conn, note_id)
+    if note is None:
+        abort(404)
+    if note['invalidated']:
+        return '送货单已失效：发货来源已删除或不再匹配，请返回发货清单核对。', 410
+    try:
+        pdf = build_shipped_orders_pdf(note['items'], '', note['customer'], '',
+                                      document_no=note['document_no'], recipient_metadata=note)
+        return send_file(pdf, mimetype='application/pdf', as_attachment=True,
+                         download_name=f"{note['document_no']}.pdf")
+    except Exception:
+        app.logger.exception('送货单 PDF 生成失败（发货已保存，可重试下载）')
+        return '送货单暂时无法下载；发货已保存，请重试下载，不要重复新增发货。', 503
 
 
 @app.route("/admin/shipped-orders")
@@ -14734,6 +14793,11 @@ def shipped_orders():
         if user_has_permission("finance_manage"):
             attach_reconciliation_claims(conn, shipped_orders, assembly_batches)
         customers = get_shipment_customer_options(conn)
+        delivery_source_notes = {
+            (row['source_type'], row['source_id']): dict(row)
+            for row in conn.execute('''SELECT s.source_type, s.source_id, n.document_no,
+                n.operation_id FROM delivery_note_sources s JOIN delivery_notes n ON n.id=s.note_id''')
+        }
 
     return render_template(
         "shipped_orders.html",
@@ -14743,6 +14807,7 @@ def shipped_orders():
         customers=customers,
         selected_customer=selected_customer,
         selected_shipped_at=shipped_at,
+        delivery_source_notes=delivery_source_notes,
     )
 
 
@@ -14958,12 +15023,22 @@ def create_assembly_shipment_from_shipped_page():
     staged_images = []
     transaction_committed = False
     try:
-        staged_images = stage_assembly_shipment_images(
-            selected_shipment_images()
-        )
+        image_files = selected_shipment_images()
+        operation_token, request_digest = delivery_request_identity(request.form, image_files, 'assembly')
+        operator = current_admin_username()
         overrides = _parse_assembly_shipment_item_overrides(request.form)
         with get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            existing = find_delivery_operation(conn, operation_token, request_digest, operator)
+            if existing:
+                batch_id = conn.execute("""SELECT s.source_id FROM delivery_note_sources s
+                    JOIN delivery_notes n ON n.id=s.note_id WHERE n.operation_id=?
+                    AND s.source_type='assembly'""", (existing['id'],)).fetchone()['source_id']
+                operation_id = existing['id']
+                transaction_committed = True
+                return jsonify({'batch_id': batch_id, 'redirect_url': url_for(
+                    'delivery_note_result', operation_id=operation_id)}), 201
+            recipient_overrides = parse_recipient_overrides(request.form)
             preview = build_assembly_shipment_preview(
                 conn,
                 customer,
@@ -14995,6 +15070,8 @@ def create_assembly_shipment_from_shipped_page():
                     ),
                     409,
                 )
+            staged_images = stage_assembly_shipment_images(image_files)
+            operation_id = start_delivery_operation(conn, operation_token, request_digest, operator)
             batch_id = save_assembly_shipment(
                 conn,
                 preview,
@@ -15004,8 +15081,11 @@ def create_assembly_shipment_from_shipped_page():
             )
             if staged_images:
                 save_assembly_shipment_images(conn, batch_id, staged_images)
+            create_delivery_notes(conn, operation_id, [('assembly', batch_id)], recipient_overrides, operator)
             conn.commit()
             transaction_committed = True
+    except DeliveryOperationConflict as error:
+        return jsonify({'error': str(error)}), 409
     except AssemblyDefinitionNotFound as error:
         return jsonify({"error": str(error)}), 400
     except ValueError as error:
@@ -15031,7 +15111,7 @@ def create_assembly_shipment_from_shipped_page():
         jsonify(
             {
                 "batch_id": batch_id,
-                "redirect_url": url_for("shipped_orders"),
+                "redirect_url": url_for("delivery_note_result", operation_id=operation_id),
             }
         ),
         201,
@@ -15286,6 +15366,35 @@ def delete_assembly_shipment(batch_id):
 @app.route("/admin/shipped-orders/new", methods=["POST"])
 @permission_required("shipped_manage")
 def create_shipment_from_shipped_page():
+    state = {'committed': False, 'saved_images': [], 'operation_id': None}
+    try:
+        return _create_shipment_from_shipped_page(state)
+    except DeliveryOperationConflict as error:
+        return str(error), 409
+    except ValueError as error:
+        if not state['committed']:
+            flash(str(error), 'error')
+            return redirect(url_for('shipment_operations'))
+    except (sqlite3.DatabaseError, OSError):
+        if not state['committed']:
+            app.logger.exception('普通发货保存失败，数据库已回滚')
+            return '发货保存失败，所有更改已回滚，可重试。', 500
+        app.logger.exception('普通发货已提交，但连接退出失败')
+    except Exception:
+        if not state['committed']:
+            raise
+        app.logger.exception('普通发货已提交，但请求退出异常')
+    finally:
+        if not state['committed']:
+            for filename in state['saved_images']:
+                try:
+                    (SHIPMENT_IMAGES_DIR / filename).unlink(missing_ok=True)
+                except OSError:
+                    app.logger.exception('回滚后无法清理发货图片：%s', filename)
+    return redirect(url_for('delivery_note_result', operation_id=state['operation_id']))
+
+
+def _create_shipment_from_shipped_page(state):
     shipped_at = request.form.get("shipped_at", "").strip()
     logistics_no = request.form.get("logistics_no", "").strip()
     order_ids = request.form.getlist("order_id")
@@ -15322,8 +15431,15 @@ def create_shipment_from_shipped_page():
     now = datetime.utcnow().isoformat(timespec="seconds")
     shipment_ids = []
     image_files = selected_shipment_images()
+    operation_token, request_digest = delivery_request_identity(request.form, image_files, 'ordinary')
+    operator = current_admin_username()
     with get_db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        existing = find_delivery_operation(conn, operation_token, request_digest, operator)
+        if existing:
+            state.update(committed=True, operation_id=existing['id'])
+            return redirect(url_for('delivery_note_result', operation_id=existing['id']))
+        recipient_overrides = parse_recipient_overrides(request.form)
         unique_order_ids = list(dict.fromkeys(order_id for order_id, _ in requested_items))
         placeholders = ",".join("?" for _ in unique_order_ids)
         rows = conn.execute(
@@ -15412,14 +15528,19 @@ def create_shipment_from_shipped_page():
                     except Exception:
                         pass
                 try:
-                    save_shipment_images(conn, shipment_id, image_files)
+                    state['saved_images'].extend(save_shipment_images(conn, shipment_id, image_files))
                 except ValueError as error:
                     conn.rollback()
                     flash(f"发货图片格式不支持：{error}", "error")
                     return redirect(url_for("shipment_operations"))
             sync_order_shipment_summary(conn, order_id_value, updated_at=now)
+        operation_id = start_delivery_operation(conn, operation_token, request_digest, operator)
+        create_delivery_notes(conn, operation_id, [('ordinary', sid) for sid in shipment_ids], recipient_overrides, operator)
+        state['operation_id'] = operation_id
+        conn.commit()
+        state['committed'] = True
     flash(f"已新增 {len(shipment_ids)} 条发货记录", "success")
-    return redirect(url_for("shipped_orders"))
+    return redirect(url_for("delivery_note_result", operation_id=operation_id))
 
 
 @app.route("/admin/shipped-orders/plans/<int:plan_id>/quantities", methods=["POST"])
