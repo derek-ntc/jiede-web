@@ -33,6 +33,15 @@ def ensure_shipping_workflow_tables(conn):
                 "ADD COLUMN specification_snapshot TEXT"
             ),
         },
+        "production_followups": {
+            "customer": (
+                "ALTER TABLE production_followups ADD COLUMN customer "
+                "TEXT NOT NULL DEFAULT ''"
+            ),
+            "manual_id": (
+                "ALTER TABLE production_followups ADD COLUMN manual_id INTEGER"
+            ),
+        },
     }
     for table_name, table_migrations in migrations.items():
         existing = _table_columns(conn, table_name)

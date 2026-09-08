@@ -395,6 +395,7 @@ def upload_limits():
             (BASE_DIR / "static" / "order_entry.js").stat().st_mtime if (BASE_DIR / "static" / "order_entry.js").exists() else 0,
             (BASE_DIR / "static" / "product_list.js").stat().st_mtime if (BASE_DIR / "static" / "product_list.js").exists() else 0,
             (BASE_DIR / "static" / "finance.js").stat().st_mtime if (BASE_DIR / "static" / "finance.js").exists() else 0,
+            (BASE_DIR / "static" / "production-followups.js").stat().st_mtime if (BASE_DIR / "static" / "production-followups.js").exists() else 0,
         )),
         "current_user_role": current_user_role(),
         "current_admin_username": current_admin_username(),
@@ -549,11 +550,11 @@ def init_db():
         ensure_arrival_record_tables(conn)
         ensure_inventory_tables(conn)
         ensure_assembly_shipping_tables(conn)
-        ensure_shipping_workflow_tables(conn)
         ensure_finance_tables(conn)
         ensure_reconciliation_tables(conn)
         ensure_feedback_table(conn)
         ensure_production_followup_tables(conn)
+        ensure_shipping_workflow_tables(conn)
         ensure_indexes(conn)
 
 
@@ -1024,6 +1025,8 @@ def ensure_production_followup_tables(conn):
         CREATE TABLE IF NOT EXISTS production_followups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_no TEXT NOT NULL DEFAULT '',
+            customer TEXT NOT NULL DEFAULT '',
+            manual_id INTEGER,
             ordered_at TEXT NOT NULL,
             drawing_no TEXT NOT NULL,
             product_name TEXT NOT NULL,
@@ -1042,6 +1045,10 @@ def ensure_production_followup_tables(conn):
     }
     if "batch_no" not in existing:
         conn.execute("ALTER TABLE production_followups ADD COLUMN batch_no TEXT NOT NULL DEFAULT ''")
+    if "customer" not in existing:
+        conn.execute("ALTER TABLE production_followups ADD COLUMN customer TEXT NOT NULL DEFAULT ''")
+    if "manual_id" not in existing:
+        conn.execute("ALTER TABLE production_followups ADD COLUMN manual_id INTEGER")
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_production_followups_batch_no
@@ -2967,17 +2974,21 @@ def production_stage_waiting_text(row, stage):
     return PRODUCTION_STAGE_LABELS.get(stage, "")
 
 
-def fetch_production_followups(conn, query=""):
+def fetch_production_followups(conn, query="", customer=""):
     query = (query or "").strip()
+    customer = (customer or "").strip()
     params = []
+    conditions = []
     sql = """
         SELECT production_followups.*
         FROM production_followups
     """
     if query:
         like = f"%{query}%"
-        sql += """
-            WHERE production_followups.batch_no LIKE ?
+        conditions.append(
+            """
+            (
+               production_followups.batch_no LIKE ?
                OR production_followups.ordered_at LIKE ?
                OR production_followups.drawing_no LIKE ?
                OR production_followups.product_name LIKE ?
@@ -2987,8 +2998,17 @@ def fetch_production_followups(conn, query=""):
                     WHERE production_followup_files.followup_id = production_followups.id
                       AND production_followup_files.original_filename LIKE ?
                )
-        """
+            )
+            """
+        )
         params.extend([like, like, like, like, like])
+    if customer == "__unassigned__":
+        conditions.append("TRIM(production_followups.customer) = ''")
+    elif customer:
+        conditions.append("TRIM(production_followups.customer) = ?")
+        params.append(customer)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
     sql += """
         ORDER BY production_followups.ordered_at DESC,
                  production_followups.batch_no DESC,
@@ -8921,34 +8941,182 @@ def dashboard():
     )
 
 
+def production_followup_csrf_token():
+    token = session.get("production_followup_csrf_token")
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        session["production_followup_csrf_token"] = token
+    return token
+
+
+def require_production_followup_csrf():
+    expected = session.get("production_followup_csrf_token", "")
+    submitted = request.form.get("production_followup_csrf_token", "")
+    if (
+        not isinstance(expected, str)
+        or not isinstance(submitted, str)
+        or not expected
+        or not submitted
+        or not secrets.compare_digest(expected, submitted)
+    ):
+        abort(403, description="请求已失效，请刷新页面后重试")
+
+
+def production_followup_redirect():
+    filters = {}
+    query = request.form.get("filter_q", request.args.get("q", "")).strip()
+    customer = request.form.get(
+        "filter_customer", request.args.get("customer", "")
+    ).strip()
+    if query:
+        filters["q"] = query
+    if customer:
+        filters["customer"] = customer
+    return redirect(url_for("production_followups", **filters))
+
+
+def production_followup_customer_options(conn):
+    rows = conn.execute(
+        """
+        SELECT customer
+        FROM (
+            SELECT TRIM(name) AS customer FROM customers
+            UNION
+            SELECT TRIM(customer) AS customer FROM manuals
+            UNION
+            SELECT TRIM(customer) AS customer FROM production_followups
+        )
+        WHERE customer != ''
+        ORDER BY customer COLLATE NOCASE
+        """
+    ).fetchall()
+    return [row["customer"] for row in rows]
+
+
+def validated_production_followup_product(
+    conn, manual_id, customer, drawing_no, product_name
+):
+    customer = str(customer or "").strip()
+    if not customer:
+        raise ValueError("请选择客户")
+    if customer == "__unassigned__":
+        raise ValueError("未归类仅用于筛选，不能保存为客户")
+    manual_id = str(manual_id or "").strip()
+    if not manual_id:
+        return customer, None
+    try:
+        selected_id = int(manual_id)
+    except (TypeError, ValueError):
+        raise ValueError("所选产品无效") from None
+    product = conn.execute(
+        """
+        SELECT id, drawing_no, product_name, customer
+        FROM manuals
+        WHERE id = ?
+        """,
+        (selected_id,),
+    ).fetchone()
+    if product is None:
+        raise ValueError("所选产品不存在")
+    if str(product["customer"] or "").strip() != customer:
+        raise ValueError("所选产品不属于当前客户")
+    if (
+        str(product["drawing_no"] or "").strip() != drawing_no
+        or str(product["product_name"] or "").strip() != product_name
+    ):
+        raise ValueError("产品图号或名称与所选产品不一致")
+    return customer, selected_id
+
+
+@app.route("/admin/production-followups/products")
+@permission_required("production_followups_manage")
+def production_followup_products():
+    customer = request.args.get("customer", "").strip()
+    query = request.args.get("q", "").strip()
+    if not customer or customer == "__unassigned__":
+        return jsonify(products=[])
+    conditions = ["TRIM(manuals.customer) = ?"]
+    params = [customer]
+    if query:
+        like = f"%{query}%"
+        conditions.append(
+            """
+            (
+                manuals.drawing_no LIKE ?
+                OR manuals.product_name LIKE ?
+                OR manuals.supplier LIKE ?
+            )
+            """
+        )
+        params.extend([like, like, like])
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT manuals.id,
+                   manuals.drawing_no,
+                   manuals.product_name,
+                   manuals.supplier AS specification
+            FROM manuals
+            WHERE {' AND '.join(conditions)}
+            ORDER BY manuals.drawing_no COLLATE NOCASE,
+                     manuals.product_name COLLATE NOCASE,
+                     manuals.id
+            """,
+            params,
+        ).fetchall()
+    return jsonify(
+        products=[
+            {
+                "id": row["id"],
+                "drawing_no": row["drawing_no"] or "",
+                "product_name": row["product_name"] or "",
+                "specification": row["specification"] or "",
+            }
+            for row in rows
+        ]
+    )
+
+
 @app.route("/admin/production-followups", methods=["GET", "POST"])
 @login_required
 def production_followups():
     query = request.args.get("q", "").strip()
+    selected_customer = request.args.get("customer", "").strip()
     if request.method == "POST":
         ordered_at = request.form.get("ordered_at", "").strip()
+        customer = request.form.get("customer", "").strip()
+        manual_id = request.form.get("manual_id", "").strip()
         drawing_no = request.form.get("drawing_no", "").strip()
         product_name = request.form.get("product_name", "").strip()
         drawings = selected_production_drawings()
 
-        if not all([ordered_at, drawing_no, product_name]):
-            flash("下单时间、产品图号、产品名称为必填项", "error")
-            return redirect(url_for("production_followups"))
+        if not all([ordered_at, customer, drawing_no, product_name]):
+            flash("下单时间、客户、产品图号、产品名称为必填项", "error")
+            return production_followup_redirect()
+        for drawing in drawings:
+            if not is_allowed_file(drawing):
+                flash(f"图纸文件格式不支持：{drawing.filename or ''}", "error")
+                return production_followup_redirect()
 
         now = datetime.utcnow().isoformat(timespec="seconds")
         try:
             with get_db() as conn:
+                customer, selected_manual_id = validated_production_followup_product(
+                    conn, manual_id, customer, drawing_no, product_name
+                )
                 batch_no = next_production_batch_no(conn, ordered_at)
                 cursor = conn.execute(
                     """
                     INSERT INTO production_followups (
-                        batch_no, ordered_at, drawing_no, product_name, created_by,
-                        created_at, updated_at
+                        batch_no, customer, manual_id, ordered_at, drawing_no,
+                        product_name, created_by, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         batch_no,
+                        customer,
+                        selected_manual_id,
                         ordered_at,
                         drawing_no,
                         product_name,
@@ -8961,24 +9129,67 @@ def production_followups():
                 if drawings:
                     save_production_drawing_files(conn, followup_id, drawings)
         except ValueError as error:
-            flash(f"图纸文件格式不支持：{error}", "error")
-            return redirect(url_for("production_followups"))
+            flash(str(error), "error")
+            return production_followup_redirect()
 
         flash("生产跟进已新增", "success")
-        return redirect(url_for("production_followups"))
+        return production_followup_redirect()
 
     with get_db() as conn:
-        followups = fetch_production_followups(conn, query)
+        followups = fetch_production_followups(conn, query, selected_customer)
+        customers = production_followup_customer_options(conn)
     return render_template(
         "production_followups.html",
         followups=followups,
+        customers=customers,
         query=query,
+        selected_customer=selected_customer,
+        production_followup_csrf_token=production_followup_csrf_token(),
         today=datetime.now().date().isoformat(),
         stage_labels=PRODUCTION_STAGE_LABELS,
         stage_can_complete=production_stage_can_complete,
         stage_can_revert=production_stage_can_revert,
         stage_waiting_text=production_stage_waiting_text,
     )
+
+
+@app.route("/admin/production-followups/<int:followup_id>/customer", methods=["POST"])
+@permission_required("production_followups_manage")
+def update_production_followup_customer(followup_id):
+    require_production_followup_csrf()
+    customer = request.form.get("customer", "").strip()
+    if customer == "__unassigned__":
+        flash("未归类仅用于筛选，不能保存为客户", "error")
+        return production_followup_redirect()
+    with get_db() as conn:
+        followup = conn.execute(
+            "SELECT id, manual_id FROM production_followups WHERE id = ?",
+            (followup_id,),
+        ).fetchone()
+        if followup is None:
+            abort(404)
+        if followup["manual_id"] is not None:
+            product = conn.execute(
+                "SELECT customer FROM manuals WHERE id = ?",
+                (followup["manual_id"],),
+            ).fetchone()
+            if product is None or str(product["customer"] or "").strip() != customer:
+                flash("已关联产品不属于所选客户", "error")
+                return production_followup_redirect()
+        conn.execute(
+            """
+            UPDATE production_followups
+            SET customer = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                customer,
+                datetime.utcnow().isoformat(timespec="seconds"),
+                followup_id,
+            ),
+        )
+    flash("生产跟进客户已更新", "success")
+    return production_followup_redirect()
 
 
 @app.route("/admin/production-followups/<int:followup_id>/<stage>", methods=["POST"])
@@ -8999,7 +9210,7 @@ def complete_production_stage(followup_id, stage):
         if followup[column]:
             if not production_stage_can_revert(followup, stage):
                 flash("请先撤回后续工序，再撤回当前工序", "error")
-                return redirect(url_for("production_followups"))
+                return production_followup_redirect()
             conn.execute(
                 f"""
                 UPDATE production_followups
@@ -9012,7 +9223,7 @@ def complete_production_stage(followup_id, stage):
         else:
             if not production_stage_can_complete(followup, stage):
                 flash("请按激光、折弯、焊接的顺序完成", "error")
-                return redirect(url_for("production_followups"))
+                return production_followup_redirect()
             conn.execute(
                 f"""
                 UPDATE production_followups
@@ -9022,7 +9233,7 @@ def complete_production_stage(followup_id, stage):
                 (now, now, followup_id),
             )
             flash(f"{PRODUCTION_STAGE_LABELS[stage]}已完成", "success")
-    return redirect(url_for("production_followups"))
+    return production_followup_redirect()
 
 
 @app.route("/admin/production-followups/<int:followup_id>/delete", methods=["POST"])
@@ -9049,7 +9260,7 @@ def delete_production_followup(followup_id):
         conn.execute("DELETE FROM production_followups WHERE id = ?", (followup_id,))
 
     flash("生产跟进记录已删除", "success")
-    return redirect(url_for("production_followups"))
+    return production_followup_redirect()
 
 
 @app.route("/admin/production-followups/<int:followup_id>/process-card")
