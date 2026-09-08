@@ -1,4 +1,5 @@
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -331,6 +332,226 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertIn('name="filter_q" value="P1"', html)
         self.assertIn('name="filter_customer" value="客户A"', html)
         self.assertIn("/static/production-followups.js", html)
+
+    def test_product_picker_debounces_aborts_and_clears_customer_association(self):
+        script = r'''
+        (async () => {
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const vm = require('node:vm');
+
+          class Element {
+            constructor(value = '') {
+              this.value = value;
+              this.dataset = {};
+              this.children = [];
+              this.listeners = {};
+              this.hidden = false;
+              this.selectedIndex = 0;
+            }
+            addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+            async emit(type) { for (const fn of this.listeners[type] || []) await fn({target: this}); }
+            append(...items) { this.children.push(...items); }
+            replaceChildren(...items) { this.children = items; }
+          }
+
+          const customer = new Element('客户A');
+          const search = new Element('P1');
+          const results = new Element();
+          const manualId = new Element();
+          const drawingNo = new Element();
+          const productName = new Element();
+          const nodes = {customer, search, results, manualId, drawingNo, productName};
+          const form = new Element();
+          form.dataset.productsUrl = '/admin/production-followups/products';
+          form.querySelector = selector => nodes[{
+            '[data-production-customer]': 'customer',
+            '[data-production-product-search]': 'search',
+            '[data-production-product-results]': 'results',
+            '[data-production-manual-id]': 'manualId',
+            '[data-production-drawing-no]': 'drawingNo',
+            '[data-production-product-name]': 'productName',
+          }[selector]] || null;
+
+          let nextTimer = 1;
+          const timers = new Map();
+          const fireTimer = () => {
+            assert.equal(timers.size, 1, 'exactly one debounced request is pending');
+            const [id, callback] = timers.entries().next().value;
+            timers.delete(id);
+            return callback();
+          };
+          global.window = {
+            location: {origin: 'https://test.local'},
+            setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
+            clearTimeout(id) { timers.delete(id); },
+          };
+          global.document = {
+            querySelector(selector) {
+              if (selector === '.production-followup-form') return form;
+              return null;
+            },
+            querySelectorAll() { return []; },
+            createElement() { return new Element(); },
+          };
+
+          const requests = [];
+          global.fetch = (url, options) => new Promise((resolve, reject) => {
+            const request = {url: String(url), options, resolve, reject};
+            requests.push(request);
+            options.signal.addEventListener('abort', () => {
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              reject(error);
+            }, {once: true});
+          });
+          const response = products => ({ok: true, status: 200, json: async () => ({products})});
+
+          vm.runInThisContext(fs.readFileSync('static/production-followups.js', 'utf8'));
+
+          await search.emit('input');
+          search.value = 'P1 latest';
+          await search.emit('input');
+          assert.equal(timers.size, 1, 'rapid input replaces the older debounce timer');
+          const firstLoad = fireTimer();
+          assert.match(requests[0].url, /customer=%E5%AE%A2%E6%88%B7A/);
+          assert.match(requests[0].url, /q=P1\+latest/);
+          requests[0].resolve(response([{id: 1, drawing_no: 'P1', product_name: '客户A产品', specification: '规格A'}]));
+          await firstLoad;
+          results.value = '1';
+          await results.emit('change');
+          assert.equal(manualId.value, '1');
+          assert.equal(drawingNo.value, 'P1');
+          assert.equal(productName.value, '客户A产品');
+
+          search.value = 'slow';
+          await search.emit('input');
+          const slowLoad = fireTimer();
+          const slowRequest = requests[1];
+          assert.equal(slowRequest.options.signal.aborted, false);
+
+          customer.value = '客户B';
+          await customer.emit('change');
+          assert.equal(manualId.value, '', 'customer changes immediately clear the product association');
+          assert.equal(results.selectedIndex, -1);
+          assert.equal(slowRequest.options.signal.aborted, true, 'customer changes abort the old request');
+          await slowLoad;
+
+          const customerBLoad = fireTimer();
+          assert.match(requests[2].url, /customer=%E5%AE%A2%E6%88%B7B/);
+          requests[2].resolve(response([{id: 2, drawing_no: 'P2', product_name: '客户B产品', specification: '规格B'}]));
+          await customerBLoad;
+          assert.deepEqual(results.children.slice(1).map(option => option.value), ['2']);
+          assert.equal(manualId.value, '');
+        })().catch(error => { console.error(error); process.exitCode = 1; });
+        '''
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(app.__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_customer_rename_keeps_linked_and_manual_followups_under_new_classification(self):
+        with app.get_db() as conn:
+            customer_id = conn.execute(
+                "INSERT INTO customers (name, created_at, updated_at) VALUES ('客户A', '', '')"
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO production_followups (
+                    id, batch_no, customer, manual_id, ordered_at, drawing_no,
+                    product_name, laser_completed_at, created_at, updated_at
+                ) VALUES (
+                    5, 'PF-20260908-005', '客户A', NULL, '2026-09-08', 'MANUAL',
+                    '手工录入产品', '2026-09-08T10:00:00',
+                    '2026-09-08T09:00:00', '2026-09-08T09:00:00'
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO production_followup_files (
+                    followup_id, filename, original_filename, created_at
+                ) VALUES (5, 'manual.pdf', '手工图纸.pdf', '2026-09-08T09:00:00')
+                """
+            )
+
+        response = self.client.post(
+            f"/admin/customers/{customer_id}/edit",
+            data={"name": "客户A（改名）"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            renamed = app.fetch_production_followups(
+                conn, customer="客户A（改名）"
+            )
+            old_name = app.fetch_production_followups(conn, customer="客户A")
+            rows = conn.execute(
+                """
+                SELECT id, customer, manual_id, laser_completed_at, updated_at
+                FROM production_followups
+                WHERE id IN (1, 4, 5)
+                ORDER BY id
+                """
+            ).fetchall()
+            files = conn.execute(
+                "SELECT original_filename FROM production_followup_files WHERE followup_id = 5"
+            ).fetchall()
+
+        self.assertEqual([item["row"]["id"] for item in renamed], [5, 3, 1])
+        self.assertEqual([item["row"]["id"] for item in old_name], [])
+        self.assertEqual(
+            [tuple(row[:4]) for row in rows],
+            [
+                (1, "客户A（改名）", self.product_a, ""),
+                (4, "", None, ""),
+                (5, "客户A（改名）", None, "2026-09-08T10:00:00"),
+            ],
+        )
+        self.assertNotEqual(rows[0]["updated_at"], "2026-09-08T09:00:00")
+        self.assertEqual(rows[1]["updated_at"], "2026-09-08T09:00:00")
+        self.assertNotEqual(rows[2]["updated_at"], "2026-09-08T09:00:00")
+        self.assertEqual([row["original_filename"] for row in files], ["手工图纸.pdf"])
+
+    def test_customer_rename_rolls_back_every_cascade_when_followup_update_fails(self):
+        with app.get_db() as conn:
+            customer_id = conn.execute(
+                "INSERT INTO customers (name, created_at, updated_at) VALUES ('客户A', '', '')"
+            ).lastrowid
+            conn.execute(
+                """
+                CREATE TRIGGER reject_production_customer_rename
+                BEFORE UPDATE OF customer ON production_followups
+                WHEN OLD.id = 1
+                BEGIN
+                    SELECT RAISE(ABORT, '故障注入');
+                END
+                """
+            )
+
+        response = self.client.post(
+            f"/admin/customers/{customer_id}/edit",
+            data={"name": "不应保存的新名"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            customer_name = conn.execute(
+                "SELECT name FROM customers WHERE id = ?", (customer_id,)
+            ).fetchone()["name"]
+            manual_customer = conn.execute(
+                "SELECT customer FROM manuals WHERE id = ?", (self.product_a,)
+            ).fetchone()["customer"]
+            followup = conn.execute(
+                "SELECT customer, updated_at FROM production_followups WHERE id = 1"
+            ).fetchone()
+
+        self.assertEqual(customer_name, "客户A")
+        self.assertEqual(manual_customer, "客户A")
+        self.assertEqual(tuple(followup), ("客户A", "2026-09-08T09:00:00"))
 
 
 if __name__ == "__main__":

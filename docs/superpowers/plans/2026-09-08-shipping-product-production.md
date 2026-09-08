@@ -179,4 +179,4 @@ self.assertEqual(reloaded_note['recipient_name'], '张师傅')
 - 规格第 1 节由 Task 1 覆盖；配件增删第 2 节由 Task 3 覆盖；单价第 3 节由 Task 4 覆盖；收货/送货单第 4 节由 Task 1/5 覆盖；生产第 5 节由 Task 2 覆盖；安全和验收由各任务及 Task 6 覆盖。
 - Task 1/2/3/4/5 共用 `shipping_workflow.ensure_shipping_workflow_tables` 和 `app.py`，顺序修改；Task 5 消费 Task 1 的规格/收货字段与 Task 3 的灵活组装来源，并保留 Task 4 的价格保护。
 - 接口兼容：旧 `supplier` 参数、旧导入图号映射、旧 preview 未给 selected_manual_ids 时的默认 BOM、旧 fetch_production_followups 第二位置参数、旧 PDF 构建调用均保留。
-- 当前阶段：实施计划已编写，等待确认隔离工作区/执行方式；尚未开始 Task 1。
+- 当前阶段：Task 1–6 的隔离实施、自动化验收和本地使用说明已完成；控制器的最终整分支独立复核尚未完成。分支仍仅供本地验收，未合并、未推送、未部署，未修改正式数据。

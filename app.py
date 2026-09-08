@@ -10020,6 +10020,14 @@ def edit_customer(customer_id):
                     "UPDATE assembly_shipment_batches SET customer = ? WHERE customer = ?",
                     (name, previous_name),
                 )
+                conn.execute(
+                    """
+                    UPDATE production_followups
+                    SET customer = ?, updated_at = ?
+                    WHERE customer = ?
+                    """,
+                    (name, now, previous_name),
+                )
     except sqlite3.IntegrityError:
         flash("该客户名称已存在", "error")
         return redirect(url_for("admin_customers"))

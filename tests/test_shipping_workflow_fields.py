@@ -154,6 +154,28 @@ class ShippingWorkflowFieldTests(AssemblyAppTestCase):
             ).fetchone()
         self.assertEqual(tuple(unchanged), ("新业务联系人", "新业务电话", "新收货人", "0574-12345678"))
 
+        invalid_phone = self.client.post(
+            f"/admin/customers/{customer['id']}/edit",
+            data={
+                "name": "收货客户",
+                "contact": "不得覆盖",
+                "phone": "不得覆盖",
+                "recipient_name": "合法收货人",
+                "recipient_phone": "1" * 101,
+                "address": "地址",
+                "email": "",
+                "remark": "",
+            },
+            follow_redirects=True,
+        )
+        self.assertIn("收货人联系方式不能超过 100 个字符", invalid_phone.get_data(as_text=True))
+        with app.get_db() as conn:
+            unchanged = conn.execute(
+                "SELECT contact, phone, recipient_name, recipient_phone FROM customers WHERE id = ?",
+                (customer["id"],),
+            ).fetchone()
+        self.assertEqual(tuple(unchanged), ("新业务联系人", "新业务电话", "新收货人", "0574-12345678"))
+
     def test_ordinary_shipments_use_saved_specification_and_legacy_fallback(self):
         product = self.create_product("P-SPEC", "客户A")
         with app.get_db() as conn:
