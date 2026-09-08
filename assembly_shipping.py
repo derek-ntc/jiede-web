@@ -46,15 +46,16 @@ def expand_components(components, set_quantity, overrides=None):
     expanded = []
     for component in components:
         item = dict(component)
-        calculated = set_quantity * parse_positive_int(
-            component["quantity_per_set"], "每套用量"
+        calculated = (
+            0 if item.get("source_kind") == "extra" else
+            set_quantity * parse_positive_int(component["quantity_per_set"], "每套用量")
         )
         override = overrides.get(int(component["manual_id"]))
         item["calculated_quantity"] = calculated
         item["shipped_quantity"] = (
             parse_positive_int(override, "配件实际发货数量")
             if override is not None
-            else calculated
+            else parse_positive_int(calculated, "配件实际发货数量")
         )
         expanded.append(item)
     return expanded

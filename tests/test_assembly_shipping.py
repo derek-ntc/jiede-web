@@ -3063,11 +3063,17 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
             )
         preview_response = self.client.post(
             f"/admin/shipped-orders/assembly/{batch_id}/edit",
-            json={"overrides": {str(retained): "1", str(introduced): "1"}},
+            json={"overrides": {str(retained): "1", str(introduced): "1"},
+                  "selected_manual_ids": [retained, introduced]},
         )
         self.assertEqual(preview_response.status_code, 200)
 
-        edit_response = self.post_edit(batch_id, preview_response.get_json())
+        edit_response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            data=self.save_data(preview_response.get_json(), extra_data={
+                "selected_manual_ids": [str(retained), str(introduced)],
+            }),
+        )
 
         self.assertEqual(
             edit_response.status_code,

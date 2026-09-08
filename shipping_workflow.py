@@ -28,6 +28,10 @@ def ensure_shipping_workflow_tables(conn):
             ),
         },
         "assembly_shipment_items": {
+            "source_kind": (
+                "ALTER TABLE assembly_shipment_items "
+                "ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'bom'"
+            ),
             "specification_snapshot": (
                 "ALTER TABLE assembly_shipment_items "
                 "ADD COLUMN specification_snapshot TEXT"

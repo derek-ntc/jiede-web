@@ -42,22 +42,34 @@
     <div class="assembly-warning-summary" aria-live="polite" data-assembly-warning-summary></div>
   </div>
 
+  <div class="wide">
+    <p class="empty-text">删减和追加仅影响本次发货，不修改组装件配置。更换客户或图号会重置调整；修改套数保留实际数量。</p>
+    <label>搜索追加配件（图号 / 名称）
+      <input type="search" autocomplete="off" data-assembly-component-search placeholder="搜索当前客户的产品">
+    </label>
+    <div aria-live="polite" data-assembly-component-results></div>
+    <button type="button" class="secondary" data-assembly-recalculate>按当前套数重算已选 BOM 行数量</button>
+  </div>
+
   <div class="wide table-wrap assembly-preview-wrap">
     <table class="assembly-preview-table">
       <thead>
         <tr>
           <th>配件图号</th>
           <th>产品名称</th>
+          <th>规格型号</th>
+          <th>来源</th>
           <th>每套用量</th>
           <th>计算数量</th>
           <th>实际发货数量</th>
           <th>订单分配</th>
           <th>库存状态</th>
+          <th>本次调整</th>
         </tr>
       </thead>
       <tbody data-assembly-preview>
         <tr data-assembly-preview-empty>
-          <td colspan="7" class="empty">暂无组装发货预览</td>
+          <td colspan="10" class="empty">暂无组装发货预览</td>
         </tr>
       </tbody>
     </table>
