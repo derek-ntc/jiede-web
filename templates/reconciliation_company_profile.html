@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}供应商对账资料{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='reconciliation.css', v=static_version) }}">
+{% endblock %}
+{% block content %}
+  <div class="erp-page reconciliation-page">
+    <section class="page-head">
+      <div><h1>供应商对账资料</h1><p>新建对账单时将复制当前资料作为不可变快照。</p></div>
+      <a class="button secondary" href="{{ url_for('reconciliation_statements') }}">返回对账单</a>
+    </section>
+    <section class="panel reconciliation-profile-panel">
+      <form method="post" class="grid-form">
+        <input type="hidden" name="reconciliation_csrf_token" value="{{ reconciliation_csrf_token }}">
+        <label>公司名称<input type="text" name="company_name" value="{{ profile.company_name }}" required></label>
+        <label>联系人<input type="text" name="contact" value="{{ profile.contact }}"></label>
+        <label>电话<input type="text" name="phone" value="{{ profile.phone }}"></label>
+        <label>邮箱<input type="email" name="email" value="{{ profile.email }}"></label>
+        <label class="wide">地址<input type="text" name="address" value="{{ profile.address }}"></label>
+        <div class="wide form-actions"><button type="submit">保存供应商资料</button></div>
+      </form>
+      <p class="empty-text">最近更新：{{ profile.updated_at | datetime }} / {{ profile.updated_by or "系统初始化" }}</p>
+    </section>
+  </div>
+{% endblock %}

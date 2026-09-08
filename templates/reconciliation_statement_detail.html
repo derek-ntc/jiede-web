@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}对账单 {{ statement.statement_no }}{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='reconciliation.css', v=static_version) }}">
+{% endblock %}
+{% block content %}
+  <div class="erp-page reconciliation-page">
+    <section class="page-head reconciliation-detail-head">
+      <div>
+        <h1>{{ statement.statement_no }}</h1>
+        <p>{{ statement.customer_name }} / {{ statement.period_start }} 至 {{ statement.period_end }} / {{ statement.currency }}</p>
+      </div>
+      <div class="reconciliation-head-actions">
+        <span class="reconciliation-status status-{{ statement.status }}">{{ status_labels[statement.status] }}</span>
+        <a class="button secondary" href="/admin/reconciliation-statements/{{ statement.id }}/export.xlsx">下载 Excel</a>
+        <a class="button secondary" href="{{ url_for('reconciliation_statements') }}">返回列表</a>
+      </div>
+    </section>
+
+    {% if credentials %}
+      <section class="panel reconciliation-credentials" aria-labelledby="credentials-title">
+        <div class="section-head">
+          <h2 id="credentials-title">一次性客户访问凭证</h2>
+          <strong>凭证仅显示一次</strong>
+        </div>
+        <p class="reconciliation-warning">请立即安全保存并分别发送客户链接和临时密码。离开或刷新本页后无法找回，只能重置访问凭证。</p>
+        <label>客户链接
+          <span class="reconciliation-copy-row"><input type="text" value="{{ public_url }}" readonly><button type="button" class="secondary compact-button" data-copy-text="{{ public_url }}">复制</button></span>
+        </label>
+        <label>6 位临时密码
+          <span class="reconciliation-copy-row"><input type="text" value="{{ credentials.password }}" readonly><button type="button" class="secondary compact-button" data-copy-text="{{ credentials.password }}">复制</button></span>
+        </label>
+        <p>有效期至：{{ credentials.access_expires_at | datetime }}</p>
+      </section>
+    {% endif %}
+
+    <section class="panel">
+      <div class="section-head"><h2>单据信息</h2></div>
+      <dl class="reconciliation-meta-grid">
+        <div><dt>对账单号</dt><dd>{{ statement.statement_no }}</dd></div>
+        <div><dt>状态</dt><dd>{{ status_labels[statement.status] }}</dd></div>
+        <div><dt>客户</dt><dd>{{ statement.customer_name }}</dd></div>
+        <div><dt>账期</dt><dd>{{ statement.period_start }} 至 {{ statement.period_end }}</dd></div>
+        <div><dt>币种</dt><dd>{{ statement.currency }}</dd></div>
+        <div><dt>税率</dt><dd>{{ "%.2f" | format(statement.tax_rate_ppm / 10000) }}%</dd></div>
+        <div><dt>创建人</dt><dd>{{ statement.created_by or "-" }}</dd></div>
+        <div><dt>创建时间</dt><dd>{{ statement.created_at | datetime }}</dd></div>
+        <div><dt>更新时间</dt><dd>{{ statement.updated_at | datetime }}</dd></div>
+        <div><dt>访问到期</dt><dd>{{ statement.access_expires_at | datetime }}</dd></div>
+      </dl>
+    </section>
+
+    <section class="reconciliation-snapshot-columns">
+      <article class="panel">
+        <h2>客户资料快照</h2>
+        <dl class="reconciliation-snapshot-list">
+          <div><dt>名称</dt><dd>{{ statement.customer_name }}</dd></div>
+          <div><dt>地址</dt><dd>{{ statement.customer_address or "-" }}</dd></div>
+          <div><dt>电话</dt><dd>{{ statement.customer_phone or "-" }}</dd></div>
+          <div><dt>邮箱</dt><dd>{{ statement.customer_email or "-" }}</dd></div>
+          <div><dt>采购联系人</dt><dd>{{ statement.customer_purchase_contact or "-" }}</dd></div>
+          <div><dt>对账联系人</dt><dd>{{ statement.customer_reconciliation_contact or "-" }}</dd></div>
+          <div><dt>开票抬头</dt><dd>{{ statement.customer_invoice_title or "-" }}</dd></div>
+          <div><dt>税号</dt><dd>{{ statement.customer_tax_id or "-" }}</dd></div>
+          <div><dt>注册地址</dt><dd>{{ statement.customer_registered_address or "-" }}</dd></div>
+          <div><dt>注册电话</dt><dd>{{ statement.customer_registered_phone or "-" }}</dd></div>
+          <div><dt>开户行及账号</dt><dd>{{ statement.customer_bank_name or "-" }} / {{ statement.customer_bank_account or "-" }}</dd></div>
+          <div><dt>收票邮箱</dt><dd>{{ statement.customer_invoice_email or "-" }}</dd></div>
+        </dl>
+      </article>
+      <article class="panel">
+        <h2>供应商资料快照</h2>
+        <dl class="reconciliation-snapshot-list">
+          <div><dt>公司名称</dt><dd>{{ statement.supplier_company_name }}</dd></div>
+          <div><dt>地址</dt><dd>{{ statement.supplier_address or "-" }}</dd></div>
+          <div><dt>联系人</dt><dd>{{ statement.supplier_contact or "-" }}</dd></div>
+          <div><dt>电话</dt><dd>{{ statement.supplier_phone or "-" }}</dd></div>
+          <div><dt>邮箱</dt><dd>{{ statement.supplier_email or "-" }}</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><h2>对账明细</h2><span class="empty-text">{{ items|length }} 项</span></div>
+      <div class="table-wrap reconciliation-table-wrap">
+        <table class="reconciliation-table reconciliation-detail-table">
+          <thead><tr><th>来源</th><th>发货日期</th><th>送货单号</th><th>采购订单号</th><th>物料编码</th><th>物料名称</th><th>规格型号</th><th>单位</th><th>数量</th><th>不含税单价</th><th>含税单价</th><th>不含税金额</th><th>含税金额</th><th>税额</th><th>备注</th></tr></thead>
+          <tbody>
+            {% for item in items %}
+              <tr>
+                <td data-label="来源">{{ "普通发货" if item.source_type == "ordinary" else "组装配件" }} #{{ item.source_id }}</td>
+                <td data-label="发货日期">{{ item.shipped_at }}</td>
+                <td data-label="送货单号">{{ item.delivery_no or "-" }}</td>
+                <td data-label="采购订单号">{{ item.order_no or "-" }}</td>
+                <td data-label="物料编码">{{ item.sku or item.drawing_no or "-" }}</td>
+                <td data-label="物料名称">{{ item.product_name or "-" }}</td>
+                <td data-label="规格型号">{{ item.model or "-" }}</td>
+                <td data-label="单位">{{ item.unit or "-" }}</td>
+                <td data-label="数量">{{ item.quantity }}</td>
+                <td data-label="不含税单价">{{ item.unit_price_ex_tax_display }}</td>
+                <td data-label="含税单价">{{ format_reconciliation_amount_minor(item.unit_price_incl_tax_minor, item.currency) }}</td>
+                <td data-label="不含税金额">{{ format_reconciliation_amount_minor(item.amount_ex_tax_minor, item.currency) }}</td>
+                <td data-label="含税金额"><strong>{{ format_reconciliation_amount_minor(item.amount_incl_tax_minor, item.currency) }}</strong></td>
+                <td data-label="税额">{{ format_reconciliation_amount_minor(item.tax_amount_minor, item.currency) }}</td>
+                <td data-label="备注">{{ item.remark or "-" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+          <tfoot><tr><th colspan="11">合计（{{ statement.currency }}）</th><td>{{ statement.amount_ex_tax_minor | money_minor(statement.currency) }}</td><td>{{ statement.amount_incl_tax_minor | money_minor(statement.currency) }}</td><td>{{ statement.tax_amount_minor | money_minor(statement.currency) }}</td><td></td></tr></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>客户处理记录</h2>
+      {% set has_confirmation = statement.confirmed_name or statement.confirmed_at or statement.signature_image %}
+      {% set has_dispute = statement.dispute_name or statement.dispute_content or statement.disputed_at %}
+      {% set has_void = statement.status == "void" or statement.void_reason or statement.voided_at %}
+      {% if has_confirmation %}
+        <h3>客户确认</h3>
+        <dl class="reconciliation-meta-grid"><div><dt>确认人</dt><dd>{{ statement.confirmed_name }}</dd></div><div><dt>确认时间</dt><dd>{{ statement.confirmed_at | datetime }}</dd></div><div><dt>确认 IP</dt><dd>{{ statement.confirmed_ip or "-" }}</dd></div><div><dt>浏览器</dt><dd>{{ statement.confirmed_user_agent or "-" }}</dd></div></dl>
+        {% if statement.signature_image %}
+          <p><img class="reconciliation-public-signature" src="{{ url_for('reconciliation_signature_image', filename=statement.signature_image) }}" alt="客户确认签名"></p>
+        {% endif %}
+      {% endif %}
+      {% if has_dispute %}
+        <h3>客户异议</h3>
+        <dl class="reconciliation-meta-grid"><div><dt>异议提交人</dt><dd>{{ statement.dispute_name }}</dd></div><div><dt>提交时间</dt><dd>{{ statement.disputed_at | datetime }}</dd></div><div class="wide"><dt>异议内容</dt><dd>{{ statement.dispute_content }}</dd></div></dl>
+      {% endif %}
+      {% if has_void %}
+        <h3>作废记录</h3>
+        <dl class="reconciliation-meta-grid"><div><dt>作废人</dt><dd>{{ statement.voided_by or "-" }}</dd></div><div><dt>作废时间</dt><dd>{{ statement.voided_at | datetime }}</dd></div><div class="wide"><dt>作废原因</dt><dd>{{ statement.void_reason }}</dd></div></dl>
+      {% endif %}
+      {% if not has_confirmation and not has_dispute and not has_void %}
+        <p class="empty-text">客户尚未确认或提交异议。</p>
+      {% endif %}
+    </section>
+
+    {% if statement.status != "void" %}
+      <section class="panel reconciliation-actions">
+        <h2>单据操作</h2>
+        {% if statement.status == "pending" and not credentials %}
+          <form method="post" action="{{ url_for('reset_reconciliation_access', statement_id=statement.id) }}" onsubmit="return confirm('重置后旧链接、旧密码和已有访问会话将立即失效，确定继续吗？');">
+            <input type="hidden" name="reconciliation_csrf_token" value="{{ reconciliation_csrf_token }}">
+            <button type="submit" class="secondary">重置访问凭证</button>
+          </form>
+        {% endif %}
+        <form method="post" action="{{ url_for('void_reconciliation_statement_route', statement_id=statement.id) }}" class="reconciliation-void-form" onsubmit="return confirm('确定作废这张对账单吗？关联发货明细将被释放。');">
+          <input type="hidden" name="reconciliation_csrf_token" value="{{ reconciliation_csrf_token }}">
+          <label for="void-reason">作废原因</label>
+          <input id="void-reason" type="text" name="reason" required placeholder="请输入作废原因">
+          <button type="submit" class="danger">作废</button>
+        </form>
+      </section>
+    {% endif %}
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script>
+    document.querySelectorAll("[data-copy-text]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(button.dataset.copyText || "");
+          button.textContent = "已复制";
+        } catch (error) {
+          window.prompt("复制内容", button.dataset.copyText || "");
+        }
+      });
+    });
+  </script>
+{% endblock %}

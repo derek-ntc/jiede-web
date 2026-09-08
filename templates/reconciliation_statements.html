@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}客户对账单{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='reconciliation.css', v=static_version) }}">
+{% endblock %}
+{% block content %}
+  <div class="erp-page reconciliation-page">
+    <section class="page-head">
+      <div>
+        <h1>客户对账单</h1>
+        <p>按发货快照生成、查询并跟进客户确认状态。</p>
+      </div>
+      <div class="reconciliation-head-actions">
+        <a class="button" href="{{ url_for('shipped_orders') }}">从发货清单生成</a>
+        {% if current_user_role == "admin" %}
+          <a class="button secondary" href="{{ url_for('reconciliation_company_profile') }}">供应商资料</a>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel reconciliation-panel">
+      <section class="erp-query-panel" aria-labelledby="reconciliation-query-title">
+        <h2 id="reconciliation-query-title">对账单查询</h2>
+        <form class="erp-query-form reconciliation-filter-form" method="get">
+          <div class="erp-filter-field">
+            <label for="reconciliation-no">对账单号</label>
+            <input id="reconciliation-no" type="search" name="statement_no" value="{{ selected_statement_no }}" placeholder="DZ-YYYYMM-0001">
+          </div>
+          <div class="erp-filter-field">
+            <label for="reconciliation-customer">客户</label>
+            <select id="reconciliation-customer" name="customer">
+              <option value="">全部客户</option>
+              {% for customer in customers %}
+                <option value="{{ customer.customer_name }}" {% if customer.customer_name == selected_customer %}selected{% endif %}>{{ customer.customer_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="erp-filter-field">
+            <label for="reconciliation-status">状态</label>
+            <select id="reconciliation-status" name="status">
+              <option value="">全部状态</option>
+              {% for value, label in status_labels.items() %}
+                <option value="{{ value }}" {% if value == selected_status %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="erp-filter-field">
+            <label for="reconciliation-date">账期日期</label>
+            <input id="reconciliation-date" type="date" name="date" value="{{ selected_date }}">
+          </div>
+          <div class="erp-query-actions">
+            <button type="submit">查询</button>
+            <a class="button secondary" href="{{ url_for('reconciliation_statements') }}">清空</a>
+          </div>
+        </form>
+      </section>
+
+      <div class="section-head">
+        <h2>对账单列表</h2>
+        <span class="empty-text">{{ statements|length }} 张</span>
+      </div>
+      <div class="table-wrap reconciliation-table-wrap">
+        <table class="reconciliation-table">
+          <thead>
+            <tr>
+              <th>对账单号</th>
+              <th>客户</th>
+              <th>账期</th>
+              <th>币种</th>
+              <th>明细</th>
+              <th>不含税金额</th>
+              <th>含税金额</th>
+              <th>税额</th>
+              <th>状态</th>
+              <th>创建人</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for statement in statements %}
+              <tr data-reconciliation-statement-id="{{ statement.id }}">
+                <td data-label="对账单号"><strong>{{ statement.statement_no }}</strong></td>
+                <td data-label="客户">{{ statement.customer_name }}</td>
+                <td data-label="账期">{{ statement.period_start }} 至 {{ statement.period_end }}</td>
+                <td data-label="币种">{{ statement.currency }}</td>
+                <td data-label="明细">{{ statement.item_count }} 项</td>
+                <td data-label="不含税金额">{{ statement.amount_ex_tax_minor | money_minor(statement.currency) }}</td>
+                <td data-label="含税金额"><strong>{{ statement.amount_incl_tax_minor | money_minor(statement.currency) }}</strong></td>
+                <td data-label="税额">{{ statement.tax_amount_minor | money_minor(statement.currency) }}</td>
+                <td data-label="状态"><span class="reconciliation-status status-{{ statement.status }}">{{ status_labels[statement.status] }}</span></td>
+                <td data-label="创建人">{{ statement.created_by or "-" }}</td>
+                <td data-label="操作"><a class="button compact-button" href="{{ url_for('reconciliation_statement_detail', statement_id=statement.id) }}">查看</a></td>
+              </tr>
+            {% else %}
+              <tr><td class="empty" colspan="11">暂无符合条件的对账单</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}

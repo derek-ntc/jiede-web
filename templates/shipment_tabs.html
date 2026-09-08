@@ -1,0 +1,6 @@
+<nav class="shipment-subnav" aria-label="发货子页面">
+  {% if can_manage_shipped %}
+    <a href="{{ url_for('shipment_operations') }}" {% if request.endpoint == 'shipment_operations' %}aria-current="page"{% endif %}>发货操作</a>
+  {% endif %}
+  <a href="{{ url_for('shipped_orders') }}" {% if request.endpoint == 'shipped_orders' %}aria-current="page"{% endif %}>已发货清单</a>
+</nav>

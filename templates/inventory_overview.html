@@ -14,6 +14,8 @@
   </section>
 
   <nav class="inventory-tabs">
+    <a href="{{ url_for('inventory_batch', mode='inbound', customer=selected_customer) }}">批量入库</a>
+    <a href="{{ url_for('inventory_batch', mode='adjust', customer=selected_customer) }}">批量调整</a>
     <a class="active-nav-link" href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
     <a href="{{ url_for('inventory_scan') }}">扫码查询</a>
     <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
@@ -28,14 +30,27 @@
       <h2>库存列表</h2>
       <form class="search compact-search" method="get">
         <input type="search" name="q" value="{{ query }}" placeholder="搜索产品名称、SKU、条码、库存编码">
-        <select name="status" onchange="this.form.submit()">
+        <label class="inventory-customer-filter" for="inventory-customer">
+          客户
+          <select id="inventory-customer" name="customer" onchange="this.form.submit()">
+            <option value="">全部客户</option>
+            {% if selected_customer and selected_customer not in customers %}
+              <option value="{{ selected_customer }}" selected>{{ selected_customer }}</option>
+            {% endif %}
+            {% for customer in customers %}
+              <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <select name="status" aria-label="库存状态" onchange="this.form.submit()">
           <option value="" {% if not status %}selected{% endif %}>全部库存</option>
           <option value="low" {% if status == "low" %}selected{% endif %}>低库存</option>
           <option value="zero" {% if status == "zero" %}selected{% endif %}>无库存</option>
           <option value="positive" {% if status == "positive" %}selected{% endif %}>有库存</option>
         </select>
         <button type="submit">搜索</button>
-        <a class="button secondary" href="{{ url_for('export_inventory_overview', q=query, status=status) }}">导出Excel</a>
+        <a class="button secondary" href="{{ url_for('admin_inventory_overview') }}">清空</a>
+        <a class="button secondary" href="{{ url_for('export_inventory_overview', q=query, status=status, customer=selected_customer) }}">导出Excel</a>
       </form>
     </div>
 
@@ -89,6 +104,7 @@
               <td data-label="产品">
                 <strong>{{ product.product_name }}</strong>
                 <span class="empty-text">{{ product.drawing_no or "-" }}</span>
+                <span class="empty-text inventory-product-customer">客户：{{ (product.customer or '')|trim or "未指定" }}</span>
               </td>
               <td data-label="SKU/库存编码" title="{{ inventory_code(product) or '-' }}">{{ inventory_code(product) or "-" }}</td>
               <td data-label="总库存"><strong>{{ total }}</strong></td>

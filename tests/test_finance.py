@@ -8,6 +8,7 @@ from unittest.mock import patch
 import app
 from flask import get_flashed_messages, session
 from openpyxl import load_workbook
+from PIL import Image
 
 
 class FinanceMigrationTests(unittest.TestCase):
@@ -993,12 +994,16 @@ class FinanceShipmentLockTests(FinanceDomainTestCase):
             )
         self.client = app.app.test_client()
         self.login_as("finance-manager")
+        self.original_shipment_images_dir = app.SHIPMENT_IMAGES_DIR
+        app.SHIPMENT_IMAGES_DIR = Path(self.tmpdir.name) / "shipment-images"
+        app.SHIPMENT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         app.app.config.update(
             TESTING=self.original_testing,
             SECRET_KEY=self.original_secret_key,
         )
+        app.SHIPMENT_IMAGES_DIR = self.original_shipment_images_dir
         super().tearDown()
 
     def login_as(self, username):
@@ -1026,6 +1031,14 @@ class FinanceShipmentLockTests(FinanceDomainTestCase):
                     "finance-manager",
                 )
         return invoice_id
+
+    def create_reconciliation_claim(self, source_type, source_id):
+        with app.get_db() as conn:
+            return app.create_reconciliation_statement(
+                conn,
+                [(source_type, source_id)],
+                "finance-manager",
+            )["statement_id"]
 
     def create_claimable_assembly_batch(self, suffix):
         now = "2026-09-03T10:00:00"
@@ -1241,6 +1254,101 @@ class FinanceShipmentLockTests(FinanceDomainTestCase):
                         (item_id,),
                     ).fetchone()["unit_price_minor"]
                 self.assertIsNone(price)
+
+    def test_reconciliation_claims_lock_source_facts_but_allow_assembly_images(self):
+        reconciliation_lock = "该发货记录已加入对账单，不能修改发货日期、数量或价格"
+        self.create_reconciliation_claim("ordinary", self.ordinary_a_cny)
+
+        response = self.client.post(
+            f"/admin/shipped-orders/{self.ordinary_a_cny}/edit",
+            data={
+                "shipped_quantity": "3",
+                "shipped_at": "2026-09-20",
+                "logistics_no": "不可改",
+            },
+            follow_redirects=True,
+        )
+        self.assertIn(reconciliation_lock, response.get_data(as_text=True))
+        self.assert_ordinary_source_unchanged(self.ordinary_a_cny, 2, "2026-09-01")
+
+        with app.get_db() as conn:
+            conn.execute(
+                "UPDATE product_order_shipments SET unit_price_minor = NULL WHERE id = ?",
+                (self.ordinary_a_cny,),
+            )
+        response = self.client.post(
+            f"/admin/shipped-orders/prices/ordinary/{self.ordinary_a_cny}",
+            data={"unit_price": "9.99", "currency": "CNY"},
+            follow_redirects=True,
+        )
+        self.assertIn(reconciliation_lock, response.get_data(as_text=True))
+        with app.get_db() as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT unit_price_minor FROM product_order_shipments WHERE id = ?",
+                    (self.ordinary_a_cny,),
+                ).fetchone()["unit_price_minor"]
+            )
+
+        response = self.client.post(
+            f"/admin/shipped-orders/{self.ordinary_a_cny}/delete",
+            follow_redirects=True,
+        )
+        self.assertIn(reconciliation_lock, response.get_data(as_text=True))
+        self.assert_ordinary_source_unchanged(self.ordinary_a_cny, 2, "2026-09-01")
+
+        batch_id, item_id = self.create_claimable_assembly_batch("REC")
+        self.create_reconciliation_claim("assembly_item", item_id)
+        response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            data={
+                "shipped_at": "2026-09-20",
+                "logistics_no": "不可改",
+                "preview_token": "locked-before-preview",
+                "confirm_warnings": "1",
+                "manual_id": str(self.manual_a),
+                "shipped_quantity": "4",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], reconciliation_lock)
+        response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/delete",
+            follow_redirects=True,
+        )
+        self.assertIn(reconciliation_lock, response.get_data(as_text=True))
+
+        image_buffer = BytesIO()
+        Image.new("RGB", (1, 1), "blue").save(image_buffer, format="PNG")
+        image_buffer.seek(0)
+        response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            data={
+                "shipped_at": "2026-09-05",
+                "logistics_no": "对账后仍可改备注",
+                "preview_token": "unchanged-source-facts",
+                "confirm_warnings": "1",
+                "manual_id": str(self.manual_a),
+                "shipped_quantity": "4",
+                "images": (image_buffer, "reconciliation-image.png"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        with app.get_db() as conn:
+            image_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM assembly_shipment_images WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()["count"]
+            batch = conn.execute(
+                "SELECT shipped_at, logistics_no FROM assembly_shipment_batches WHERE id = ?",
+                (batch_id,),
+            ).fetchone()
+        self.assertEqual(image_count, 1)
+        self.assertEqual(
+            (batch["shipped_at"], batch["logistics_no"]),
+            ("2026-09-05", "对账后仍可改备注"),
+        )
 
     def test_removing_pending_item_and_voiding_issued_invoice_release_sources(self):
         pending_invoice = self.create_claim("ordinary", self.ordinary_a_cny)

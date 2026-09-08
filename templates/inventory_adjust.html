@@ -10,6 +10,8 @@
   </section>
 
   <nav class="inventory-tabs">
+    <a href="{{ url_for('inventory_batch', mode='inbound') }}">批量入库</a>
+    <a href="{{ url_for('inventory_batch', mode='adjust') }}">批量调整</a>
     <a href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
     <a href="{{ url_for('inventory_scan') }}">扫码查询</a>
     <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
@@ -51,6 +53,7 @@
             <option value="{{ location.id }}">{{ location.code }} / {{ location.name }}</option>
           {% endfor %}
         </select>
+        <button type="button" class="secondary" data-open-location>＋ 新增库位</button>
       </label>
       <label>
         盘点后实际数量
@@ -65,9 +68,11 @@
       </div>
     </form>
   </section>
+  {% include 'inventory_location_creator.html' %}
 </div>
 {% endblock %}
 {% block scripts %}
+  <script src="{{ url_for('static', filename='inventory-locations.js', v=static_version) }}" defer></script>
   <script src="https://unpkg.com/html5-qrcode" defer></script>
   <script src="{{ url_for('static', filename='inventory.js', v=static_version) }}" defer></script>
 {% endblock %}

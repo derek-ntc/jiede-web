@@ -18,6 +18,16 @@
         <strong>财务开票模块</strong>
         <span>合并发货明细，登记开票、收款和作废状态。</span>
       </a>
+      <a class="module-card" href="{{ url_for('reconciliation_statements') }}">
+        <strong>客户对账单</strong>
+        <span>从发货快照生成对账单，跟进客户确认与异议。</span>
+      </a>
+    {% endif %}
+    {% if current_user_role == "admin" %}
+      <a class="module-card" href="{{ url_for('reconciliation_company_profile') }}">
+        <strong>供应商对账资料</strong>
+        <span>维护新对账单使用的我方公司资料快照。</span>
+      </a>
     {% endif %}
     {% if can_manage_customers %}
       <a class="module-card" href="{{ url_for('admin_customers') }}">
@@ -111,6 +121,10 @@
         <label>
           SKU
           <input type="text" name="sku" placeholder="可扫码识别的产品编码">
+        </label>
+        <label>
+          单位
+          <input type="text" name="unit" placeholder="例如 PCS">
         </label>
         <label>
           条码

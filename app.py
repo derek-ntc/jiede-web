@@ -2,6 +2,7 @@ import os
 import re
 import time
 import base64
+import hashlib
 import binascii
 import math
 import secrets
@@ -16,6 +17,7 @@ import zlib
 import json
 import fcntl
 import threading
+from zipfile import BadZipFile
 from contextlib import contextmanager
 from email.message import EmailMessage
 from io import BytesIO
@@ -27,6 +29,7 @@ from itertools import zip_longest
 from mimetypes import guess_type
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from xml.etree.ElementTree import ParseError
 from xml.sax.saxutils import escape as xml_escape
 
 # The repository contains a legacy PIL compatibility stub.  Shipment image
@@ -71,6 +74,8 @@ from flask import (
 from flask.wrappers import Request as FlaskRequest
 from itsdangerous import BadSignature
 from itsdangerous import URLSafeSerializer
+from itsdangerous import URLSafeTimedSerializer
+import xlrd
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -104,6 +109,14 @@ from pricing import (
     normalize_currency,
     parse_money_minor,
 )
+from reconciliation import (
+    TAX_RATE_PPM,
+    build_reconciliation_workbook,
+    calculate_reconciliation_amounts,
+    format_reconciliation_amount_minor,
+    format_unit_price_ex_tax_scaled,
+)
+from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -111,6 +124,7 @@ DATA_DIR = BASE_DIR / "data"
 MANUALS_DIR = BASE_DIR / "manuals"
 UPLOADS_DIR = BASE_DIR / "uploads"
 SIGNATURES_DIR = UPLOADS_DIR / "signatures"
+RECONCILIATION_SIGNATURES_DIR = UPLOADS_DIR / "reconciliation-signatures"
 SHIPMENT_IMAGES_DIR = UPLOADS_DIR / "shipment-images"
 INSPECTION_REPORTS_DIR = UPLOADS_DIR / "inspection-reports"
 PRODUCTION_DRAWINGS_DIR = UPLOADS_DIR / "production-drawings"
@@ -118,6 +132,7 @@ DB_PATH = DATA_DIR / "manuals.db"
 DATABASE_READY = False
 MAX_ORDER_QUANTITY = 2_147_483_647
 SIGNATURE_LINK_TTL = timedelta(days=7)
+SIGNATURE_IMAGE_MAX_PIXELS = 4_000_000
 PRODUCTION_STAGE_LABELS = {
     "laser": "激光",
     "bending": "折弯",
@@ -300,6 +315,7 @@ SHIPMENT_RASTER_MIME_SUFFIXES = {
     "image/gif": ".gif",
 }
 ORDER_IMPORT_EXTENSIONS = {".xlsx", ".xlsm"}
+PRODUCT_BOM_IMPORT_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
 ORDER_IMPORT_DRAWING_HEADERS = {"图号", "产品图号", "drawing_no", "drawingno", "drawing", "part_no", "partno"}
 ORDER_IMPORT_QUANTITY_HEADERS = {"数量", "订单数量", "quantity", "qty", "order_quantity", "orderquantity"}
 ORDER_IMPORT_PLANNED_SHIP_HEADERS = {"计划发货时间", "计划交货时间", "交货时间", "planned_ship_at", "plannedshipat"}
@@ -365,6 +381,10 @@ def upload_limits():
         "max_form_bytes": max_form_bytes,
         "static_version": int(max(
             (BASE_DIR / "static" / "style.css").stat().st_mtime,
+            (BASE_DIR / "static" / "product-list.css").stat().st_mtime if (BASE_DIR / "static" / "product-list.css").exists() else 0,
+            (BASE_DIR / "static" / "business-lists.css").stat().st_mtime if (BASE_DIR / "static" / "business-lists.css").exists() else 0,
+            (BASE_DIR / "static" / "product-bom-import.css").stat().st_mtime if (BASE_DIR / "static" / "product-bom-import.css").exists() else 0,
+            (BASE_DIR / "static" / "reconciliation.css").stat().st_mtime if (BASE_DIR / "static" / "reconciliation.css").exists() else 0,
             (BASE_DIR / "static" / "editor.js").stat().st_mtime,
             (BASE_DIR / "static" / "inventory.js").stat().st_mtime if (BASE_DIR / "static" / "inventory.js").exists() else 0,
             (BASE_DIR / "static" / "order_entry.js").stat().st_mtime if (BASE_DIR / "static" / "order_entry.js").exists() else 0,
@@ -488,6 +508,7 @@ def init_db():
     DATA_DIR.mkdir(exist_ok=True)
     MANUALS_DIR.mkdir(exist_ok=True)
     SIGNATURES_DIR.mkdir(parents=True, exist_ok=True)
+    RECONCILIATION_SIGNATURES_DIR.mkdir(parents=True, exist_ok=True)
     SHIPMENT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     INSPECTION_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     PRODUCTION_DRAWINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -524,6 +545,7 @@ def init_db():
         ensure_inventory_tables(conn)
         ensure_assembly_shipping_tables(conn)
         ensure_finance_tables(conn)
+        ensure_reconciliation_tables(conn)
         ensure_feedback_table(conn)
         ensure_production_followup_tables(conn)
         ensure_indexes(conn)
@@ -550,6 +572,7 @@ def ensure_columns(conn):
         "qr_code": "ALTER TABLE manuals ADD COLUMN qr_code TEXT NOT NULL DEFAULT ''",
         "default_location_id": "ALTER TABLE manuals ADD COLUMN default_location_id INTEGER",
         "min_stock": "ALTER TABLE manuals ADD COLUMN min_stock INTEGER NOT NULL DEFAULT 0",
+        "unit": "ALTER TABLE manuals ADD COLUMN unit TEXT NOT NULL DEFAULT ''",
         "unit_price_minor": "ALTER TABLE manuals ADD COLUMN unit_price_minor INTEGER",
         "currency": "ALTER TABLE manuals ADD COLUMN currency TEXT NOT NULL DEFAULT 'CNY'",
     }
@@ -893,6 +916,21 @@ def ensure_order_table(conn):
         """
     )
 
+    # Order totals include assembly allocations. Only the uncovered legacy
+    # quantity can become an ordinary shipment during startup migration.
+    # Older databases may not have the assembly tables yet at this point.
+    assembly_quantities = {}
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='assembly_shipment_allocations'"
+    ).fetchone():
+        assembly_quantities = {
+            row["order_id"]: int(row["quantity"] or 0)
+            for row in conn.execute(
+                """SELECT order_id, SUM(quantity) AS quantity
+                FROM assembly_shipment_allocations
+                WHERE order_id IS NOT NULL GROUP BY order_id"""
+            )
+        }
     shipment_rows = conn.execute(
         """
         SELECT id, shipped_quantity, shipped_at
@@ -910,7 +948,8 @@ def ensure_order_table(conn):
             """,
             (row["id"],),
         ).fetchone()
-        if not exists and row["shipped_quantity"] > 0:
+        legacy_quantity = row["shipped_quantity"] - assembly_quantities.get(row["id"], 0)
+        if not exists and legacy_quantity > 0:
             created_at = datetime.utcnow().isoformat(timespec="seconds")
             conn.execute(
                 """
@@ -921,7 +960,7 @@ def ensure_order_table(conn):
                 """,
                 (
                     row["id"],
-                    row["shipped_quantity"],
+                    legacy_quantity,
                     row["shipped_at"] or created_at,
                     created_at,
                 ),
@@ -1234,6 +1273,156 @@ def ensure_finance_tables(conn):
             FOREIGN KEY (invoice_id) REFERENCES finance_invoices(id) ON DELETE CASCADE,
             CHECK (source_type IN ('ordinary', 'assembly_item'))
         )
+        """
+    )
+
+
+def ensure_reconciliation_tables(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_company_profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            company_name TEXT NOT NULL,
+            address TEXT NOT NULL DEFAULT '',
+            contact TEXT NOT NULL DEFAULT '',
+            phone TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_statements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            statement_no TEXT NOT NULL UNIQUE,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            customer_id INTEGER NOT NULL,
+            customer_name TEXT NOT NULL,
+            customer_address TEXT NOT NULL DEFAULT '',
+            customer_phone TEXT NOT NULL DEFAULT '',
+            customer_email TEXT NOT NULL DEFAULT '',
+            customer_purchase_contact TEXT NOT NULL DEFAULT '',
+            customer_reconciliation_contact TEXT NOT NULL DEFAULT '',
+            customer_invoice_title TEXT NOT NULL DEFAULT '',
+            customer_tax_id TEXT NOT NULL DEFAULT '',
+            customer_registered_address TEXT NOT NULL DEFAULT '',
+            customer_registered_phone TEXT NOT NULL DEFAULT '',
+            customer_bank_name TEXT NOT NULL DEFAULT '',
+            customer_bank_account TEXT NOT NULL DEFAULT '',
+            customer_invoice_email TEXT NOT NULL DEFAULT '',
+            supplier_company_name TEXT NOT NULL,
+            supplier_address TEXT NOT NULL DEFAULT '',
+            supplier_contact TEXT NOT NULL DEFAULT '',
+            supplier_phone TEXT NOT NULL DEFAULT '',
+            supplier_email TEXT NOT NULL DEFAULT '',
+            currency TEXT NOT NULL,
+            tax_rate_ppm INTEGER NOT NULL,
+            amount_ex_tax_minor INTEGER NOT NULL,
+            amount_incl_tax_minor INTEGER NOT NULL,
+            tax_amount_minor INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            remark TEXT NOT NULL DEFAULT '',
+            token_digest TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            password_version INTEGER NOT NULL DEFAULT 1,
+            access_expires_at TEXT NOT NULL,
+            failed_attempts INTEGER NOT NULL DEFAULT 0,
+            locked_until TEXT NOT NULL DEFAULT '',
+            confirmed_name TEXT NOT NULL DEFAULT '',
+            confirmed_at TEXT NOT NULL DEFAULT '',
+            signature_image TEXT NOT NULL DEFAULT '',
+            confirmed_ip TEXT NOT NULL DEFAULT '',
+            confirmed_user_agent TEXT NOT NULL DEFAULT '',
+            dispute_name TEXT NOT NULL DEFAULT '',
+            dispute_content TEXT NOT NULL DEFAULT '',
+            disputed_at TEXT NOT NULL DEFAULT '',
+            disputed_ip TEXT NOT NULL DEFAULT '',
+            disputed_user_agent TEXT NOT NULL DEFAULT '',
+            void_reason TEXT NOT NULL DEFAULT '',
+            voided_by TEXT NOT NULL DEFAULT '',
+            voided_at TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (customer_id) REFERENCES customers(id),
+            CHECK (status IN ('pending', 'confirmed', 'disputed', 'void'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_statement_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            statement_id INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            active_claim_key TEXT UNIQUE,
+            shipped_at TEXT NOT NULL,
+            delivery_no TEXT NOT NULL DEFAULT '',
+            order_no TEXT NOT NULL DEFAULT '',
+            assembly_batch_id INTEGER,
+            assembly_drawing_no TEXT NOT NULL DEFAULT '',
+            manual_id INTEGER,
+            sku TEXT NOT NULL DEFAULT '',
+            drawing_no TEXT NOT NULL DEFAULT '',
+            product_name TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            unit TEXT NOT NULL DEFAULT '',
+            quantity INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            unit_price_incl_tax_minor INTEGER NOT NULL,
+            unit_price_ex_tax_scaled INTEGER NOT NULL,
+            amount_incl_tax_minor INTEGER NOT NULL,
+            amount_ex_tax_minor INTEGER NOT NULL,
+            tax_amount_minor INTEGER NOT NULL,
+            remark TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (statement_id) REFERENCES reconciliation_statements(id) ON DELETE CASCADE,
+            CHECK (source_type IN ('ordinary', 'assembly_item'))
+        )
+        """
+    )
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO reconciliation_company_profile (
+            id, company_name, updated_at
+        ) VALUES (1, '宁波市杰德机械科技有限公司', ?)
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_reconciliation_statements_customer_id
+        ON reconciliation_statements (customer_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_reconciliation_statements_period
+        ON reconciliation_statements (period_start, period_end)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_reconciliation_statements_status
+        ON reconciliation_statements (status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_reconciliation_statement_items_statement_id
+        ON reconciliation_statement_items (statement_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_reconciliation_statement_items_source
+        ON reconciliation_statement_items (source_type, source_id)
         """
     )
 
@@ -1703,6 +1892,7 @@ def ensure_indexes(conn):
 
 
 def ensure_inventory_tables(conn):
+    ensure_batch_table(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS warehouse_locations (
@@ -3198,6 +3388,64 @@ def normalize_import_drawing(value):
     return str(value).strip()
 
 
+def format_import_cell_text(value, number_format="General"):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return normalize_import_drawing(value)
+
+    number_format = str(number_format or "General")
+    number_format = number_format.split(";", 1)[0]
+    number_format = re.sub(r"\[[^]]+\]", "", number_format)
+    number_format = re.sub(r'\\(.)', r'\1', number_format).replace('"', "")
+
+    scientific_match = re.fullmatch(
+        r"0(?:\.(0+))?[Ee][+-]0+", number_format
+    )
+    if scientific_match:
+        precision = len(scientific_match.group(1) or "")
+        return f"{float(value):.{precision}E}"
+
+    decimal_match = re.fullmatch(r"0+\.(0+)", number_format)
+    if decimal_match:
+        precision = len(decimal_match.group(1))
+        return f"{float(value):.{precision}f}"
+
+    if float(value).is_integer() and re.fullmatch(r"0+", number_format):
+        return f"{int(value):0{len(number_format)}d}"
+
+    if (
+        float(value).is_integer()
+        and number_format.count("0") > 1
+        and re.fullmatch(r"[0.\-_/(), ]+", number_format)
+    ):
+        digits = str(abs(int(value))).zfill(number_format.count("0"))
+        if len(digits) <= number_format.count("0"):
+            digit_iterator = iter(digits)
+            rendered = "".join(
+                next(digit_iterator) if character == "0" else character
+                for character in number_format
+            )
+            return ("-" if value < 0 else "") + rendered
+
+    return normalize_import_drawing(value)
+
+
+def formatted_import_cell_text(cell):
+    return format_import_cell_text(
+        cell.value,
+        getattr(cell, "number_format", "General"),
+    )
+
+
+def formatted_xlrd_cell_text(workbook, cell):
+    number_format = "General"
+    try:
+        xf = workbook.xf_list[cell.xf_index]
+        number_format = workbook.format_map[xf.format_key].format_str
+    except (AttributeError, IndexError, KeyError):
+        pass
+    return format_import_cell_text(cell.value, number_format)
+
+
 def parse_import_quantity(value):
     if value is None or str(value).strip() == "":
         raise ValueError
@@ -3225,6 +3473,472 @@ def parse_import_date(value):
     if hasattr(value, "strftime"):
         return value.strftime("%Y-%m-%d")
     return str(value).strip()
+
+
+def parse_product_bom_rows(source_rows):
+    base_headers = {
+        "物料编码": "sku",
+        "物料名称": "product_name",
+        "规格型号": "drawing_no",
+        "单位": "unit",
+    }
+    normalized_base_headers = {
+        normalize_import_header(header): (header, field)
+        for header, field in base_headers.items()
+    }
+    quantity_header = normalize_import_header("每套数量")
+    section_kind = None
+    current_assembly = ""
+    columns = None
+    rows = []
+    errors = []
+
+    for row_number, values, cells in source_rows:
+        first = next((cell for cell in cells if cell), "")
+        if first.startswith("组装件"):
+            section_kind = "assembly"
+            current_assembly = first[len("组装件") :].strip(" ：:").strip()
+            columns = None
+            if not current_assembly:
+                errors.append(f"第 {row_number} 行缺少组装件图号")
+            continue
+        if first.startswith("单件产品"):
+            section_kind = "standalone"
+            current_assembly = ""
+            columns = None
+            continue
+
+        header_indexes = {
+            normalize_import_header(value): index
+            for index, value in enumerate(cells)
+            if value
+        }
+        has_full_base_header = all(
+            header in header_indexes for header in normalized_base_headers
+        )
+        is_waiting_for_header = columns is None
+        has_partial_base_header = any(
+            header in header_indexes for header in normalized_base_headers
+        )
+        if has_full_base_header or (
+            is_waiting_for_header and has_partial_base_header
+        ):
+            if section_kind is None:
+                section_kind = "standalone"
+                current_assembly = ""
+            missing_headers = [
+                label
+                for normalized, (label, _) in normalized_base_headers.items()
+                if normalized not in header_indexes
+            ]
+            if section_kind == "assembly" and quantity_header not in header_indexes:
+                missing_headers.append("每套数量")
+            if missing_headers:
+                section_label = (
+                    f"组装件 {current_assembly}"
+                    if section_kind == "assembly"
+                    else "单件产品"
+                )
+                errors.append(
+                    f"{section_label} 缺少必要表头："
+                    + "、".join(missing_headers)
+                )
+                columns = {}
+            else:
+                columns = {
+                    field: header_indexes[normalized]
+                    for normalized, (_, field) in normalized_base_headers.items()
+                }
+                if quantity_header in header_indexes:
+                    columns["quantity_per_set"] = header_indexes[quantity_header]
+            continue
+
+        if not columns or not any(cells):
+            continue
+
+        item = {
+            field: cells[index] if index < len(cells) else ""
+            for field, index in columns.items()
+            if field != "quantity_per_set"
+        }
+        if not item["drawing_no"] or not item["product_name"]:
+            errors.append(f"第 {row_number} 行缺少规格型号或物料名称")
+            continue
+
+        quantity_per_set = None
+        if section_kind == "assembly":
+            quantity_index = columns["quantity_per_set"]
+            raw_quantity = values[quantity_index] if quantity_index < len(values) else None
+            try:
+                quantity_per_set = parse_import_quantity(raw_quantity)
+            except OverflowError:
+                errors.append(
+                    f"第 {row_number} 行每套数量不能超过 {MAX_ORDER_QUANTITY}"
+                )
+                continue
+            except (TypeError, ValueError):
+                errors.append(f"第 {row_number} 行每套数量必须是大于 0 的整数")
+                continue
+
+        rows.append(
+            {
+                "row_number": row_number,
+                "assembly_drawing_no": current_assembly,
+                **item,
+                "quantity_per_set": quantity_per_set,
+            }
+        )
+
+    if not rows and not errors:
+        errors.append("没有找到可导入的产品数据")
+    return rows, errors
+
+
+def parse_product_bom_workbook(upload):
+    filename = upload.filename or ""
+    extension = Path(filename).suffix.lower()
+    if extension not in PRODUCT_BOM_IMPORT_EXTENSIONS:
+        return [], [
+            f"请上传 .xls、.xlsx 或 .xlsm 格式的 Excel 文件，当前文件格式为 {extension or '未知'}"
+        ]
+
+    if extension == ".xls":
+        try:
+            workbook = xlrd.open_workbook(
+                file_contents=upload.read(),
+                formatting_info=True,
+            )
+            worksheet = workbook.sheet_by_index(0)
+            source_rows = []
+            for row_index in range(worksheet.nrows):
+                cell_row = worksheet.row(row_index)
+                source_rows.append(
+                    (
+                        row_index + 1,
+                        [cell.value for cell in cell_row],
+                        [
+                            formatted_xlrd_cell_text(workbook, cell)
+                            for cell in cell_row
+                        ],
+                    )
+                )
+        except (xlrd.XLRDError, OSError, TypeError, ValueError, IndexError):
+            return [], [
+                "Excel 文件无法读取，请确认文件未损坏且格式为 .xls、.xlsx 或 .xlsm"
+            ]
+        return parse_product_bom_rows(source_rows)
+
+    workbook = None
+    try:
+        workbook = load_workbook(upload, read_only=True, data_only=True)
+        source_rows = (
+            (
+                row_number,
+                [cell.value for cell in cell_row],
+                [formatted_import_cell_text(cell) for cell in cell_row],
+            )
+            for row_number, cell_row in enumerate(
+                workbook.active.iter_rows(values_only=False), start=1
+            )
+        )
+        return parse_product_bom_rows(source_rows)
+    except (
+        BadZipFile,
+        EOFError,
+        InvalidFileException,
+        KeyError,
+        OSError,
+        ParseError,
+        TypeError,
+        ValueError,
+    ):
+        return [], ["Excel 文件无法读取，请确认文件未损坏且格式为 .xlsx 或 .xlsm"]
+    finally:
+        if workbook is not None:
+            workbook.close()
+
+
+def build_product_bom_import_plan(conn, customer, rows):
+    customer = str(customer or "").strip()
+    products_by_key = {}
+    relationships_by_key = {}
+    errors = []
+    if not customer:
+        errors.append("请选择客户")
+    else:
+        customer_row = conn.execute(
+            """
+            SELECT name
+            FROM customers
+            WHERE name = ? COLLATE NOCASE
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (customer,),
+        ).fetchone()
+        if customer_row is None:
+            errors.append(
+                f"客户 {customer} 不存在，请先在客户信息中新增"
+            )
+        else:
+            customer = customer_row["name"]
+
+    field_labels = {
+        "sku": "物料编码",
+        "product_name": "物料名称",
+        "unit": "单位",
+    }
+    for row in rows:
+        drawing_no = str(row.get("drawing_no") or "").strip()
+        product_key = drawing_no.casefold()
+        product = {
+            "product_key": product_key,
+            "drawing_no": drawing_no,
+            "sku": str(row.get("sku") or "").strip(),
+            "product_name": str(row.get("product_name") or "").strip(),
+            "unit": str(row.get("unit") or "").strip(),
+            "source_rows": [int(row.get("row_number") or 0)],
+        }
+        existing_product = products_by_key.get(product_key)
+        if existing_product:
+            for field, label in field_labels.items():
+                if existing_product[field] != product[field]:
+                    errors.append(
+                        f"产品图号 {drawing_no} 的{label}不一致"
+                        f"（第 {existing_product['source_rows'][0]}、{product['source_rows'][0]} 行）"
+                    )
+            existing_product["source_rows"].extend(product["source_rows"])
+        else:
+            products_by_key[product_key] = product
+
+        assembly_drawing_no = str(
+            row.get("assembly_drawing_no") or ""
+        ).strip()
+        if not assembly_drawing_no:
+            continue
+        relation_key = (product_key, assembly_drawing_no.casefold())
+        quantity_per_set = int(row.get("quantity_per_set") or 0)
+        existing_relationship = relationships_by_key.get(relation_key)
+        source_row = int(row.get("row_number") or 0)
+        if existing_relationship:
+            if existing_relationship["quantity_per_set"] != quantity_per_set:
+                errors.append(
+                    f"产品图号 {drawing_no} 在组装件 {assembly_drawing_no} 的每套数量不一致"
+                    f"（第 {existing_relationship['source_rows'][0]}、{source_row} 行）"
+                )
+            else:
+                existing_relationship["source_rows"].append(source_row)
+        else:
+            relationships_by_key[relation_key] = {
+                "product_key": product_key,
+                "drawing_no": drawing_no,
+                "product_name": product["product_name"],
+                "assembly_drawing_no": assembly_drawing_no,
+                "quantity_per_set": quantity_per_set,
+                "source_rows": [source_row],
+            }
+
+    existing_manuals_by_key = {}
+    if customer and not any(error.startswith("客户 ") for error in errors):
+        existing_manuals = conn.execute(
+            """
+            SELECT id, drawing_no
+            FROM manuals
+            WHERE customer = ? COLLATE NOCASE
+              AND TRIM(drawing_no) != ''
+            ORDER BY id ASC
+            """,
+            (customer,),
+        ).fetchall()
+        for manual in existing_manuals:
+            key = str(manual["drawing_no"] or "").strip().casefold()
+            existing_manuals_by_key.setdefault(key, []).append(manual)
+
+    matched_manual_ids = []
+    for product_key, product in products_by_key.items():
+        matches = existing_manuals_by_key.get(product_key, [])
+        if len(matches) > 1:
+            errors.append(
+                f"产品图号 {product['drawing_no']} 在客户 {customer} 下存在多条产品记录，请先处理重复产品"
+            )
+            product["manual_id"] = None
+        elif matches:
+            product["manual_id"] = matches[0]["id"]
+            matched_manual_ids.append(matches[0]["id"])
+        else:
+            product["manual_id"] = None
+
+    existing_relationships = set()
+    if matched_manual_ids:
+        placeholders = ",".join("?" for _ in matched_manual_ids)
+        existing_rows = conn.execute(
+            f"""
+            SELECT manual_id, assembly_drawing_no
+            FROM product_assembly_components
+            WHERE manual_id IN ({placeholders})
+            """,
+            matched_manual_ids,
+        ).fetchall()
+        existing_relationships = {
+            (
+                row["manual_id"],
+                str(row["assembly_drawing_no"] or "").strip().casefold(),
+            )
+            for row in existing_rows
+        }
+
+    relationships = list(relationships_by_key.values())
+    for relationship in relationships:
+        product = products_by_key[relationship["product_key"]]
+        relationship["manual_id"] = product["manual_id"]
+        relationship["exists"] = bool(
+            product["manual_id"]
+            and (
+                product["manual_id"],
+                relationship["assembly_drawing_no"].casefold(),
+            )
+            in existing_relationships
+        )
+
+    products = list(products_by_key.values())
+    return {
+        "customer": customer,
+        "products": products,
+        "relationships": relationships,
+        "errors": errors,
+        "new_product_count": sum(
+            product["manual_id"] is None for product in products
+        ),
+        "matched_product_count": sum(
+            product["manual_id"] is not None for product in products
+        ),
+        "new_relationship_count": sum(
+            not relationship["exists"] for relationship in relationships
+        ),
+        "updated_relationship_count": sum(
+            relationship["exists"] for relationship in relationships
+        ),
+        "assembly_count": len(
+            {
+                relationship["assembly_drawing_no"].casefold()
+                for relationship in relationships
+            }
+        ),
+    }
+
+
+def apply_product_bom_import(conn, customer, rows, current_user, now):
+    plan = build_product_bom_import_plan(conn, customer, rows)
+    if plan["errors"]:
+        raise ValueError("\n".join(plan["errors"]))
+
+    manual_ids_by_key = {}
+    for product in plan["products"]:
+        manual_id = product["manual_id"]
+        if manual_id is None:
+            manual_id = conn.execute(
+                """
+                INSERT INTO manuals (
+                    drawing_no, product_name, customer, sku, unit,
+                    model, category, version, remark,
+                    filename, original_filename, file_type,
+                    created_by, updated_by, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, '', '', ?, '', '', '', 'file', ?, ?, ?, ?)
+                """,
+                (
+                    product["drawing_no"],
+                    product["product_name"],
+                    plan["customer"],
+                    product["sku"],
+                    product["unit"],
+                    now,
+                    current_user,
+                    current_user,
+                    now,
+                    now,
+                ),
+            ).lastrowid
+            ensure_product_inventory_code(conn, manual_id)
+        else:
+            conn.execute(
+                """
+                UPDATE manuals
+                SET product_name = ?, sku = ?, unit = ?,
+                    updated_by = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    product["product_name"],
+                    product["sku"],
+                    product["unit"],
+                    current_user,
+                    now,
+                    manual_id,
+                ),
+            )
+        manual_ids_by_key[product["product_key"]] = manual_id
+
+    next_sort_order_by_manual = {}
+    for relationship in plan["relationships"]:
+        manual_id = manual_ids_by_key[relationship["product_key"]]
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM product_assembly_components
+            WHERE manual_id = ?
+              AND assembly_drawing_no = ? COLLATE NOCASE
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (manual_id, relationship["assembly_drawing_no"]),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE product_assembly_components
+                SET assembly_drawing_no = ?, quantity_per_set = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    relationship["assembly_drawing_no"],
+                    relationship["quantity_per_set"],
+                    now,
+                    existing["id"],
+                ),
+            )
+            continue
+
+        if manual_id not in next_sort_order_by_manual:
+            next_sort_order_by_manual[manual_id] = conn.execute(
+                """
+                SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+                FROM product_assembly_components
+                WHERE manual_id = ?
+                """,
+                (manual_id,),
+            ).fetchone()["next_sort_order"]
+        sort_order = next_sort_order_by_manual[manual_id]
+        next_sort_order_by_manual[manual_id] += 1
+        conn.execute(
+            """
+            INSERT INTO product_assembly_components (
+                manual_id, assembly_drawing_no, quantity_per_set,
+                sort_order, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manual_id,
+                relationship["assembly_drawing_no"],
+                relationship["quantity_per_set"],
+                sort_order,
+                now,
+                now,
+            ),
+        )
+
+    return plan
 
 
 def parse_order_import_workbook(upload):
@@ -4026,21 +4740,13 @@ def unique_inventory_transaction_no(conn):
     prefix = f"INV{datetime.now().strftime('%Y%m%d')}"
     row = conn.execute(
         """
-        SELECT transaction_no
+        SELECT MAX(CAST(SUBSTR(transaction_no, ?) AS INTEGER)) AS suffix
         FROM inventory_transactions
         WHERE transaction_no LIKE ?
-        ORDER BY transaction_no DESC
-        LIMIT 1
         """,
-        (f"{prefix}%",),
+        (len(prefix) + 1, f"{prefix}%"),
     ).fetchone()
-    if not row:
-        return f"{prefix}001"
-    suffix = row["transaction_no"].replace(prefix, "", 1)
-    try:
-        number = int(suffix) + 1
-    except ValueError:
-        number = 1
+    number = int(row["suffix"] or 0) + 1
     return f"{prefix}{number:03d}"
 
 
@@ -4057,12 +4763,17 @@ def get_or_create_default_location(conn):
     if row:
         return row
     now = datetime.utcnow().isoformat(timespec="seconds")
+    code = "DEFAULT"
+    suffix = 2
+    while conn.execute("SELECT 1 FROM warehouse_locations WHERE code=? COLLATE NOCASE", (code,)).fetchone():
+        code = f"DEFAULT-{suffix}"
+        suffix += 1
     cursor = conn.execute(
         """
         INSERT INTO warehouse_locations (name, code, remark, enabled, created_at, updated_at)
-        VALUES ('默认库位', 'DEFAULT', '', 1, ?, ?)
+        VALUES ('默认库位', ?, '', 1, ?, ?)
         """,
-        (now, now),
+        (code, now, now),
     )
     return conn.execute("SELECT * FROM warehouse_locations WHERE id = ?", (cursor.lastrowid,)).fetchone()
 
@@ -5633,6 +6344,628 @@ def assert_finance_sources_mutable(conn, refs):
             )
 
 
+RECONCILIATION_SOURCE_TYPES = frozenset({"ordinary", "assembly_item"})
+RECONCILIATION_STATUS_LABELS = {
+    "pending": "待客户处理",
+    "confirmed": "已确认",
+    "disputed": "有异议",
+    "void": "已作废",
+}
+
+
+def reconciliation_claim_key(source_type, source_id):
+    if source_type not in RECONCILIATION_SOURCE_TYPES:
+        raise ValueError("发货记录来源无效")
+    try:
+        normalized_id = int(source_id)
+    except (TypeError, ValueError) as error:
+        raise ValueError("发货记录来源无效") from error
+    if normalized_id <= 0:
+        raise ValueError("发货记录来源无效")
+    return f"{source_type}:{normalized_id}"
+
+
+def parse_reconciliation_source_refs(raw_refs):
+    refs = []
+    for raw_ref in raw_refs or ():
+        match = re.fullmatch(
+            r"(ordinary|assembly_item):([1-9][0-9]*)", str(raw_ref)
+        )
+        if not match:
+            raise ValueError("请选择有效的发货记录")
+        refs.append((match.group(1), int(match.group(2))))
+    if not refs:
+        raise ValueError("请至少选择一条发货记录")
+    if len(set(refs)) != len(refs):
+        raise ValueError("不能重复选择同一发货记录")
+    return refs
+
+
+def _normalize_reconciliation_source_refs(source_refs, require_nonempty=True):
+    refs = []
+    for reference in source_refs or ():
+        if isinstance(reference, dict):
+            source_type = reference.get("source_type")
+            source_id = reference.get("source_id")
+        else:
+            try:
+                source_type, source_id = reference
+            except (TypeError, ValueError) as error:
+                raise ValueError("发货记录来源无效") from error
+        source_type = str(source_type or "")
+        claim_key = reconciliation_claim_key(source_type, source_id)
+        refs.append((source_type, int(source_id), claim_key))
+    if require_nonempty and not refs:
+        raise ValueError("请至少选择一条发货记录")
+    if len({claim_key for _, _, claim_key in refs}) != len(refs):
+        raise ValueError("不能重复选择同一发货记录")
+    return refs
+
+
+def _reconciliation_source_select(source_type):
+    if source_type == "ordinary":
+        return """
+            SELECT 'ordinary' AS source_type,
+                   product_order_shipments.id AS source_id,
+                   COALESCE(
+                       NULLIF(TRIM(product_orders.customer), ''),
+                       TRIM(manuals.customer)
+                   ) AS customer_name,
+                   product_orders.order_no AS order_no,
+                   NULL AS assembly_batch_id,
+                   '' AS assembly_drawing_no,
+                   product_order_shipments.shipped_at AS shipped_at,
+                   COALESCE(
+                       NULLIF(TRIM(product_order_shipments.logistics_no), ''),
+                       'FH-' || product_order_shipments.id
+                   ) AS delivery_no,
+                   manuals.id AS manual_id,
+                   manuals.sku AS sku,
+                   manuals.drawing_no AS drawing_no,
+                   manuals.product_name AS product_name,
+                   manuals.model AS model,
+                   manuals.unit AS unit,
+                   product_order_shipments.shipped_quantity AS quantity,
+                   product_order_shipments.unit_price_minor AS unit_price_minor,
+                   product_order_shipments.currency AS currency,
+                   product_order_shipments.remark AS remark
+            FROM product_order_shipments
+            JOIN product_orders
+              ON product_orders.id = product_order_shipments.order_id
+            JOIN manuals
+              ON manuals.id = product_orders.manual_id
+        """
+    if source_type == "assembly_item":
+        return """
+            SELECT 'assembly_item' AS source_type,
+                   assembly_shipment_items.id AS source_id,
+                   TRIM(assembly_shipment_batches.customer) AS customer_name,
+                   COALESCE((
+                       SELECT GROUP_CONCAT(order_no, ' / ')
+                       FROM (
+                           SELECT DISTINCT COALESCE(
+                               NULLIF(TRIM(product_orders.order_no), ''), '无订单'
+                           ) AS order_no,
+                           CASE WHEN assembly_shipment_allocations.order_id IS NULL
+                                THEN 1 ELSE 0 END AS no_order
+                           FROM assembly_shipment_allocations
+                           LEFT JOIN product_orders
+                             ON product_orders.id = assembly_shipment_allocations.order_id
+                           WHERE assembly_shipment_allocations.item_id = assembly_shipment_items.id
+                           ORDER BY no_order ASC, order_no ASC
+                       )
+                   ), '') AS order_no,
+                   assembly_shipment_batches.id AS assembly_batch_id,
+                   assembly_shipment_batches.assembly_drawing_no AS assembly_drawing_no,
+                   assembly_shipment_batches.shipped_at AS shipped_at,
+                   'ZP-' || assembly_shipment_batches.id AS delivery_no,
+                   manuals.id AS manual_id,
+                   manuals.sku AS sku,
+                   assembly_shipment_items.drawing_no AS drawing_no,
+                   assembly_shipment_items.product_name AS product_name,
+                   manuals.model AS model,
+                   manuals.unit AS unit,
+                   assembly_shipment_items.shipped_quantity AS quantity,
+                   assembly_shipment_items.unit_price_minor AS unit_price_minor,
+                   assembly_shipment_items.currency AS currency,
+                   assembly_shipment_batches.logistics_no AS remark
+            FROM assembly_shipment_items
+            JOIN assembly_shipment_batches
+              ON assembly_shipment_batches.id = assembly_shipment_items.batch_id
+            JOIN manuals
+              ON manuals.id = assembly_shipment_items.manual_id
+        """
+    raise ValueError("发货记录来源无效")
+
+
+def _fetch_reconciliation_source(conn, source_type, source_id):
+    claim_key = reconciliation_claim_key(source_type, source_id)
+    row = conn.execute(
+        f"""
+        SELECT reconciliation_source.*,
+               reconciliation_statement_items.statement_id AS claimed_statement_id
+        FROM ({_reconciliation_source_select(source_type)}) AS reconciliation_source
+        LEFT JOIN reconciliation_statement_items
+          ON reconciliation_statement_items.active_claim_key = ?
+        WHERE reconciliation_source.source_id = ?
+        """,
+        (claim_key, int(source_id)),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _load_reconciliation_sources(conn, source_refs, require_nonempty=True):
+    refs = _normalize_reconciliation_source_refs(
+        source_refs, require_nonempty=require_nonempty
+    )
+    sources = []
+    for source_type, source_id, _claim_key in refs:
+        source = _fetch_reconciliation_source(conn, source_type, source_id)
+        if source is None:
+            raise ValueError("发货记录不存在")
+        if source["unit_price_minor"] is None:
+            raise ValueError("该发货记录尚未记录价格，不能生成对账单")
+        try:
+            source["currency"] = normalize_currency(source["currency"])
+        except ValueError as error:
+            raise ValueError("价格格式或币种不正确") from error
+        if source.pop("claimed_statement_id") is not None:
+            raise ValueError("该发货记录已加入其他对账单")
+        sources.append(source)
+
+    customer_names = {str(source["customer_name"] or "").strip() for source in sources}
+    currencies = {source["currency"] for source in sources}
+    if len(customer_names) != 1 or "" in customer_names or len(currencies) != 1:
+        raise ValueError("只能合并同一客户、同一币种的发货记录")
+    customer_name = next(iter(customer_names))
+    customers = conn.execute(
+        "SELECT * FROM customers WHERE name = ?", (customer_name,)
+    ).fetchall()
+    if len(customers) != 1:
+        raise ValueError("客户不存在")
+    return refs, sources, customers[0]
+
+
+@contextmanager
+def _reconciliation_write_scope(conn, operation):
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    savepoint = f"reconciliation_{operation}_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def next_reconciliation_statement_no(conn, period_start):
+    month = str(period_start or "")[:7].replace("-", "")
+    if not re.fullmatch(r"[0-9]{6}", month):
+        raise ValueError("发货日期无效")
+    prefix = f"DZ-{month}-"
+    count = conn.execute(
+        "SELECT COUNT(*) AS count FROM reconciliation_statements WHERE statement_no LIKE ?",
+        (f"{prefix}%",),
+    ).fetchone()["count"]
+    return f"{prefix}{int(count) + 1:04d}"
+
+
+def _reconciliation_customer_snapshot(customer):
+    return {
+        "customer_name": str(customer["name"] or ""),
+        "customer_address": str(customer["address"] or ""),
+        "customer_phone": str(customer["phone"] or ""),
+        "customer_email": str(customer["email"] or ""),
+        "customer_purchase_contact": str(customer["contact"] or ""),
+        "customer_reconciliation_contact": str(customer["contact"] or ""),
+        "customer_invoice_title": str(customer["invoice_title"] or ""),
+        "customer_tax_id": str(customer["tax_id"] or ""),
+        "customer_registered_address": str(customer["registered_address"] or ""),
+        "customer_registered_phone": str(customer["registered_phone"] or ""),
+        "customer_bank_name": str(customer["bank_name"] or ""),
+        "customer_bank_account": str(customer["bank_account"] or ""),
+        "customer_invoice_email": str(customer["invoice_email"] or ""),
+    }
+
+
+def create_reconciliation_statement(conn, source_refs, created_by):
+    with _reconciliation_write_scope(conn, "create"):
+        _refs, sources, customer = _load_reconciliation_sources(conn, source_refs)
+        profile = conn.execute(
+            "SELECT * FROM reconciliation_company_profile WHERE id = 1"
+        ).fetchone()
+        if profile is None:
+            raise ValueError("供应商信息不存在")
+        period_start = min(str(source["shipped_at"]) for source in sources)
+        period_end = max(str(source["shipped_at"]) for source in sources)
+        currency = sources[0]["currency"]
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        token = secrets.token_urlsafe(32)
+        password = f"{secrets.randbelow(1_000_000):06d}"
+        expires_at = (datetime.utcnow() + timedelta(days=30)).isoformat(timespec="seconds")
+        customer_snapshot = _reconciliation_customer_snapshot(customer)
+        statement_id = conn.execute(
+            """
+            INSERT INTO reconciliation_statements (
+                statement_no, period_start, period_end, customer_id, customer_name,
+                customer_address, customer_phone, customer_email,
+                customer_purchase_contact, customer_reconciliation_contact,
+                customer_invoice_title, customer_tax_id, customer_registered_address,
+                customer_registered_phone, customer_bank_name, customer_bank_account,
+                customer_invoice_email, supplier_company_name, supplier_address,
+                supplier_contact, supplier_phone, supplier_email, currency, tax_rate_ppm,
+                amount_ex_tax_minor, amount_incl_tax_minor, tax_amount_minor,
+                token_digest, password_hash, access_expires_at, created_by, created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      0, 0, 0, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                next_reconciliation_statement_no(conn, period_start), period_start, period_end,
+                int(customer["id"]), customer_snapshot["customer_name"],
+                customer_snapshot["customer_address"], customer_snapshot["customer_phone"],
+                customer_snapshot["customer_email"], customer_snapshot["customer_purchase_contact"],
+                customer_snapshot["customer_reconciliation_contact"], customer_snapshot["customer_invoice_title"],
+                customer_snapshot["customer_tax_id"], customer_snapshot["customer_registered_address"],
+                customer_snapshot["customer_registered_phone"], customer_snapshot["customer_bank_name"],
+                customer_snapshot["customer_bank_account"], customer_snapshot["customer_invoice_email"],
+                str(profile["company_name"] or ""), str(profile["address"] or ""),
+                str(profile["contact"] or ""), str(profile["phone"] or ""), str(profile["email"] or ""),
+                currency, TAX_RATE_PPM, hashlib.sha256(token.encode()).hexdigest(),
+                generate_password_hash(password), expires_at, str(created_by or ""), now, now,
+            ),
+        ).lastrowid
+        totals = {"amount_incl_tax_minor": 0, "amount_ex_tax_minor": 0, "tax_amount_minor": 0}
+        for sort_order, source in enumerate(sources, start=1):
+            amounts = calculate_reconciliation_amounts(
+                int(source["unit_price_minor"]), int(source["quantity"]), currency
+            )
+            for field in totals:
+                totals[field] += amounts[field]
+                if totals[field] > SQLITE_INTEGER_MAX:
+                    raise ValueError("对账金额过大")
+            conn.execute(
+                """
+                INSERT INTO reconciliation_statement_items (
+                    statement_id, sort_order, source_type, source_id, active_claim_key,
+                    shipped_at, delivery_no, order_no, assembly_batch_id,
+                    assembly_drawing_no, manual_id, sku, drawing_no, product_name,
+                    model, unit, quantity, currency, unit_price_incl_tax_minor,
+                    unit_price_ex_tax_scaled, amount_incl_tax_minor, amount_ex_tax_minor,
+                    tax_amount_minor, remark, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    statement_id, sort_order, source["source_type"], int(source["source_id"]),
+                    reconciliation_claim_key(source["source_type"], source["source_id"]),
+                    source["shipped_at"], source["delivery_no"] or "", source["order_no"] or "",
+                    source["assembly_batch_id"], source["assembly_drawing_no"] or "", source["manual_id"],
+                    source["sku"] or "", source["drawing_no"] or "", source["product_name"] or "",
+                    source["model"] or "", source["unit"] or "", int(source["quantity"]), currency,
+                    amounts["unit_price_incl_tax_minor"], amounts["unit_price_ex_tax_scaled"],
+                    amounts["amount_incl_tax_minor"], amounts["amount_ex_tax_minor"],
+                    amounts["tax_amount_minor"], source["remark"] or "", now,
+                ),
+            )
+        conn.execute(
+            """
+            UPDATE reconciliation_statements
+            SET amount_ex_tax_minor = ?, amount_incl_tax_minor = ?, tax_amount_minor = ?
+            WHERE id = ?
+            """,
+            (totals["amount_ex_tax_minor"], totals["amount_incl_tax_minor"], totals["tax_amount_minor"], statement_id),
+        )
+    return {
+        "statement_id": statement_id,
+        "token": token,
+        "password": password,
+        "access_expires_at": expires_at,
+    }
+
+
+def fetch_reconciliation_statement(conn, statement_id):
+    return conn.execute(
+        "SELECT * FROM reconciliation_statements WHERE id = ?", (int(statement_id),)
+    ).fetchone()
+
+
+def fetch_reconciliation_statement_items(conn, statement_id):
+    return conn.execute(
+        """
+        SELECT * FROM reconciliation_statement_items
+        WHERE statement_id = ?
+        ORDER BY sort_order ASC, id ASC
+        """,
+        (int(statement_id),),
+    ).fetchall()
+
+
+def reconciliation_token_digest(raw_token):
+    return hashlib.sha256(str(raw_token or "").encode("utf-8")).hexdigest()
+
+
+def find_reconciliation_by_token(conn, raw_token):
+    raw_token = str(raw_token or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", raw_token):
+        return None
+    return conn.execute(
+        "SELECT * FROM reconciliation_statements WHERE token_digest = ?",
+        (reconciliation_token_digest(raw_token),),
+    ).fetchone()
+
+
+def _reconciliation_datetime(value):
+    try:
+        return datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+
+
+def reconciliation_access_expired(statement, now=None):
+    expires_at = _reconciliation_datetime(statement["access_expires_at"])
+    return expires_at is None or expires_at <= (now or datetime.utcnow())
+
+
+def verify_reconciliation_password(conn, statement_id, password, now=None):
+    current = now or datetime.utcnow()
+    with _reconciliation_write_scope(conn, "verify_password"):
+        statement = fetch_reconciliation_statement(conn, statement_id)
+        if statement is None or statement["status"] == "void":
+            return "unavailable"
+        if reconciliation_access_expired(statement, current):
+            return "unavailable"
+
+        locked_until = _reconciliation_datetime(statement["locked_until"])
+        if locked_until is not None and locked_until > current:
+            return "locked"
+        failed_attempts = int(statement["failed_attempts"] or 0)
+        if locked_until is not None:
+            failed_attempts = 0
+
+        if check_password_hash(statement["password_hash"], str(password or "")):
+            conn.execute(
+                """
+                UPDATE reconciliation_statements
+                SET failed_attempts = 0, locked_until = ''
+                WHERE id = ?
+                """,
+                (int(statement_id),),
+            )
+            return "verified"
+
+        failed_attempts += 1
+        if failed_attempts >= 5:
+            locked_until_value = (current + timedelta(minutes=15)).isoformat(
+                timespec="seconds"
+            )
+            result = "locked"
+        else:
+            locked_until_value = ""
+            result = "invalid"
+        conn.execute(
+            """
+            UPDATE reconciliation_statements
+            SET failed_attempts = ?, locked_until = ?
+            WHERE id = ?
+            """,
+            (failed_attempts, locked_until_value, int(statement_id)),
+        )
+        return result
+
+
+def grant_reconciliation_session_access(statement):
+    session["reconciliation_access"] = {
+        "statement_id": int(statement["id"]),
+        "password_version": int(statement["password_version"]),
+        "verified_until": statement["access_expires_at"],
+    }
+    session["reconciliation_action_nonce"] = secrets.token_urlsafe(24)
+
+
+def has_reconciliation_session_access(statement, now=None):
+    access = session.get("reconciliation_access")
+    current = now or datetime.utcnow()
+    if not isinstance(access, dict):
+        return False
+    try:
+        matches = (
+            int(access.get("statement_id")) == int(statement["id"])
+            and int(access.get("password_version"))
+            == int(statement["password_version"])
+            and str(access.get("verified_until") or "")
+            == str(statement["access_expires_at"])
+        )
+    except (TypeError, ValueError):
+        return False
+    verified_until = _reconciliation_datetime(access.get("verified_until"))
+    return bool(
+        matches
+        and statement["status"] != "void"
+        and verified_until is not None
+        and verified_until > current
+    )
+
+
+def confirm_reconciliation_statement(
+    conn, statement_id, confirmed_name, signature_image, ip_address, user_agent, now=None
+):
+    timestamp = (now or datetime.utcnow()).isoformat(timespec="seconds")
+    with _reconciliation_write_scope(conn, "confirm"):
+        cursor = conn.execute(
+            """
+            UPDATE reconciliation_statements
+            SET status = 'confirmed', confirmed_name = ?, confirmed_at = ?,
+                signature_image = ?, confirmed_ip = ?, confirmed_user_agent = ?,
+                updated_at = ?
+            WHERE id = ? AND status = 'pending' AND access_expires_at > ?
+            """,
+            (
+                str(confirmed_name or "").strip(),
+                timestamp,
+                signature_image,
+                str(ip_address or "")[:200],
+                str(user_agent or "")[:500],
+                timestamp,
+                int(statement_id),
+                timestamp,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def dispute_reconciliation_statement(
+    conn, statement_id, dispute_name, dispute_content, ip_address, user_agent, now=None
+):
+    timestamp = (now or datetime.utcnow()).isoformat(timespec="seconds")
+    with _reconciliation_write_scope(conn, "dispute"):
+        cursor = conn.execute(
+            """
+            UPDATE reconciliation_statements
+            SET status = 'disputed', dispute_name = ?, dispute_content = ?,
+                disputed_at = ?, disputed_ip = ?, disputed_user_agent = ?,
+                updated_at = ?
+            WHERE id = ? AND status = 'pending' AND access_expires_at > ?
+            """,
+            (
+                str(dispute_name or "").strip(),
+                str(dispute_content or "").strip(),
+                timestamp,
+                str(ip_address or "")[:200],
+                str(user_agent or "")[:500],
+                timestamp,
+                int(statement_id),
+                timestamp,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def reset_reconciliation_statement_access(conn, statement_id):
+    with _reconciliation_write_scope(conn, "reset_access"):
+        statement = fetch_reconciliation_statement(conn, statement_id)
+        if statement is None:
+            raise ValueError("对账单不存在")
+        if statement["status"] != "pending":
+            raise ValueError("只有待客户处理的对账单可以重置访问凭证")
+        token = secrets.token_urlsafe(32)
+        password = f"{secrets.randbelow(1_000_000):06d}"
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        expires_at = (datetime.utcnow() + timedelta(days=30)).isoformat(
+            timespec="seconds"
+        )
+        conn.execute(
+            """
+            UPDATE reconciliation_statements
+            SET token_digest = ?, password_hash = ?,
+                password_version = password_version + 1,
+                access_expires_at = ?, failed_attempts = 0,
+                locked_until = '', updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                generate_password_hash(password),
+                expires_at,
+                now,
+                int(statement_id),
+            ),
+        )
+    return {
+        "statement_id": int(statement_id),
+        "token": token,
+        "password": password,
+        "access_expires_at": expires_at,
+    }
+
+
+def void_reconciliation_statement(conn, statement_id, reason, actor):
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("请填写作废原因")
+    with _reconciliation_write_scope(conn, "void"):
+        statement = fetch_reconciliation_statement(conn, statement_id)
+        if statement is None:
+            raise ValueError("对账单不存在")
+        if statement["status"] == "void":
+            raise ValueError("对账单已作废")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            UPDATE reconciliation_statements
+            SET status = 'void', void_reason = ?, voided_by = ?, voided_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (reason, str(actor or ""), now, now, int(statement_id)),
+        )
+        conn.execute(
+            "UPDATE reconciliation_statement_items SET active_claim_key = NULL WHERE statement_id = ?",
+            (int(statement_id),),
+        )
+
+
+def reconciliation_source_is_claimed(conn, source_type, source_id):
+    claim_key = reconciliation_claim_key(source_type, source_id)
+    return conn.execute(
+        """
+        SELECT 1 FROM reconciliation_statement_items
+        WHERE active_claim_key = ? LIMIT 1
+        """,
+        (claim_key,),
+    ).fetchone() is not None
+
+
+def attach_reconciliation_claims(conn, shipped_orders, assembly_batches):
+    claims = {
+        (row["source_type"], int(row["source_id"])): dict(row)
+        for row in conn.execute(
+            """
+            SELECT reconciliation_statement_items.source_type,
+                   reconciliation_statement_items.source_id,
+                   reconciliation_statements.id AS statement_id,
+                   reconciliation_statements.statement_no,
+                   reconciliation_statements.status
+            FROM reconciliation_statement_items
+            JOIN reconciliation_statements
+              ON reconciliation_statements.id = reconciliation_statement_items.statement_id
+            WHERE reconciliation_statement_items.active_claim_key IS NOT NULL
+            """
+        ).fetchall()
+    }
+    for shipment in shipped_orders:
+        shipment["reconciliation_claim"] = claims.get(
+            ("ordinary", int(shipment["id"]))
+        )
+        if shipment["reconciliation_claim"]:
+            shipment["reconciliation_claim"]["status_label"] = (
+                RECONCILIATION_STATUS_LABELS[
+                    shipment["reconciliation_claim"]["status"]
+                ]
+            )
+    for batch in assembly_batches:
+        for item in batch["items"]:
+            item["reconciliation_claim"] = claims.get(
+                ("assembly_item", int(item["id"]))
+            )
+            if item["reconciliation_claim"]:
+                item["reconciliation_claim"]["status_label"] = (
+                    RECONCILIATION_STATUS_LABELS[
+                        item["reconciliation_claim"]["status"]
+                    ]
+                )
+
+
+def assert_reconciliation_sources_mutable(conn, refs):
+    for source_type, source_id, _claim_key in _normalize_reconciliation_source_refs(
+        refs, require_nonempty=False
+    ):
+        if reconciliation_source_is_claimed(conn, source_type, source_id):
+            raise ValueError("该发货记录已加入对账单，不能修改发货日期、数量或价格")
+
+
 def finance_source_refs_for_assembly_batch(conn, batch_id):
     return [
         ("assembly_item", int(row["id"]))
@@ -6065,6 +7398,46 @@ def safe_signature_filename(shipment_id, token):
     return f"{shipment_id}_{safe_token}_{timestamp}.png"
 
 
+def _validate_signature_png_chunks(image_bytes):
+    offset = len(b"\x89PNG\r\n\x1a\n")
+    chunk_index = 0
+    saw_idat = False
+    while offset < len(image_bytes):
+        if len(image_bytes) - offset < 12:
+            raise ValueError("签名图片无法解析")
+        chunk_length = struct.unpack(">I", image_bytes[offset:offset + 4])[0]
+        chunk_type = image_bytes[offset + 4:offset + 8]
+        chunk_end = offset + 12 + chunk_length
+        if chunk_end > len(image_bytes):
+            raise ValueError("签名图片无法解析")
+        if not chunk_type.isalpha() or chunk_type[2] & 0x20:
+            raise ValueError("签名图片无法解析")
+
+        chunk_data = image_bytes[offset + 8:offset + 8 + chunk_length]
+        stored_crc = struct.unpack(">I", image_bytes[chunk_end - 4:chunk_end])[0]
+        calculated_crc = zlib.crc32(chunk_type)
+        calculated_crc = zlib.crc32(chunk_data, calculated_crc) & 0xFFFFFFFF
+        if stored_crc != calculated_crc:
+            raise ValueError("签名图片无法解析")
+
+        if chunk_index == 0:
+            if chunk_type != b"IHDR" or chunk_length != 13:
+                raise ValueError("签名图片无法解析")
+        elif chunk_type == b"IHDR":
+            raise ValueError("签名图片无法解析")
+
+        if chunk_type == b"IDAT":
+            saw_idat = True
+        if chunk_type == b"IEND":
+            if chunk_length != 0 or not saw_idat or chunk_end != len(image_bytes):
+                raise ValueError("签名图片无法解析")
+            return
+
+        offset = chunk_end
+        chunk_index += 1
+    raise ValueError("签名图片无法解析")
+
+
 def decode_signature_image(data_url):
     prefix = "data:image/png;base64,"
     if not data_url.startswith(prefix):
@@ -6077,6 +7450,40 @@ def decode_signature_image(data_url):
         raise ValueError("签名图片必须是 PNG 格式")
     if len(image_bytes) > 2 * 1024 * 1024:
         raise ValueError("签名图片过大")
+    _validate_signature_png_chunks(image_bytes)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PillowImage.DecompressionBombWarning)
+            with PillowImage.open(BytesIO(image_bytes)) as image:
+                if image.format != "PNG":
+                    raise ValueError("签名图片必须是 PNG 格式")
+                width, height, pixel_count = _pillow_image_dimensions(image)
+                if width <= 0 or height <= 0:
+                    raise ValueError("签名图片无法解析")
+                if pixel_count > SIGNATURE_IMAGE_MAX_PIXELS:
+                    raise ValueError("签名图片像素尺寸过大")
+                if int(getattr(image, "n_frames", 1) or 0) != 1:
+                    raise ValueError("签名图片必须是单帧 PNG 格式")
+                image.verify()
+            with PillowImage.open(BytesIO(image_bytes)) as image:
+                if image.format != "PNG" or image.size != (width, height):
+                    raise ValueError("签名图片无法解析")
+                image.load()
+    except ValueError as error:
+        if str(error).startswith("签名图片"):
+            raise
+        raise ValueError("签名图片无法解析") from error
+    except (
+        EOFError,
+        MemoryError,
+        OSError,
+        OverflowError,
+        PillowImage.DecompressionBombError,
+        PillowImage.DecompressionBombWarning,
+        PillowUnidentifiedImageError,
+        SyntaxError,
+    ) as error:
+        raise ValueError("签名图片无法解析") from error
     return image_bytes
 
 
@@ -6968,6 +8375,7 @@ def products_index():
                manuals.product_name,
                manuals.supplier,
                manuals.customer,
+               manuals.unit,
                manuals.updated_at,
                manuals.remark,
                manuals.filename,
@@ -7044,6 +8452,206 @@ def products_index():
         sort=sort,
         direction=direction,
     )
+
+
+def build_product_bom_import_template_workbook():
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "产品导入模板"
+    worksheet.freeze_panes = "A2"
+
+    template_rows = [
+        ["单件产品", None, None, None, None],
+        ["物料编码", "物料名称", "规格型号", "单位", None],
+        ["MAT-SINGLE", "示例单件产品", "PART-SINGLE", "PCS", None],
+        [None, None, None, None, None],
+        ["组装件DZ-30", None, None, None, None],
+        ["物料编码", "物料名称", "规格型号", "单位", "每套数量"],
+        ["MAT-SHARED", "示例共用后盖", "PART-SHARED", "PCS", 1],
+        ["MAT-DZ30", "DZ-30专用面板", "PART-DZ30", "PCS", 2],
+        [None, None, None, None, None],
+        ["组装件DZ-31", None, None, None, None],
+        ["物料编码", "物料名称", "规格型号", "单位", "每套数量"],
+        ["MAT-SHARED", "示例共用后盖", "PART-SHARED", "PCS", 1],
+        ["MAT-DZ31", "DZ-31专用面板", "PART-DZ31", "PCS", 1],
+    ]
+    for row_index, values in enumerate(template_rows, start=1):
+        for column_index, value in enumerate(values, start=1):
+            worksheet.cell(row=row_index, column=column_index, value=value)
+
+    thin_side = Side(style="thin", color="B7C2CC")
+    for row_index in (1, 5, 10):
+        worksheet.merge_cells(
+            start_row=row_index,
+            start_column=1,
+            end_row=row_index,
+            end_column=5,
+        )
+        cell = worksheet.cell(row=row_index, column=1)
+        cell.font = Font(bold=True, color="1A1A1A")
+        cell.fill = PatternFill("solid", fgColor="DCEAF5")
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+        worksheet.row_dimensions[row_index].height = 24
+
+    for row_index in (2, 6, 11):
+        for cell in worksheet[row_index][:5]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="405D78")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = Border(
+                top=thin_side,
+                bottom=thin_side,
+                left=thin_side,
+                right=thin_side,
+            )
+        worksheet.row_dimensions[row_index].height = 24
+
+    for row_index in (3, 7, 8, 12, 13):
+        for cell in worksheet[row_index][:5]:
+            cell.alignment = Alignment(vertical="center")
+            cell.border = Border(bottom=thin_side)
+        worksheet.cell(row=row_index, column=5).number_format = "0"
+
+    for column, width in {
+        "A": 20,
+        "B": 24,
+        "C": 26,
+        "D": 12,
+        "E": 14,
+    }.items():
+        worksheet.column_dimensions[column].width = width
+
+    notes_sheet = workbook.create_sheet("填写说明")
+    notes = [
+        "单件产品：可直接从表头开始，也可保留“单件产品”标题，不需要每套数量。",
+        "组装件产品：每个区块以“组装件+图号”开头，必须填写每套数量。",
+        "规格型号作为产品图号，物料编码作为 SKU。",
+        "相同客户、相同产品图号只保留一条产品，可同时关联多个组装件。",
+        "同一产品重复出现时，物料编码、物料名称和单位必须一致。",
+        "客户在导入页面选择，不需要写入 Excel。",
+        "导入前请删除不需要的示例数据，可上传 .xls、.xlsx 或 .xlsm 文件。",
+    ]
+    notes_sheet["A1"] = "填写说明"
+    notes_sheet["A1"].font = Font(bold=True, size=14, color="1A1A1A")
+    for row_index, note in enumerate(notes, start=2):
+        cell = notes_sheet.cell(row=row_index, column=1, value=note)
+        cell.alignment = Alignment(vertical="top", wrap_text=True)
+        notes_sheet.row_dimensions[row_index].height = 34
+    notes_sheet.column_dimensions["A"].width = 92
+    return workbook
+
+
+def product_bom_import_serializer():
+    return URLSafeSerializer(
+        app.config["SECRET_KEY"], salt="product-bom-import"
+    )
+
+
+def render_product_bom_import_page(
+    *, selected_customer="", errors=None, plan=None, import_token=""
+):
+    with get_db() as conn:
+        customers = get_customer_name_options(conn)
+    return render_template(
+        "product_bom_import.html",
+        customers=customers,
+        selected_customer=selected_customer,
+        errors=errors or [],
+        plan=plan,
+        import_token=import_token,
+    )
+
+
+@app.route("/admin/products/import", methods=["GET", "POST"])
+@permission_required("product_create")
+def import_product_bom():
+    if request.method == "GET":
+        return render_product_bom_import_page()
+
+    customer = request.form.get("customer", "").strip()
+    upload = request.files.get("file")
+    if not customer:
+        return render_product_bom_import_page(
+            selected_customer=customer, errors=["请选择客户"]
+        )
+    if upload is None or not upload.filename:
+        return render_product_bom_import_page(
+            selected_customer=customer, errors=["请选择要导入的 Excel 文件"]
+        )
+
+    rows, errors = parse_product_bom_workbook(upload)
+    plan = None
+    if not errors:
+        with get_db() as conn:
+            plan = build_product_bom_import_plan(conn, customer, rows)
+        errors.extend(plan["errors"])
+    if errors:
+        return render_product_bom_import_page(
+            selected_customer=customer, errors=errors
+        )
+
+    import_token = product_bom_import_serializer().dumps(
+        {"customer": customer, "rows": rows}
+    )
+    return render_product_bom_import_page(
+        selected_customer=customer,
+        plan=plan,
+        import_token=import_token,
+    )
+
+
+@app.route("/admin/products/import-template")
+@permission_required("product_create")
+def download_product_bom_import_template():
+    workbook = build_product_bom_import_template_workbook()
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name="product-bom-import-template.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/admin/products/import/confirm", methods=["POST"])
+@permission_required("product_create")
+def confirm_product_bom_import():
+    import_token = request.form.get("import_token", "").strip()
+    try:
+        payload = product_bom_import_serializer().loads(import_token)
+        customer = str(payload["customer"] or "").strip()
+        rows = payload["rows"]
+        if not customer or not isinstance(rows, list) or not rows:
+            raise ValueError
+    except (BadSignature, KeyError, TypeError, ValueError):
+        flash("导入确认已失效，请重新上传 Excel 预览", "error")
+        return redirect(url_for("import_product_bom"))
+
+    try:
+        with get_db() as conn:
+            result = apply_product_bom_import(
+                conn,
+                customer,
+                rows,
+                current_admin_username(),
+                datetime.utcnow().isoformat(timespec="seconds"),
+            )
+    except ValueError as error:
+        flash(f"导入前数据状态已变化：{error}", "error")
+        return redirect(url_for("import_product_bom"))
+
+    flash(
+        "组装清单导入成功："
+        f"新增产品 {result['new_product_count']} 个，"
+        f"匹配现有产品 {result['matched_product_count']} 个，"
+        f"新增组装关系 {result['new_relationship_count']} 条，"
+        f"更新组装关系 {result['updated_relationship_count']} 条",
+        "success",
+    )
+    return redirect(url_for("products_index"))
 
 
 @app.route("/admin/products/assembly-components/batch", methods=["POST"])
@@ -7498,6 +9106,7 @@ MANUAL_SAFE_COLUMNS = (
     "created_by",
     "updated_by",
     "sku",
+    "unit",
     "barcode",
     "qr_code",
     "default_location_id",
@@ -8093,6 +9702,338 @@ def delete_customer(customer_id):
 
     flash("客户信息已删除", "success")
     return redirect(url_for("admin_customers"))
+
+
+def _store_reconciliation_credentials(credentials):
+    session["reconciliation_credentials"] = {
+        "statement_id": int(credentials["statement_id"]),
+        "token": credentials["token"],
+        "password": credentials["password"],
+        "access_expires_at": credentials["access_expires_at"],
+    }
+
+
+def _take_reconciliation_credentials(statement_id):
+    credentials = session.get("reconciliation_credentials")
+    if not isinstance(credentials, dict):
+        return None
+    if credentials.get("statement_id") != int(statement_id):
+        return None
+    return session.pop("reconciliation_credentials")
+
+
+def _clear_reconciliation_credentials(statement_id):
+    credentials = session.get("reconciliation_credentials")
+    if (
+        isinstance(credentials, dict)
+        and credentials.get("statement_id") == int(statement_id)
+    ):
+        session.pop("reconciliation_credentials", None)
+
+
+def _clear_reconciliation_session_access(statement_id):
+    access = session.get("reconciliation_access")
+    if isinstance(access, dict) and access.get("statement_id") == int(statement_id):
+        session.pop("reconciliation_access", None)
+        session.pop("reconciliation_action_nonce", None)
+
+
+def reconciliation_admin_csrf_token():
+    token = session.get("reconciliation_admin_csrf_token")
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        session["reconciliation_admin_csrf_token"] = token
+    return token
+
+
+def require_reconciliation_admin_csrf():
+    expected_token = session.get("reconciliation_admin_csrf_token", "")
+    submitted_token = request.form.get("reconciliation_csrf_token", "")
+    if not isinstance(expected_token, str) or not isinstance(submitted_token, str):
+        abort(403, description="请求已失效，请刷新页面后重试")
+    try:
+        expected_bytes = expected_token.encode("ascii")
+        submitted_bytes = submitted_token.encode("ascii")
+    except UnicodeEncodeError:
+        abort(403, description="请求已失效，请刷新页面后重试")
+    if not expected_bytes or not submitted_bytes or not secrets.compare_digest(
+        expected_bytes, submitted_bytes
+    ):
+        abort(403, description="请求已失效，请刷新页面后重试")
+
+
+@app.context_processor
+def inject_reconciliation_admin_csrf_helper():
+    return {"reconciliation_admin_csrf_token": reconciliation_admin_csrf_token}
+
+
+@app.route("/admin/reconciliation-statements", methods=["GET"])
+@permission_required("finance_manage")
+def reconciliation_statements():
+    statement_no = request.args.get("statement_no", "").strip()
+    selected_customer = request.args.get("customer", "").strip()
+    selected_status = request.args.get("status", "").strip()
+    selected_date = request.args.get("date", "").strip()
+    conditions = []
+    params = []
+    if statement_no:
+        conditions.append("reconciliation_statements.statement_no LIKE ?")
+        params.append(f"%{statement_no}%")
+    if selected_customer:
+        conditions.append("reconciliation_statements.customer_name = ?")
+        params.append(selected_customer)
+    if selected_status:
+        if selected_status in RECONCILIATION_STATUS_LABELS:
+            conditions.append("reconciliation_statements.status = ?")
+            params.append(selected_status)
+        else:
+            selected_status = ""
+    if selected_date:
+        conditions.append(
+            "reconciliation_statements.period_start <= ? "
+            "AND reconciliation_statements.period_end >= ?"
+        )
+        params.extend((selected_date, selected_date))
+
+    sql = """
+        SELECT reconciliation_statements.*,
+               (
+                   SELECT COUNT(*)
+                   FROM reconciliation_statement_items
+                   WHERE reconciliation_statement_items.statement_id = reconciliation_statements.id
+               ) AS item_count
+        FROM reconciliation_statements
+    """
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY reconciliation_statements.created_at DESC, reconciliation_statements.id DESC"
+    with get_db() as conn:
+        statements = conn.execute(sql, params).fetchall()
+        customers = conn.execute(
+            """
+            SELECT DISTINCT customer_name
+            FROM reconciliation_statements
+            ORDER BY customer_name COLLATE NOCASE
+            """
+        ).fetchall()
+    return render_template(
+        "reconciliation_statements.html",
+        statements=statements,
+        customers=customers,
+        status_labels=RECONCILIATION_STATUS_LABELS,
+        selected_statement_no=statement_no,
+        selected_customer=selected_customer,
+        selected_status=selected_status,
+        selected_date=selected_date,
+    )
+
+
+@app.route("/admin/reconciliation-statements", methods=["POST"])
+@permission_required("finance_manage")
+def create_reconciliation_statement_route():
+    require_reconciliation_admin_csrf()
+    try:
+        source_refs = parse_reconciliation_source_refs(
+            request.form.getlist("source_ref")
+        )
+        with get_db() as conn:
+            credentials = create_reconciliation_statement(
+                conn,
+                source_refs,
+                current_admin_username(),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("reconciliation_statements"))
+    _store_reconciliation_credentials(credentials)
+    flash("对账单已创建，请立即保存一次性访问凭证", "success")
+    return redirect(
+        url_for(
+            "reconciliation_statement_detail",
+            statement_id=credentials["statement_id"],
+        )
+    )
+
+
+@app.route("/admin/reconciliation-statements/<int:statement_id>")
+@permission_required("finance_manage")
+def reconciliation_statement_detail(statement_id):
+    with get_db() as conn:
+        statement = fetch_reconciliation_statement(conn, statement_id)
+        if statement is None:
+            abort(404)
+        items = [dict(row) for row in fetch_reconciliation_statement_items(conn, statement_id)]
+    for item in items:
+        item["unit_price_ex_tax_display"] = format_unit_price_ex_tax_scaled(
+            item["unit_price_ex_tax_scaled"]
+        )
+
+    credentials = _take_reconciliation_credentials(statement_id)
+    public_url = ""
+    if credentials:
+        backend_url = url_for(
+            "reconciliation_statement_detail",
+            statement_id=statement_id,
+            _external=True,
+        )
+        public_url = backend_url.replace(
+            f"/admin/reconciliation-statements/{statement_id}",
+            f"/reconciliation/{credentials['token']}",
+        )
+    return render_template(
+        "reconciliation_statement_detail.html",
+        statement=statement,
+        items=items,
+        credentials=credentials,
+        public_url=public_url,
+        status_labels=RECONCILIATION_STATUS_LABELS,
+        format_reconciliation_amount_minor=format_reconciliation_amount_minor,
+        reconciliation_csrf_token=reconciliation_admin_csrf_token(),
+    )
+
+
+@app.route("/admin/reconciliation-statements/<int:statement_id>/export.xlsx")
+@permission_required("finance_manage")
+def export_reconciliation_statement_xlsx(statement_id):
+    with get_db() as conn:
+        statement = fetch_reconciliation_statement(conn, statement_id)
+        if statement is None:
+            abort(404)
+        items = fetch_reconciliation_statement_items(conn, statement_id)
+
+    signature_path = None
+    signature_name = str(statement["signature_image"] or "")
+    if statement["status"] == "confirmed" and signature_name:
+        safe_signature_name = secure_filename(signature_name)
+        if (
+            safe_signature_name == signature_name
+            and safe_signature_name.lower().endswith(".png")
+        ):
+            candidate = RECONCILIATION_SIGNATURES_DIR / safe_signature_name
+            if candidate.is_file():
+                signature_path = candidate
+
+    try:
+        workbook = build_reconciliation_workbook(
+            statement,
+            items,
+            signature_path=signature_path,
+        )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(
+            url_for(
+                "reconciliation_statement_detail",
+                statement_id=statement_id,
+            )
+        )
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    safe_customer_name = secure_filename(statement["customer_name"]) or "customer"
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=f"{statement['statement_no']}-{safe_customer_name}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route(
+    "/admin/reconciliation-statements/<int:statement_id>/reset-access",
+    methods=["POST"],
+)
+@permission_required("finance_manage")
+def reset_reconciliation_access(statement_id):
+    require_reconciliation_admin_csrf()
+    try:
+        with get_db() as conn:
+            credentials = reset_reconciliation_statement_access(conn, statement_id)
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        _clear_reconciliation_session_access(statement_id)
+        _clear_reconciliation_credentials(statement_id)
+        _store_reconciliation_credentials(credentials)
+        flash("访问凭证已重置，请立即保存新的链接和密码", "success")
+    return redirect(
+        url_for("reconciliation_statement_detail", statement_id=statement_id)
+    )
+
+
+@app.route(
+    "/admin/reconciliation-statements/<int:statement_id>/void",
+    methods=["POST"],
+)
+@permission_required("finance_manage")
+def void_reconciliation_statement_route(statement_id):
+    require_reconciliation_admin_csrf()
+    try:
+        with get_db() as conn:
+            void_reconciliation_statement(
+                conn,
+                statement_id,
+                request.form.get("reason", ""),
+                current_admin_username(),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        _clear_reconciliation_session_access(statement_id)
+        _clear_reconciliation_credentials(statement_id)
+        flash("对账单已作废，关联发货明细已释放", "success")
+    return redirect(
+        url_for("reconciliation_statement_detail", statement_id=statement_id)
+    )
+
+
+@app.route("/admin/reconciliation-company-profile", methods=["GET", "POST"])
+@admin_required
+def reconciliation_company_profile():
+    if request.method == "POST":
+        require_reconciliation_admin_csrf()
+    with get_db() as conn:
+        if request.method == "POST":
+            values = {
+                field: request.form.get(field, "").strip()
+                for field in ("company_name", "address", "contact", "phone", "email")
+            }
+            if not values["company_name"]:
+                flash("请填写公司名称", "error")
+                return redirect(url_for("reconciliation_company_profile"))
+            if values["email"] and not re.fullmatch(
+                r"[^\s@]+@[^\s@]+\.[^\s@]+", values["email"]
+            ):
+                flash("邮箱格式不正确", "error")
+                return redirect(url_for("reconciliation_company_profile"))
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE reconciliation_company_profile
+                SET company_name = ?, address = ?, contact = ?, phone = ?, email = ?,
+                    updated_by = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (
+                    values["company_name"],
+                    values["address"],
+                    values["contact"],
+                    values["phone"],
+                    values["email"],
+                    current_admin_username(),
+                    now,
+                ),
+            )
+            flash("供应商对账资料已保存", "success")
+            return redirect(url_for("reconciliation_company_profile"))
+        profile = conn.execute(
+            "SELECT * FROM reconciliation_company_profile WHERE id = 1"
+        ).fetchone()
+    return render_template(
+        "reconciliation_company_profile.html",
+        profile=profile,
+        reconciliation_csrf_token=reconciliation_admin_csrf_token(),
+    )
 
 
 @app.route("/admin/finance")
@@ -11352,15 +13293,104 @@ INBOUND_TYPES = ["生产入库", "采购入库", "退货入库", "库存调整"]
 OUTBOUND_TYPES = ["销售发货", "生产领料", "样品", "报废", "其他"]
 
 
+def inventory_csrf_token():
+    token = session.get("inventory_csrf_token")
+    if not isinstance(token, str) or not token:
+        token = secrets.token_urlsafe(32)
+        session["inventory_csrf_token"] = token
+    return token
+
+
+def require_inventory_csrf(payload):
+    expected = session.get("inventory_csrf_token", "")
+    submitted = payload.get("csrf_token", "")
+    if not isinstance(submitted, str) or not expected or not secrets.compare_digest(
+        expected.encode("utf-8"), submitted.encode("utf-8")
+    ):
+        abort(403, description="请求已失效，请刷新页面后重试")
+
+
+@app.context_processor
+def inject_inventory_helpers():
+    return {"inventory_csrf_token": inventory_csrf_token}
+
+
+@app.route("/admin/inventory/batch/<mode>", methods=["GET", "POST"])
+@permission_required("warehouse_inventory")
+def inventory_batch(mode):
+    if mode not in {"inbound", "adjust"}:
+        abort(404)
+    serializer = URLSafeTimedSerializer(app.secret_key, salt="inventory-batch-v1")
+    if request.method == "POST":
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="提交格式无效"), 400
+        require_inventory_csrf(payload)
+        token = payload.get("token")
+        if not isinstance(token, str) or len(token) > 2_000_000:
+            return jsonify(error="查询凭证无效，请重新查询"), 400
+        try:
+            snapshot = serializer.loads(token, max_age=7200)
+        except BadSignature:
+            return jsonify(error="页面已过期，请重新查询后提交"), 409
+        if snapshot.get("mode") != mode or snapshot.get("operator") != current_admin_username():
+            return jsonify(error="查询凭证与当前操作不符"), 403
+        try:
+            with get_db() as conn:
+                result = apply_batch(conn, snapshot, payload, hashlib.sha256(token.encode()).hexdigest(),
+                                     current_admin_username(), create_inventory_transaction)
+        except InventoryConflict as error:
+            return jsonify(error=str(error), needs_confirmation=error.needs_confirmation), 409
+        except (ValueError, OverflowError) as error:
+            return jsonify(error=str(error)), 400
+        return jsonify(**result, redirect_url=url_for("inventory_transactions", q=result["batch_no"]))
+    filters = {key: request.args.get(key, "").strip() for key in ("customer", "assembly", "order_no", "q", "location_id")}
+    try:
+        with get_db() as conn:
+            get_or_create_default_location(conn)
+            data = load_batch_data(conn, mode, filters)
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("inventory_batch", mode=mode))
+    token = serializer.dumps(dict(mode=mode, operator=current_admin_username(), rows=data["rows"], nonce=secrets.token_urlsafe(24)))
+    client_data = dict(mode=mode, rows=data["rows"], token=token, csrf_token=inventory_csrf_token())
+    return render_template("inventory_batch.html", mode=mode, filters=filters, client_data=client_data, **data)
+
+
+@app.route("/admin/inventory/locations/quick-create", methods=["POST"])
+@permission_required("warehouse_inventory")
+def inventory_quick_location():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error="提交格式无效"), 400
+    require_inventory_csrf(payload)
+    name, code = payload.get("name", ""), payload.get("code", "")
+    if not isinstance(name, str) or not isinstance(code, str):
+        return jsonify(error="库位名称和编码格式无效"), 400
+    name, code = name.strip(), code.strip()
+    if not name or not code or len(name) > 100 or len(code) > 50:
+        return jsonify(error="请填写库位名称（最多 100 字）和编码（最多 50 字）"), 400
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with get_db() as conn:
+        existing = conn.execute("SELECT enabled FROM warehouse_locations WHERE TRIM(code)=? COLLATE NOCASE", (code,)).fetchone()
+        if existing:
+            message = "库位编码已经存在，请直接选择" if existing["enabled"] else "该编码对应的库位已停用，请到库位管理启用"
+            return jsonify(error=message), 409
+        cursor = conn.execute("INSERT INTO warehouse_locations (name,code,enabled,created_at,updated_at) VALUES (?,?,1,?,?)", (name,code,now,now))
+        location_id = cursor.lastrowid
+    return jsonify(location=dict(id=location_id, name=name, code=code)), 201
+
+
 def inventory_overview_filters():
     query = request.args.get("q", "").strip()
     status = request.args.get("status", "").strip()
+    selected_customer = request.args.get("customer", "").strip()
     if status not in {"", "low", "zero", "positive"}:
         status = ""
-    return query, status
+    return query, status, selected_customer
 
 
-def inventory_product_rows(conn, query="", status=""):
+def inventory_product_rows(conn, query="", status="", selected_customer=""):
     ensure_all_product_inventory_codes(conn)
     manual_projection = ", ".join(
         f"manuals.{column}" for column in MANUAL_SAFE_COLUMNS
@@ -11380,10 +13410,12 @@ def inventory_product_rows(conn, query="", status=""):
             OR manuals.qr_code LIKE ?
             OR manuals.remark LIKE ?
         )
+          AND (? = '' OR TRIM(COALESCE(manuals.customer, '')) = ?)
         GROUP BY manuals.id
         ORDER BY manuals.product_name COLLATE NOCASE ASC, manuals.id ASC
         """,
-        (query, f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"),
+        (query, f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%",
+         selected_customer, selected_customer),
     ).fetchall()
     filtered = []
     for row in rows:
@@ -11468,16 +13500,23 @@ def fetch_recent_inventory_transactions(conn, manual_id, limit=8):
 @app.route("/admin/inventory")
 @permission_required("warehouse_inventory")
 def admin_inventory_overview():
-    query, status = inventory_overview_filters()
+    query, status, selected_customer = inventory_overview_filters()
     with get_db() as conn:
-        products = inventory_product_rows(conn, query, status)
+        products = inventory_product_rows(conn, query, status, selected_customer)
         locations_by_manual = location_stock_map(conn, [row["id"] for row in products])
+        customers = [row["customer"] for row in conn.execute(
+            """SELECT DISTINCT TRIM(customer) AS customer FROM manuals
+               WHERE TRIM(COALESCE(customer, '')) != ''
+               ORDER BY customer COLLATE NOCASE"""
+        ).fetchall()]
     return render_template(
         "inventory_overview.html",
         products=products,
         locations_by_manual=locations_by_manual,
         query=query,
         status=status,
+        selected_customer=selected_customer,
+        customers=customers,
         status_label=inventory_status_label,
         inventory_code=product_inventory_code,
     )
@@ -11486,9 +13525,9 @@ def admin_inventory_overview():
 @app.route("/admin/inventory/export.xlsx")
 @permission_required("warehouse_inventory")
 def export_inventory_overview():
-    query, status = inventory_overview_filters()
+    query, status, selected_customer = inventory_overview_filters()
     with get_db() as conn:
-        products = inventory_product_rows(conn, query, status)
+        products = inventory_product_rows(conn, query, status, selected_customer)
         locations_by_manual = location_stock_map(conn, [row["id"] for row in products])
     workbook = Workbook()
     sheet = workbook.active
@@ -11837,6 +13876,11 @@ def inventory_transactions():
         """
         params = [like, like, like, like, like, like, like]
     with get_db() as conn:
+        row_limit = 300
+        if query and conn.execute("SELECT 1 FROM inventory_batch_receipts WHERE batch_no=?", (query,)).fetchone():
+            where = "WHERE inventory_transactions.remark LIKE ?"
+            params = [f"批次 {query}；%"]
+            row_limit = 500
         rows = conn.execute(
             f"""
             SELECT inventory_transactions.*,
@@ -11849,9 +13893,9 @@ def inventory_transactions():
             LEFT JOIN warehouse_locations AS to_loc ON to_loc.id = inventory_transactions.to_location_id
             {where}
             ORDER BY inventory_transactions.created_at DESC, inventory_transactions.id DESC
-            LIMIT 300
+            LIMIT ?
             """,
-            params,
+            [*params, row_limit],
         ).fetchall()
     return render_template("inventory_transactions.html", transactions=rows, query=query)
 
@@ -12268,9 +14312,29 @@ def create_carton_purchases_from_orders():
     return redirect(url_for("admin_carton_purchases"))
 
 
+@app.route("/admin/shipped-orders/create")
+@permission_required("shipped_manage")
+def shipment_operations():
+    with get_db() as conn:
+        customers = get_shipment_customer_options(conn)
+        unshipped_orders = get_unshipped_order_options(conn)
+    return render_template(
+        "shipment_operations.html",
+        customers=customers,
+        unshipped_orders=unshipped_orders,
+        default_shipped_at=datetime.now().date().isoformat(),
+    )
+
+
 @app.route("/admin/shipped-orders")
-@permission_required("shipped_view")
+@login_required
 def shipped_orders():
+    if not (
+        user_has_permission("shipped_view")
+        or user_has_permission("finance_manage")
+    ):
+        flash("当前账号没有权限访问该模块", "error")
+        return redirect(url_for("admin_index"))
     query = request.args.get("q", "").strip()
     selected_customer = request.args.get("customer", "").strip()
     shipped_at = request.args.get("shipped_at", "").strip()
@@ -12292,21 +14356,18 @@ def shipped_orders():
             shipped_at=shipped_at,
             include_prices=include_prices,
         )
+        if user_has_permission("finance_manage"):
+            attach_reconciliation_claims(conn, shipped_orders, assembly_batches)
         customers = get_shipment_customer_options(conn)
-        unshipped_orders = get_unshipped_order_options(conn)
-        shipment_plans = fetch_open_shipment_plans(conn)
 
     return render_template(
         "shipped_orders.html",
         shipped_orders=shipped_orders,
         assembly_batches=assembly_batches,
-        unshipped_orders=unshipped_orders,
-        shipment_plans=shipment_plans,
         query=query,
         customers=customers,
         selected_customer=selected_customer,
         selected_shipped_at=shipped_at,
-        default_shipped_at=datetime.now().date().isoformat(),
     )
 
 
@@ -12503,6 +14564,12 @@ def edit_assembly_shipment(batch_id):
                     conn, batch_id
                 )
             )
+            batch["reconciliation_claimed"] = any(
+                reconciliation_source_is_claimed(conn, source_type, source_id)
+                for source_type, source_id in finance_source_refs_for_assembly_batch(
+                    conn, batch_id
+                )
+            )
             try:
                 preview = _assembly_edit_preview(conn, batch)
             except (AssemblyDefinitionNotFound, ValueError) as error:
@@ -12551,17 +14618,24 @@ def edit_assembly_shipment(batch_id):
                 abort(404)
             batch = batches[0]
             source_refs = finance_source_refs_for_assembly_batch(conn, batch_id)
-            claimed = any(
+            finance_claimed = any(
                 finance_source_is_claimed(conn, source_type, source_id)
                 for source_type, source_id in source_refs
             )
-            if claimed:
+            reconciliation_claimed = any(
+                reconciliation_source_is_claimed(conn, source_type, source_id)
+                for source_type, source_id in source_refs
+            )
+            if finance_claimed or reconciliation_claimed:
                 existing_quantities = {
                     int(item["manual_id"]): int(item["shipped_quantity"])
                     for item in batch["items"]
                 }
                 if shipped_at != batch["shipped_at"] or overrides != existing_quantities:
-                    assert_finance_sources_mutable(conn, source_refs)
+                    if finance_claimed:
+                        assert_finance_sources_mutable(conn, source_refs)
+                    if reconciliation_claimed:
+                        assert_reconciliation_sources_mutable(conn, source_refs)
                 conn.execute(
                     """
                     UPDATE assembly_shipment_batches
@@ -12574,6 +14648,12 @@ def edit_assembly_shipment(batch_id):
                         batch_id,
                     ),
                 )
+                if reconciliation_claimed and not finance_claimed:
+                    staged_images = stage_assembly_shipment_images(
+                        selected_shipment_images()
+                    )
+                    if staged_images:
+                        save_assembly_shipment_images(conn, batch_id, staged_images)
                 conn.commit()
                 transaction_committed = True
                 return (
@@ -12680,6 +14760,10 @@ def delete_assembly_shipment(batch_id):
                 conn,
                 finance_source_refs_for_assembly_batch(conn, batch_id),
             )
+            assert_reconciliation_sources_mutable(
+                conn,
+                finance_source_refs_for_assembly_batch(conn, batch_id),
+            )
             image_filenames = [
                 image["filename"] for image in batches[0]["images"]
             ]
@@ -12713,7 +14797,7 @@ def create_shipment_from_shipped_page():
 
     if not shipped_at:
         flash("请填写发货时间", "error")
-        return redirect(url_for("shipped_orders"))
+        return redirect(url_for("shipment_operations"))
 
     requested_items = []
     for order_id, shipped_quantity in zip_longest(order_ids, shipped_quantities, fillvalue=""):
@@ -12723,21 +14807,21 @@ def create_shipment_from_shipped_page():
             continue
         if not order_id or not shipped_quantity:
             flash("请选择订单，并填写发货数量", "error")
-            return redirect(url_for("shipped_orders"))
+            return redirect(url_for("shipment_operations"))
         try:
             order_id_value = int(order_id)
             shipped_quantity_value = int(shipped_quantity)
         except ValueError:
             flash("发货数量必须为整数", "error")
-            return redirect(url_for("shipped_orders"))
+            return redirect(url_for("shipment_operations"))
         if shipped_quantity_value <= 0:
             flash("发货数量必须大于 0", "error")
-            return redirect(url_for("shipped_orders"))
+            return redirect(url_for("shipment_operations"))
         requested_items.append((order_id_value, shipped_quantity_value))
 
     if not requested_items:
         flash("请选择订单，并填写发货数量和发货时间", "error")
-        return redirect(url_for("shipped_orders"))
+        return redirect(url_for("shipment_operations"))
 
     now = datetime.utcnow().isoformat(timespec="seconds")
     shipment_ids = []
@@ -12765,17 +14849,17 @@ def create_shipment_from_shipped_page():
             order = orders_by_id.get(order_id_value)
             if order is None:
                 flash("请选择有效的订单", "error")
-                return redirect(url_for("shipped_orders"))
+                return redirect(url_for("shipment_operations"))
             if shipped_quantity_value > remaining_by_order.get(order_id_value, 0):
                 flash("发货数量不能大于未发数量", "error")
-                return redirect(url_for("shipped_orders"))
+                return redirect(url_for("shipment_operations"))
             remaining_by_order[order_id_value] -= shipped_quantity_value
 
         try:
             validate_shipment_inventory(conn, requested_items)
         except ValueError as error:
             flash(str(error), "error")
-            return redirect(url_for("shipped_orders"))
+            return redirect(url_for("shipment_operations"))
 
         for order_id_value, shipped_quantity_value in requested_items:
             order = orders_by_id[order_id_value]
@@ -12831,7 +14915,7 @@ def create_shipment_from_shipped_page():
                 except ValueError as error:
                     conn.rollback()
                     flash(f"发货图片格式不支持：{error}", "error")
-                    return redirect(url_for("shipped_orders"))
+                    return redirect(url_for("shipment_operations"))
             sync_order_shipment_summary(conn, order_id_value, updated_at=now)
     flash(f"已新增 {len(shipment_ids)} 条发货记录", "success")
     return redirect(url_for("shipped_orders"))
@@ -13320,6 +15404,7 @@ def backfill_shipment_price(source_type, source_id):
             return redirect(url_for("shipped_orders"))
         try:
             assert_finance_sources_mutable(conn, [(source_type, source_id)])
+            assert_reconciliation_sources_mutable(conn, [(source_type, source_id)])
         except ValueError as error:
             flash(str(error), "error")
             return redirect(url_for("shipped_orders"))
@@ -13382,7 +15467,10 @@ def edit_shipment(shipment_id):
                 flash("发货数量必须大于 0", "error")
                 return redirect(url_for("edit_shipment", shipment_id=shipment_id))
 
-            claimed = finance_source_is_claimed(conn, "ordinary", shipment_id)
+            claimed = (
+                finance_source_is_claimed(conn, "ordinary", shipment_id)
+                or reconciliation_source_is_claimed(conn, "ordinary", shipment_id)
+            )
             if claimed:
                 if (
                     shipped_quantity_value != int(shipment["shipped_quantity"])
@@ -13390,6 +15478,10 @@ def edit_shipment(shipment_id):
                 ):
                     try:
                         assert_finance_sources_mutable(
+                            conn,
+                            [("ordinary", shipment_id)],
+                        )
+                        assert_reconciliation_sources_mutable(
                             conn,
                             [("ordinary", shipment_id)],
                         )
@@ -13496,6 +15588,7 @@ def delete_shipment(shipment_id):
             return redirect(url_for("shipped_orders"))
         try:
             assert_finance_sources_mutable(conn, [("ordinary", shipment_id)])
+            assert_reconciliation_sources_mutable(conn, [("ordinary", shipment_id)])
         except ValueError as error:
             flash(str(error), "error")
             return redirect(url_for("shipped_orders"))
@@ -13506,6 +15599,229 @@ def delete_shipment(shipment_id):
 
     flash("发货记录已删除", "success")
     return redirect(url_for("shipped_orders"))
+
+
+def _render_public_reconciliation(statement=None, items=(), error="", status=200):
+    view_state = "password"
+    action_nonce = ""
+    if statement is None:
+        view_state = "invalid"
+    elif statement["status"] == "void" or reconciliation_access_expired(statement):
+        view_state = "expired"
+    elif has_reconciliation_session_access(statement):
+        view_state = statement["status"]
+        if view_state == "pending":
+            action_nonce = secrets.token_urlsafe(24)
+            session["reconciliation_action_nonce"] = action_nonce
+    return (
+        render_template(
+            "reconciliation_public.html",
+            view_state=view_state,
+            statement=statement,
+            items=items,
+            error=error,
+            action_nonce=action_nonce,
+            status_labels=RECONCILIATION_STATUS_LABELS,
+            format_reconciliation_amount_minor=format_reconciliation_amount_minor,
+            format_unit_price_ex_tax_scaled=format_unit_price_ex_tax_scaled,
+        ),
+        status,
+    )
+
+
+def _consume_reconciliation_action_nonce(submitted_nonce):
+    expected_nonce = session.pop("reconciliation_action_nonce", "")
+    return bool(
+        expected_nonce
+        and submitted_nonce
+        and secrets.compare_digest(str(expected_nonce), str(submitted_nonce))
+    )
+
+
+@app.route("/reconciliation/<token>", methods=["GET", "POST"])
+def public_reconciliation_statement(token):
+    with get_db() as conn:
+        statement = find_reconciliation_by_token(conn, token)
+        if statement is None:
+            return _render_public_reconciliation(status=404)
+        if statement["status"] == "void" or reconciliation_access_expired(statement):
+            _clear_reconciliation_session_access(statement["id"])
+            return _render_public_reconciliation(statement=statement, status=410)
+
+        authorized = has_reconciliation_session_access(statement)
+        if request.method == "POST" and not authorized:
+            verification = verify_reconciliation_password(
+                conn, statement["id"], request.form.get("password", "")
+            )
+            statement = fetch_reconciliation_statement(conn, statement["id"])
+            if verification == "verified":
+                grant_reconciliation_session_access(statement)
+                return redirect(url_for("public_reconciliation_statement", token=token))
+            if verification == "locked":
+                return _render_public_reconciliation(
+                    statement=statement,
+                    error="密码尝试次数过多，请15分钟后重试",
+                    status=429,
+                )
+            return _render_public_reconciliation(
+                statement=statement, error="临时密码不正确", status=401
+            )
+        if not authorized:
+            return _render_public_reconciliation(statement=statement)
+
+        items = fetch_reconciliation_statement_items(conn, statement["id"])
+        if request.method == "GET":
+            return _render_public_reconciliation(statement=statement, items=items)
+
+        if statement["status"] != "pending":
+            session.pop("reconciliation_action_nonce", None)
+            return _render_public_reconciliation(
+                statement=statement,
+                items=items,
+                error="该对账单已处理，不能重复提交",
+                status=409,
+            )
+
+        action = request.form.get("action", "")
+        nonce_valid = _consume_reconciliation_action_nonce(
+            request.form.get("action_nonce", "")
+        )
+        if not nonce_valid:
+            return _render_public_reconciliation(
+                statement=statement,
+                items=items,
+                error="页面已失效，请重新确认后提交",
+                status=400,
+            )
+
+        if action == "confirm":
+            confirmed_name = request.form.get("confirmed_name", "").strip()
+            if not confirmed_name:
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error="请填写确认人姓名",
+                    status=400,
+                )
+            signature_data = request.form.get("signature_data", "")
+            if not signature_data:
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error="请手写签名",
+                    status=400,
+                )
+            try:
+                image_bytes = decode_signature_image(signature_data)
+            except ValueError as error:
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error=str(error),
+                    status=400,
+                )
+
+            filename = f"reconciliation_{secrets.token_hex(24)}.png"
+            signature_path = RECONCILIATION_SIGNATURES_DIR / filename
+            RECONCILIATION_SIGNATURES_DIR.mkdir(parents=True, exist_ok=True)
+            signature_path.write_bytes(image_bytes)
+            updated = confirm_reconciliation_statement(
+                conn,
+                statement["id"],
+                confirmed_name,
+                filename,
+                client_ip(),
+                request.headers.get("User-Agent", ""),
+            )
+            if not updated:
+                signature_path.unlink(missing_ok=True)
+                statement = fetch_reconciliation_statement(conn, statement["id"])
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error="该对账单已处理，不能重复提交",
+                    status=409,
+                )
+            session.pop("reconciliation_action_nonce", None)
+            statement = fetch_reconciliation_statement(conn, statement["id"])
+            return _render_public_reconciliation(statement=statement, items=items)
+
+        if action == "dispute":
+            dispute_name = request.form.get("dispute_name", "").strip()
+            dispute_content = request.form.get("dispute_content", "").strip()
+            if not dispute_name:
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error="请填写异议人姓名",
+                    status=400,
+                )
+            if not dispute_content:
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error="请填写异议内容",
+                    status=400,
+                )
+            updated = dispute_reconciliation_statement(
+                conn,
+                statement["id"],
+                dispute_name,
+                dispute_content,
+                client_ip(),
+                request.headers.get("User-Agent", ""),
+            )
+            if not updated:
+                statement = fetch_reconciliation_statement(conn, statement["id"])
+                return _render_public_reconciliation(
+                    statement=statement,
+                    items=items,
+                    error="该对账单已处理，不能重复提交",
+                    status=409,
+                )
+            session.pop("reconciliation_action_nonce", None)
+            statement = fetch_reconciliation_statement(conn, statement["id"])
+            return _render_public_reconciliation(statement=statement, items=items)
+
+        return _render_public_reconciliation(
+            statement=statement,
+            items=items,
+            error="提交操作无效",
+            status=400,
+        )
+
+
+@app.route("/reconciliation-signature/<path:filename>")
+def reconciliation_signature_image(filename):
+    safe_name = secure_filename(filename)
+    if safe_name != filename or Path(safe_name).suffix.lower() != ".png":
+        abort(404)
+    with get_db() as conn:
+        statement = conn.execute(
+            "SELECT * FROM reconciliation_statements WHERE signature_image = ?",
+            (safe_name,),
+        ).fetchone()
+    if statement is None:
+        abort(404)
+    backend_access = bool(
+        session.get("admin_logged_in")
+        and current_user()
+        and user_has_permission("finance_manage")
+    )
+    if not backend_access and not has_reconciliation_session_access(statement):
+        abort(404)
+    signature_path = RECONCILIATION_SIGNATURES_DIR / safe_name
+    if not signature_path.is_file():
+        abort(404)
+    response = send_from_directory(
+        RECONCILIATION_SIGNATURES_DIR,
+        safe_name,
+        mimetype="image/png",
+        max_age=0,
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    return response
 
 
 @app.route("/signature-image/<path:filename>")
@@ -14427,6 +16743,10 @@ def delete_order(order_id):
                 conn,
                 finance_source_refs_for_order(conn, order_id),
             )
+            assert_reconciliation_sources_mutable(
+                conn,
+                finance_source_refs_for_order(conn, order_id),
+            )
         except ValueError:
             flash(
                 "该产品或订单包含已进入财务的发货记录，不能删除",
@@ -14460,6 +16780,7 @@ def upload_manual():
     pack_carton_size = request.form.get("pack_carton_size", "").strip()
     pack_weight = request.form.get("pack_weight", "").strip()
     sku = request.form.get("sku", "").strip()
+    unit = request.form.get("unit", "").strip()
     barcode = request.form.get("barcode", "").strip()
     default_location_id = parse_optional_int(request.form.get("default_location_id"))
     min_stock_text = request.form.get("min_stock", "0").strip()
@@ -14504,14 +16825,14 @@ def upload_manual():
             """
             INSERT INTO manuals (
                 drawing_no, product_name, supplier, customer, pack_quantity, pack_carton_size, pack_weight,
-                sku, barcode, default_location_id, min_stock,
+                sku, unit, barcode, default_location_id, min_stock,
                 model, category, version, remark,
                 description_html, filename, original_filename, file_type,
                 unit_price_minor, currency,
                 created_by, updated_by,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 drawing_no,
@@ -14522,6 +16843,7 @@ def upload_manual():
                 pack_carton_size,
                 pack_weight,
                 sku,
+                unit,
                 barcode,
                 default_location_id,
                 min_stock,
@@ -14612,6 +16934,7 @@ def edit_manual(manual_id):
         pack_carton_size = request.form.get("pack_carton_size", "").strip()
         pack_weight = request.form.get("pack_weight", "").strip()
         sku = request.form.get("sku", "").strip()
+        unit = request.form.get("unit", "").strip()
         barcode = request.form.get("barcode", "").strip()
         default_location_id = parse_optional_int(request.form.get("default_location_id"))
         min_stock_text = request.form.get("min_stock", "0").strip()
@@ -14685,7 +17008,7 @@ def edit_manual(manual_id):
                     UPDATE manuals
                     SET drawing_no = ?, product_name = ?, supplier = ?, customer = ?,
                         pack_quantity = ?, pack_carton_size = ?, pack_weight = ?,
-                        sku = ?, barcode = ?, default_location_id = ?, min_stock = ?,
+                        sku = ?, unit = ?, barcode = ?, default_location_id = ?, min_stock = ?,
                         version = ?, remark = ?, unit_price_minor = ?, currency = ?,
                         updated_by = ?, updated_at = ?
                     WHERE id = ?
@@ -14699,6 +17022,7 @@ def edit_manual(manual_id):
                         pack_carton_size,
                         pack_weight,
                         sku,
+                        unit,
                         barcode,
                         default_location_id,
                         min_stock,
@@ -14717,7 +17041,7 @@ def edit_manual(manual_id):
                     UPDATE manuals
                     SET drawing_no = ?, product_name = ?, supplier = ?, customer = ?,
                         pack_quantity = ?, pack_carton_size = ?, pack_weight = ?,
-                        sku = ?, barcode = ?, default_location_id = ?, min_stock = ?,
+                        sku = ?, unit = ?, barcode = ?, default_location_id = ?, min_stock = ?,
                         version = ?, remark = ?, updated_by = ?, updated_at = ?
                     WHERE id = ?
                     """,
@@ -14730,6 +17054,7 @@ def edit_manual(manual_id):
                         pack_carton_size,
                         pack_weight,
                         sku,
+                        unit,
                         barcode,
                         default_location_id,
                         min_stock,
@@ -14942,12 +17267,12 @@ def copy_manual(manual_id):
             """
             INSERT INTO manuals (
                 drawing_no, product_name, supplier, customer, pack_quantity, pack_carton_size, pack_weight,
-                model, category, version, remark,
+                unit, model, category, version, remark,
                 description_html, filename, original_filename, file_type,
                 created_by, updated_by,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 manual["drawing_no"],
@@ -14957,6 +17282,7 @@ def copy_manual(manual_id):
                 manual["pack_quantity"],
                 manual["pack_carton_size"],
                 manual["pack_weight"],
+                manual["unit"],
                 manual["model"],
                 manual["category"],
                 now,
@@ -15003,6 +17329,10 @@ def delete_manual(manual_id):
             abort(404)
         try:
             assert_finance_sources_mutable(
+                conn,
+                finance_source_refs_for_manual(conn, manual_id),
+            )
+            assert_reconciliation_sources_mutable(
                 conn,
                 finance_source_refs_for_manual(conn, manual_id),
             )

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}批量导入产品{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='product-bom-import.css', v=static_version) }}">
+{% endblock %}
+{% block content %}
+  <section class="panel">
+    <div class="product-import-heading">
+      <div>
+        <h1>Excel批量导入产品</h1>
+        <p>可导入普通单件产品，也支持按“组装件DZ-30”“组装件DZ-31”排列的组装清单。</p>
+      </div>
+      <div class="product-import-heading-actions">
+        <a class="button" href="{{ url_for('download_product_bom_import_template') }}">下载导入模板</a>
+        <a class="button secondary" href="{{ url_for('products_index') }}">返回产品列表</a>
+      </div>
+    </div>
+
+    {% if errors %}
+      <div class="message error" role="alert">
+        <strong>Excel 暂时不能导入，请先处理以下问题：</strong>
+        <ul>
+          {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" class="grid-form">
+      <label>
+        客户
+        <select name="customer" required>
+          <option value="">请选择客户</option>
+          {% for customer in customers %}
+            <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Excel 文件
+        <input type="file" name="file" accept=".xls,.xlsx,.xlsm" required>
+      </label>
+      <div class="wide form-actions">
+        <button type="submit">解析并预览</button>
+      </div>
+    </form>
+
+    <div class="hint-box product-import-help">
+      <strong>读取规则</strong>
+      <p>单件产品不需要组装件标题和每套数量；组装区块必须填写每套数量。规格型号作为产品图号，物料编码作为 SKU。</p>
+    </div>
+  </section>
+
+  {% if plan %}
+    <section class="panel">
+      <h2>导入预览</h2>
+      <div class="product-import-stats">
+        <div class="product-import-stat"><span>客户</span><strong>{{ plan.customer }}</strong></div>
+        <div class="product-import-stat"><span>处理结果</span><strong>新增产品 {{ plan.new_product_count }} 个</strong></div>
+        <div class="product-import-stat"><span>处理结果</span><strong>匹配现有产品 {{ plan.matched_product_count }} 个</strong></div>
+        <div class="product-import-stat"><span>组装件</span><strong>组装件 {{ plan.assembly_count }} 个</strong></div>
+        <div class="product-import-stat"><span>组装属性</span><strong>组装关系 {{ plan.relationships|length }} 条</strong></div>
+        <div class="product-import-stat"><span>组装属性</span><strong>新增组装关系 {{ plan.new_relationship_count }} 条</strong></div>
+        <div class="product-import-stat"><span>组装属性</span><strong>更新组装关系 {{ plan.updated_relationship_count }} 条</strong></div>
+      </div>
+      <h3>产品清单</h3>
+      <div class="table-wrap product-import-product-table">
+        <table>
+          <thead>
+            <tr>
+              <th>产品图号</th>
+              <th>物料编码</th>
+              <th>产品名称</th>
+              <th>单位</th>
+              <th>来源行</th>
+              <th>处理方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for product in plan.products %}
+              <tr>
+                <td>{{ product.drawing_no }}</td>
+                <td>{{ product.sku or '-' }}</td>
+                <td>{{ product.product_name }}</td>
+                <td>{{ product.unit or '-' }}</td>
+                <td>第 {{ product.source_rows | join('、') }} 行</td>
+                <td>{% if product.manual_id %}匹配现有产品{% else %}新增产品{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <h3>组装关系</h3>
+      {% if plan.relationships %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>组装图号</th>
+              <th>产品图号</th>
+              <th>物料编码</th>
+              <th>产品名称</th>
+              <th>单位</th>
+              <th>每套数量</th>
+              <th>来源行</th>
+              <th>处理方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for relationship in plan.relationships %}
+              {% set product = plan.products | selectattr('product_key', 'equalto', relationship.product_key) | first %}
+              <tr>
+                <td>{{ relationship.assembly_drawing_no }}</td>
+                <td>{{ product.drawing_no }}</td>
+                <td>{{ product.sku or '-' }}</td>
+                <td>{{ product.product_name }}</td>
+                <td>{{ product.unit or '-' }}</td>
+                <td>{{ relationship.quantity_per_set }}</td>
+                <td>第 {{ relationship.source_rows | join('、') }} 行</td>
+                <td>{% if product.manual_id %}匹配现有产品{% else %}新增产品{% endif %} / {% if relationship.exists %}更新关系{% else %}新增关系{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <p class="product-import-empty">本次只导入单件产品，不创建组装关系。</p>
+      {% endif %}
+      <form method="post" action="{{ url_for('confirm_product_bom_import') }}" class="form-actions">
+        <input type="hidden" name="import_token" value="{{ import_token }}">
+        <button type="submit">确认导入</button>
+        <a class="button secondary" href="{{ url_for('import_product_bom') }}">取消</a>
+      </form>
+    </section>
+  {% endif %}
+{% endblock %}

@@ -933,8 +933,10 @@ class AssemblyPreviewTests(AssemblyAppTestCase):
 
 
 class AssemblyShippingPageTests(AssemblyAppTestCase):
-    def test_shipped_orders_page_contains_order_and_assembly_modes(self):
-        html = self.client.get("/admin/shipped-orders").get_data(as_text=True)
+    def test_shipping_operations_page_contains_order_and_assembly_modes(self):
+        response = self.client.get("/admin/shipped-orders/create")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
 
         self.assertIn("按订单发货", html)
         self.assertIn("按组装件发货", html)
@@ -4489,7 +4491,9 @@ class AssemblyImageLifecycleTests(AssemblyTask7TestCase):
         self.assertEqual(list(app.SHIPMENT_IMAGES_DIR.iterdir()), [])
 
     def test_create_persists_safe_image_metadata_and_file_and_enables_inputs(self):
-        page = self.client.get("/admin/shipped-orders").get_data(as_text=True)
+        response = self.client.get("/admin/shipped-orders/create")
+        self.assertEqual(response.status_code, 200)
+        page = response.get_data(as_text=True)
         self.assertIn('name="images" accept="image/*" multiple', page)
         self.assertNotIn('name="images" accept="image/*" multiple disabled', page)
 

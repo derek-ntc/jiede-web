@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>客户对账确认</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='reconciliation.css') }}">
+</head>
+<body class="reconciliation-public-page">
+  <main class="reconciliation-public-shell">
+    {% if view_state == 'invalid' %}
+      <section class="reconciliation-public-card reconciliation-public-message">
+        <h1>链接无效</h1>
+        <p>该对账链接无效，请联系供应商获取有效链接。</p>
+      </section>
+    {% elif view_state == 'expired' %}
+      <section class="reconciliation-public-card reconciliation-public-message">
+        <h1>链接已失效</h1>
+        <p>该对账单已过期或作废，请联系供应商。</p>
+      </section>
+    {% elif view_state == 'password' %}
+      <section class="reconciliation-public-card reconciliation-password-card">
+        <p class="reconciliation-public-eyebrow">客户对账确认</p>
+        <h1>请输入6位临时密码</h1>
+        <p>密码由供应商与对账链接分别发送。</p>
+        {% if error %}<p class="reconciliation-public-error" role="alert">{{ error }}</p>{% endif %}
+        <form method="post" autocomplete="off">
+          <input type="hidden" name="action" value="verify">
+          <label for="reconciliation-password">临时密码</label>
+          <input id="reconciliation-password" name="password" type="password"
+                 inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autofocus>
+          <button type="submit">查看对账单</button>
+        </form>
+      </section>
+    {% else %}
+      <header class="reconciliation-public-header">
+        <div>
+          <p class="reconciliation-public-eyebrow">{{ statement.supplier_company_name }}</p>
+          <h1>客户对账单</h1>
+        </div>
+        <span class="reconciliation-status status-{{ statement.status }}">
+          {{ status_labels.get(statement.status, statement.status) }}
+        </span>
+      </header>
+
+      {% if error %}<p class="reconciliation-public-error" role="alert">{{ error }}</p>{% endif %}
+
+      <section class="reconciliation-public-card">
+        <dl class="reconciliation-public-meta">
+          <div><dt>对账单号</dt><dd>{{ statement.statement_no }}</dd></div>
+          <div><dt>客户</dt><dd>{{ statement.customer_name }}</dd></div>
+          <div><dt>账期</dt><dd>{{ statement.period_start }} 至 {{ statement.period_end }}</dd></div>
+          <div><dt>币种</dt><dd>{{ statement.currency }}</dd></div>
+        </dl>
+      </section>
+
+      <section class="reconciliation-public-card">
+        <h2>对账明细</h2>
+        <div class="reconciliation-public-table-wrap">
+          <table class="reconciliation-public-table">
+            <thead>
+              <tr>
+                <th>序号</th><th>送货日期</th><th>送货单号</th><th>采购订单号</th>
+                <th>物料编码</th><th>物料名称</th><th>规格型号</th><th>单位</th>
+                <th>数量</th><th>不含税单价</th><th>含税单价</th>
+                <th>不含税金额</th><th>含税金额</th><th>备注</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in items %}
+                <tr>
+                  <td>{{ loop.index }}</td>
+                  <td>{{ item.shipped_at }}</td>
+                  <td>{{ item.delivery_no }}</td>
+                  <td>{{ item.order_no }}</td>
+                  <td>{{ item.sku or item.drawing_no }}</td>
+                  <td>{{ item.product_name }}</td>
+                  <td>{{ item.model }}</td>
+                  <td>{{ item.unit }}</td>
+                  <td>{{ item.quantity }}</td>
+                  <td>{{ format_unit_price_ex_tax_scaled(item.unit_price_ex_tax_scaled) }}</td>
+                  <td>{{ format_reconciliation_amount_minor(item.unit_price_incl_tax_minor, item.currency) }}</td>
+                  <td>{{ format_reconciliation_amount_minor(item.amount_ex_tax_minor, item.currency) }}</td>
+                  <td>{{ format_reconciliation_amount_minor(item.amount_incl_tax_minor, item.currency) }}</td>
+                  <td>{{ item.remark }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr>
+                <th colspan="11">合计</th>
+                <td>{{ format_reconciliation_amount_minor(statement.amount_ex_tax_minor, statement.currency) }}</td>
+                <td>{{ format_reconciliation_amount_minor(statement.amount_incl_tax_minor, statement.currency) }}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </section>
+
+      {% if view_state == 'pending' %}
+        <section class="reconciliation-public-actions">
+          <form method="post" class="reconciliation-public-card reconciliation-confirm-form" data-terminal-form data-confirm-message="确认提交签名并确认本对账单？提交后不可修改。">
+            <input type="hidden" name="action" value="confirm">
+            <input type="hidden" name="action_nonce" value="{{ action_nonce }}">
+            <input type="hidden" name="signature_data" value="">
+            <h2>确认对账单</h2>
+            <label for="confirmed-name">确认人姓名</label>
+            <input id="confirmed-name" name="confirmed_name" maxlength="100" required>
+            <label>手写签名</label>
+            <canvas class="reconciliation-signature-canvas" width="640" height="220" aria-label="手写签名区域"></canvas>
+            <div class="reconciliation-signature-controls">
+              <button type="button" class="secondary" data-clear-signature>清除签名</button>
+              <button type="submit">签名并确认</button>
+            </div>
+          </form>
+
+          <form method="post" class="reconciliation-public-card reconciliation-dispute-form" data-terminal-form data-confirm-message="确认提交异议？提交后不可修改。">
+            <input type="hidden" name="action" value="dispute">
+            <input type="hidden" name="action_nonce" value="{{ action_nonce }}">
+            <h2>提交异议</h2>
+            <label for="dispute-name">异议人姓名</label>
+            <input id="dispute-name" name="dispute_name" maxlength="100" required>
+            <label for="dispute-content">异议内容</label>
+            <textarea id="dispute-content" name="dispute_content" rows="5" maxlength="2000" required></textarea>
+            <button type="submit" class="danger">提交异议</button>
+          </form>
+        </section>
+      {% elif view_state == 'confirmed' %}
+        <section class="reconciliation-public-card reconciliation-public-message">
+          <h2>已确认</h2>
+          <p>{{ statement.confirmed_name }} 已于 {{ statement.confirmed_at }} 完成确认。</p>
+          {% if statement.signature_image %}
+            <img class="reconciliation-public-signature" src="{{ url_for('reconciliation_signature_image', filename=statement.signature_image) }}" alt="客户确认签名">
+          {% endif %}
+        </section>
+      {% elif view_state == 'disputed' %}
+        <section class="reconciliation-public-card reconciliation-public-message">
+          <h2>已提交异议</h2>
+          <p><strong>提交人：</strong>{{ statement.dispute_name }}</p>
+          <p class="reconciliation-dispute-content">{{ statement.dispute_content }}</p>
+        </section>
+      {% endif %}
+    {% endif %}
+  </main>
+  {% if view_state == 'pending' %}
+    <script src="{{ url_for('static', filename='reconciliation.js') }}" defer></script>
+  {% endif %}
+</body>
+</html>

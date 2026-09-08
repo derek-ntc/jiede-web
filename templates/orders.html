@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}生产订单{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='business-lists.css', v=static_version) }}">
+{% endblock %}
 {% block content %}
   {% macro sort_link(label, key) -%}
     {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
@@ -7,7 +10,7 @@
       {{ label }}{% if sort == key %}<span>{{ "↑" if direction == "asc" else "↓" }}</span>{% endif %}
     </a>
   {%- endmacro %}
-  <div class="order-page">
+  <div class="order-page erp-page">
   <section class="page-head">
     <div>
       <h1>生产订单</h1>
@@ -19,30 +22,44 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel erp-query-panel" aria-labelledby="order-query-title">
+    <h2 id="order-query-title">查询条件</h2>
+    <form class="erp-query-form" method="get">
+      <div class="erp-filter-field erp-keyword-field">
+        <label for="order-query">关键词</label>
+        <input id="order-query" type="search" name="q" value="{{ query }}" placeholder="订单号 / 组装图号 / 产品图号 / 名称等" data-auto-submit-search>
+      </div>
+      <div class="erp-filter-field">
+        <label for="order-customer">客户</label>
+        <select id="order-customer" name="customer" aria-label="客户筛选" onchange="this.form.submit()">
+          <option value="">全部客户</option>
+          {% for customer in customers %}
+            <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <input type="hidden" name="sort" value="{{ sort }}">
+      <input type="hidden" name="direction" value="{{ direction }}">
+      <div class="erp-query-actions">
+        <button type="submit">搜索</button>
+        <a class="button secondary" href="{{ url_for('admin_orders') }}">清空</a>
+        <span>支持产品名称、供应商、库存及备注搜索</span>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel erp-list-panel">
     <div class="section-head">
       <div class="section-title-actions">
-        <h2>生产订单</h2>
+        <h2>订单清单</h2>
         {% if can_manage_orders %}
           <a class="button" href="{{ url_for('new_order') }}">新增订单</a>
         {% endif %}
       </div>
       <div class="section-actions">
-        <form class="search compact-search" method="get">
-          <input type="search" name="q" value="{{ query }}" placeholder="搜索订单号、组装图号、产品图号、产品名称、客户、供应商、库存、备注、纸箱、最近发货" data-auto-submit-search>
-          <select name="customer" aria-label="客户筛选" onchange="this.form.submit()">
-            <option value="">客户：全部</option>
-            {% for customer in customers %}
-              <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
-            {% endfor %}
-          </select>
-          <input type="hidden" name="sort" value="{{ sort }}">
-          <input type="hidden" name="direction" value="{{ direction }}">
-          <button type="submit">搜索</button>
-          {% if query or selected_customer %}
-            <a class="button secondary" href="{{ url_for('admin_orders') }}">清除</a>
-          {% endif %}
-        </form>
+        {% if can_manage_warehouse_inventory %}
+          <a class="button secondary" href="{{ url_for('inventory_batch', mode='inbound', customer=selected_customer) }}">批量成品入库</a>
+        {% endif %}
         {% if can_manage_orders %}
           <a class="button secondary" href="{{ url_for('import_orders') }}">Excel导入订单</a>
         {% endif %}
@@ -185,13 +202,21 @@
                 {% endif %}
               </td>
               <td data-label="发货时间">{{ order.shipped_at_display or "-" }}</td>
-              <td data-label="备注">{{ order.remark or "-" }}</td>
+              <td data-label="备注">
+                {% if order.remark %}
+                  <details class="erp-text-details">
+                    <summary><span>{{ order.remark }}</span></summary>
+                    <div>{{ order.remark }}</div>
+                  </details>
+                {% else %}-{% endif %}
+              </td>
               <td class="actions" data-label="操作">
                 {% if can_manage_orders %}
                   <div class="action-buttons">
                     <a class="button" href="{{ url_for('edit_order', order_id=order.id) }}">修改</a>
                     {% if can_manage_warehouse_inventory %}
                       <a class="button secondary" href="{{ url_for('inventory_inbound', order_id=order.id, manual_id=order.manual_id, order_no=order.order_no) }}">成品入库</a>
+                      <a class="button secondary" href="{{ url_for('inventory_batch', mode='inbound', customer=order.customer, order_no=order.order_no) }}">整单入库</a>
                     {% endif %}
                     <form method="post" action="{{ url_for('delete_order', order_id=order.id) }}" onsubmit="return confirm('确定删除这条产品订单明细吗？');">
                       <button class="danger" type="submit">删除</button>
@@ -240,7 +265,7 @@
 
     (() => {
       const wrap = document.querySelector(".order-table-wrap");
-      const table = document.querySelector(".order-table");
+      const table = wrap?.querySelector(".order-table");
       const stickyHead = document.querySelector("[data-table-sticky-head]");
       const topScrollbar = document.querySelector("[data-table-scrollbar-top]");
       if (!wrap || !table || window.matchMedia("(max-width: 760px)").matches) return;
@@ -270,8 +295,8 @@
             if (!cell) return;
             width = Math.max(width, cell.scrollWidth + 24);
           });
-            const minWidth = index === 0 && document.querySelector("[data-order-select-all]") ? 44 : 56;
-            const nextWidth = `${Math.max(minWidth, Math.min(width, maxAutoWidths[index] || 140))}px`;
+          const minWidth = index === 0 && document.querySelector("[data-order-select-all]") ? 44 : 56;
+          const nextWidth = `${Math.max(minWidth, Math.min(width, maxAutoWidths[index] || 140))}px`;
           header.style.width = nextWidth;
           if (mainCols[index]) {
             mainCols[index].style.width = nextWidth;
@@ -290,7 +315,7 @@
 
       const syncScrollbarState = () => {
         syncHeaderWidths();
-      });
+      };
 
       window.addEventListener("resize", syncScrollbarState);
       if (typeof ResizeObserver !== "undefined") {

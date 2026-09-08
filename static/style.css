@@ -205,6 +205,12 @@ a:hover {
 }
 
 .topbar {
+  /* Keep the shared header independent from individual page themes. */
+  --primary: #0f7581;
+  color: #111827;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
   position: sticky;
   top: 0;
   z-index: 10;
@@ -229,12 +235,13 @@ a:hover {
   font-weight: 700;
 }
 
-.brand::before {
-  width: 12px;
-  height: 28px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #1c8b96, var(--primary));
-  content: "";
+.brand-logo {
+  display: block;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 48px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 0.75px rgba(255, 255, 255, 0.65));
 }
 
 .topbar nav {
@@ -2940,6 +2947,30 @@ tr:last-child td {
 
 .inventory-panel .compact-search {
   gap: 6px;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.inventory-panel .inventory-customer-filter {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.inventory-customer-filter select {
+  min-width: 130px;
+  max-width: 240px;
+}
+
+.inventory-table .inventory-product-customer {
+  display: block;
 }
 
 .inventory-panel .compact-search input,
@@ -5525,3 +5556,10 @@ label {
   color: #17324d;
   border-bottom-color: #2e6fa3;
 }
+
+.inventory-location-dialog { width: min(420px, 88vw); border: 2px solid #415a70; border-radius: 8px; padding: 22px; color: #000; background: #fff; }
+.inventory-location-dialog::backdrop { background: #0006; }
+.inventory-location-dialog label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; color: #000; }
+.inventory-location-dialog input { border: 1px solid #415a70; color: #000; }
+.inventory-location-dialog [data-location-error] { color: #000; font-weight: 600; }
+.inventory-location-dialog button { color: #000; }

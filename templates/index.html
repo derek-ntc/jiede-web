@@ -1,5 +1,8 @@
 {% extends "base.html" %}
-{% block title %}利万产品技术参数资料{% endblock %}
+{% block title %}产品列表{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='product-list.css', v=static_version) }}">
+{% endblock %}
 {% block content %}
   {% macro sort_link(label, key) -%}
     {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
@@ -8,43 +11,58 @@
     </a>
   {%- endmacro %}
   <div class="product-page">
-    <section class="page-head index-head">
-      <div>
-        <h1>利万产品技术参数资料</h1>
-        <p>按产品图号、产品名称、组装图号、供应商或客户搜索。</p>
-      </div>
-      <div class="head-stat">
-        <strong>{{ manuals|length }}</strong>
-        <span>{% if query %}条搜索结果{% else %}条资料{% endif %}</span>
-      </div>
-      {% if can_create_products %}
-        <div class="index-actions">
-          <a class="button" href="{{ url_for('admin_index') }}#new-product">新增产品</a>
+    <header class="product-page-heading">
+      <h1>产品列表</h1>
+      <span>产品资料 / 产品清单</span>
+    </header>
+    <section class="product-query-panel" aria-labelledby="product-query-title">
+      <h2 id="product-query-title">查询条件</h2>
+      <form class="product-query-form" method="get" aria-label="产品查询">
+        <div class="product-filter-field product-keyword-field">
+          <label for="product-query">关键词</label>
+          <input id="product-query" type="search" name="q" value="{{ query }}" placeholder="产品图号 / 名称 / 组装图号" data-auto-submit-search>
         </div>
-      {% endif %}
-      <form class="search" method="get">
-        <input type="search" name="q" value="{{ query }}" placeholder="搜索图号、名称、组装图号、供应商、客户" data-auto-submit-search>
-        <select name="supplier" aria-label="供应商分类" onchange="this.form.submit()">
-          <option value="">供应商分类：全部</option>
+        <div class="product-filter-field">
+          <label for="product-supplier">供应商</label>
+          <select id="product-supplier" name="supplier" aria-label="供应商分类" onchange="this.form.submit()">
+          <option value="">全部供应商</option>
           {% for supplier in suppliers %}
             <option value="{{ supplier }}" {% if supplier == selected_supplier %}selected{% endif %}>{{ supplier }}</option>
           {% endfor %}
-        </select>
-        <select name="customer" aria-label="客户搜索" onchange="this.form.submit()">
-          <option value="">客户：全部</option>
+          </select>
+        </div>
+        <div class="product-filter-field">
+          <label for="product-customer">客户</label>
+          <select id="product-customer" name="customer" aria-label="客户搜索" onchange="this.form.submit()">
+          <option value="">全部客户</option>
           {% for customer in customers %}
             <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
           {% endfor %}
-        </select>
+          </select>
+        </div>
         <input type="hidden" name="sort" value="{{ sort }}">
         <input type="hidden" name="direction" value="{{ direction }}">
-        <button type="submit">搜索</button>
-        {% if query or selected_supplier or selected_customer %}
-          <a class="button secondary" href="{{ url_for('products_index') }}">清除</a>
-        {% endif %}
+        <div class="product-query-actions">
+          <button type="submit"><span aria-hidden="true" class="product-search-icon"></span>搜索</button>
+          <a class="button secondary" href="{{ url_for('products_index') }}"><span aria-hidden="true">×</span>清空</a>
+          <span class="product-query-hint">支持图号、名称、组装图号及材料信息查询</span>
+        </div>
       </form>
     </section>
 
+    <section class="product-list-panel" aria-labelledby="product-list-title">
+      <header class="product-list-heading">
+        <div class="product-list-title">
+          <h2 id="product-list-title">清单</h2>
+          <span>{{ manuals|length }} 条{% if query or selected_supplier or selected_customer %}查询结果{% else %}产品资料{% endif %}</span>
+        </div>
+        {% if can_create_products %}
+          <div class="product-list-actions">
+            <a class="button secondary" href="{{ url_for('import_product_bom') }}">Excel批量导入产品</a>
+            <a class="button" href="{{ url_for('admin_index') }}#new-product"><span aria-hidden="true">＋</span>新增产品</a>
+          </div>
+        {% endif %}
+      </header>
     {% if can_edit_products %}
       <form
         id="product-assembly-batch-form"
@@ -53,7 +71,7 @@
         action="{{ url_for('batch_set_product_assembly_components') }}"
         data-product-assembly-batch
       >
-        <span class="empty-text" data-product-selection-count>已选择 0 个产品</span>
+        <span class="product-selection-count" data-product-selection-count aria-live="polite">已选择 0 个产品</span>
         <label class="inline-date-field">
           组装图号
           <input type="text" name="assembly_drawing_no" placeholder="例如 ASM-100" required>
@@ -73,17 +91,19 @@
 
     <div class="table-wrap product-table-wrap">
       <table class="product-table">
+        <caption class="product-sr-only">产品资料清单，可按列标题排序，拖动表头边缘调整列宽。</caption>
         <colgroup>
-          {% if can_edit_products %}<col style="width: 48px;">{% endif %}
-          <col style="width: 150px;">
-          <col style="width: 170px;">
+          {% if can_edit_products %}<col style="width: 42px;">{% endif %}
+          <col style="width: 145px;">
           <col style="width: 130px;">
-          <col style="width: 130px;">
-          <col style="width: 220px;">
-          <col style="width: 120px;">
+          <col style="width: 100px;">
+          <col style="width: 100px;">
+          <col style="width: 62px;">
           <col style="width: 180px;">
-          <col style="width: 300px;">
-          <col style="width: 240px;">
+          <col style="width: 124px;">
+          <col style="width: 160px;">
+          <col style="width: 180px;">
+          <col style="width: 220px;">
         </colgroup>
       <thead>
         <tr>
@@ -99,6 +119,7 @@
           <th>{{ sort_link("产品名称", "product_name") }}</th>
           <th>{{ sort_link("供应商", "supplier") }}</th>
           <th>{{ sort_link("客户", "customer") }}</th>
+          <th>单位</th>
           <th>所属组装件</th>
           <th>{{ sort_link("修改时间", "updated_at") }}</th>
           <th>{{ sort_link("备注", "remark") }}</th>
@@ -114,28 +135,41 @@
                 <input type="checkbox" name="manual_id" value="{{ manual.id }}" form="product-assembly-batch-form" data-product-row-select aria-label="选择产品 {{ manual.drawing_no or manual.product_name }} {{ manual.product_name }}">
               </td>
             {% endif %}
-            <td data-label="产品图号">{{ manual.drawing_no or "-" }}</td>
-            <td data-label="产品名称">{{ manual.product_name }}</td>
-            <td data-label="供应商">{{ manual.supplier or "-" }}</td>
-            <td data-label="客户">{{ manual.customer or "-" }}</td>
+            <td data-label="产品图号"><a class="product-drawing-link product-cell-text" href="{{ url_for('manual_detail', manual_id=manual.id) }}" title="{{ manual.drawing_no or '-' }}">{{ manual.drawing_no or "-" }}</a></td>
+            <td data-label="产品名称"><span class="product-wrap-text">{{ manual.product_name }}</span></td>
+            <td data-label="供应商"><span class="product-wrap-text">{{ manual.supplier or "-" }}</span></td>
+            <td data-label="客户"><span class="product-wrap-text">{{ manual.customer or "-" }}</span></td>
+            <td data-label="单位"><span class="product-cell-text">{{ manual.unit or "-" }}</span></td>
             <td data-label="所属组装件">
               {% set assembly_components = assembly_components_by_manual.get(manual.id, []) %}
               {% if assembly_components %}
-                <div class="product-assembly-list">
-                  {% for component in assembly_components %}
-                    <div>{{ component.assembly_drawing_no }} × {{ component.quantity_per_set }}</div>
-                  {% endfor %}
-                </div>
+                  <details class="product-cell-details">
+                    <summary><span>{{ assembly_components[0].assembly_drawing_no }} × {{ assembly_components[0].quantity_per_set }}</span>{% if assembly_components|length > 1 %}<small>+{{ assembly_components|length - 1 }}</small>{% endif %}</summary>
+                    <div class="product-assembly-list">
+                      {% for component in assembly_components %}
+                        <div>{{ component.assembly_drawing_no }} × {{ component.quantity_per_set }}</div>
+                      {% endfor %}
+                    </div>
+                  </details>
               {% else %}
                 <span class="empty-text">未设置</span>
               {% endif %}
             </td>
-            <td data-label="修改时间">{{ manual.updated_at | datetime }}</td>
-            <td data-label="备注">{{ manual.remark or "-" }}</td>
+            <td data-label="修改时间"><span class="product-cell-text product-date" title="{{ manual.updated_at | datetime }}">{{ manual.updated_at | datetime }}</span></td>
+            <td data-label="备注">
+              {% if manual.remark %}
+                <details class="product-cell-details">
+                  <summary><span>{{ manual.remark }}</span></summary>
+                  <div class="product-expanded-text">{{ manual.remark }}</div>
+                </details>
+              {% else %}<span class="empty-text">-</span>{% endif %}
+            </td>
             <td data-label="材料信息">
               {% set materials = materials_by_manual.get(manual.id, []) %}
               {% if materials %}
-                <div class="product-material-list">
+                <details class="product-cell-details">
+                  <summary><span>{{ materials[0].material or '-' }} / {{ materials[0].thickness or '-' }} / {{ materials[0].surface_type or '-' }}</span>{% if materials|length > 1 %}<small>+{{ materials|length - 1 }}</small>{% endif %}</summary>
+                  <div class="product-material-list">
                   {% for material in materials %}
                     <div class="product-material-line">
                       <span>{{ material.material or "-" }}</span>
@@ -144,7 +178,8 @@
                       <span>{{ material.supplier or "-" }}</span>
                     </div>
                   {% endfor %}
-                </div>
+                  </div>
+                </details>
               {% else %}
                 <span class="empty-text">暂无材料</span>
               {% endif %}
@@ -169,12 +204,14 @@
           </tr>
         {% else %}
           <tr>
-            <td colspan="{% if can_edit_products %}10{% else %}9{% endif %}" class="empty">暂无产品资料</td>
+            <td colspan="{% if can_edit_products %}11{% else %}10{% endif %}" class="empty">暂无产品资料</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+      <footer class="product-list-footer"><span>共 {{ manuals|length }} 条</span><span>点击图号查看详情 · 展开箭头查看完整内容 · 拖动表头边缘调整列宽</span></footer>
+    </section>
   </div>
 {% endblock %}
 {% block scripts %}

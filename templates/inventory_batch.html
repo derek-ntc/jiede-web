@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}{{ '批量入库' if mode == 'inbound' else '批量库存调整' }}{% endblock %}
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='business-lists.css', v=static_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='inventory-batch.css', v=static_version) }}">
+{% endblock %}
+{% block content %}
+<div class="inventory-page erp-page inventory-batch-page">
+  <section class="page-head">
+    <div><h1>{{ '批量入库' if mode == 'inbound' else '批量库存调整' }}</h1>
+      <p>{{ '按客户、组装图号或订单号找到产品，逐行填写本次入库数量。' if mode == 'inbound' else '按产品和库位填写盘点后的实际数量，系统按差额生成流水。' }}</p></div>
+    <div class="head-stat"><strong>{{ rows|length }}</strong><span>条明细</span></div>
+  </section>
+  <nav class="inventory-tabs">
+    <a href="{{ url_for('admin_inventory_overview') }}">库存总览</a>
+    <a class="{{ 'active-nav-link' if mode == 'inbound' }}" href="{{ url_for('inventory_batch', mode='inbound', customer=filters.customer) }}">批量入库</a>
+    <a class="{{ 'active-nav-link' if mode == 'adjust' }}" href="{{ url_for('inventory_batch', mode='adjust', customer=filters.customer) }}">批量调整</a>
+    <a href="{{ url_for('inventory_inbound') }}">扫码入库</a>
+    <a href="{{ url_for('inventory_outbound') }}">扫码出库</a>
+    <a href="{{ url_for('inventory_locations') }}">库位管理</a>
+    <a href="{{ url_for('inventory_transactions') }}">库存流水</a>
+  </nav>
+  <section class="panel erp-query-panel">
+    <h2>查询条件</h2>
+    <form method="get" class="batch-query" id="batch-query">
+      <label>客户<select name="customer" id="batch-customer"><option value="">全部客户</option>{% for item in customers %}<option {% if item == filters.customer %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></label>
+      <label>组装图号<input name="assembly" list="batch-assemblies" value="{{ filters.assembly }}" placeholder="可留空，支持单件产品"><datalist id="batch-assemblies">{% for item in assemblies %}<option value="{{ item }}">{% endfor %}</datalist></label>
+      <label>订单号<input name="order_no" list="batch-orders" value="{{ filters.order_no }}" placeholder="输入或选择完整订单号"><datalist id="batch-orders">{% for item in orders %}<option value="{{ item }}">{% endfor %}</datalist></label>
+      <label>产品查找<input type="search" name="q" value="{{ filters.q }}" placeholder="图号 / 名称 / 物料编码"></label>
+      {% if mode == 'adjust' %}<label>库位筛选<select name="location_id"><option value="">全部启用库位</option>{% for loc in locations %}<option value="{{ loc.id }}" {% if filters.location_id == loc.id|string %}selected{% endif %}>{{ loc.code }} / {{ loc.name }}</option>{% endfor %}</select></label>{% endif %}
+      <div class="batch-query-actions"><button type="submit">查询产品</button><a class="button secondary" href="{{ url_for('inventory_batch', mode=mode) }}">清空</a></div>
+    </form>
+  </section>
+  <section class="panel erp-list-panel">
+    {% if query_error %}<p class="batch-notice" role="alert">{{ query_error }}</p>{% endif %}
+    <div class="section-head"><h2>{{ '入库明细' if mode == 'inbound' else '盘点明细' }}</h2><span id="batch-selected-count">已选 0 行</span></div>
+    <p class="batch-notice">{% if mode == 'adjust' %}填写的是所选库位的实际数量，不是增减数量。更换库位不会搬移原库位库存；调整不会修改订单数量和入库进度。{% elif order_mode %}已关联订单：保存后同步更新对应订单明细的已入库数量；超过剩余数量时需再次确认。{% else %}当前按产品入库，不自动关联生产订单。需要同步订单入库进度时，请先选择订单号。{% endif %}</p>
+    <div class="batch-tools">
+      <label>统一库位<select id="batch-default-location" data-batch-default-location><option value="">请选择库位</option>{% for loc in locations %}<option value="{{ loc.id }}">{{ loc.code }} / {{ loc.name }}</option>{% endfor %}</select></label>
+      <button type="button" class="secondary" data-apply-location>应用到勾选行</button>
+      <button type="button" class="secondary" data-open-location>＋ 新增库位</button>
+      {% if mode == 'inbound' %}
+      <label>组装套数<input id="batch-set-quantity" type="number" min="1" max="2147483647" step="1" placeholder="例如 100"></label>
+      <button type="button" class="secondary" data-apply-sets>按每套用量填写勾选行</button>
+      {% endif %}
+    </div>
+    <form id="inventory-batch-form">
+      <div class="table-wrap"><table class="inventory-table batch-table">
+        <thead><tr><th><input type="checkbox" data-select-all aria-label="选择全部明细"></th><th>产品图号 / 名称</th><th>客户</th><th>组装号 / 每套用量</th>{% if order_mode %}<th>订单数量</th><th>已入库 / 剩余</th>{% endif %}<th>总库存</th><th>库位</th><th>该库位库存</th><th>{{ '本次入库' if mode == 'inbound' else '实际数量' }}</th></tr></thead>
+        <tbody>{% for row in rows %}<tr data-row-key="{{ row.key }}">
+          <td><input type="checkbox" data-row-select aria-label="选择 {{ row.drawing_no or row.product_name }}"></td>
+          <td><strong>{{ row.drawing_no or '-' }}</strong><span class="batch-product-name">{{ row.product_name }}</span>{% if row.order_id %}<small>{{ row.order_no }} · 明细 {{ row.order_id }}</small>{% endif %}</td>
+          <td>{{ row.customer or '未指定' }}</td>
+          <td>{{ row.assembly or '-' }}{% if row.quantity_per_set %}<span class="batch-product-name">每套 {{ row.quantity_per_set }} 件</span>{% endif %}</td>
+          {% if order_mode %}<td>{{ row.ordered_quantity }}</td><td>{{ row.received }} / {{ [row.ordered_quantity - row.received, 0]|max }}</td>{% endif %}
+          <td>{{ row.total_stock }}</td>
+          <td><select data-batch-location aria-label="{{ row.drawing_no or row.product_name }}的库位"><option value="">请选择</option>{% for loc in locations %}<option value="{{ loc.id }}" {% if row.location_id == loc.id %}selected{% endif %}>{{ loc.code }} / {{ loc.name }}</option>{% endfor %}</select></td>
+          <td data-location-stock>{{ row.balances.get(row.location_id|string, 0) }}</td>
+          <td><input data-batch-quantity type="number" min="{{ 1 if mode == 'inbound' else 0 }}" max="2147483647" step="1" aria-label="{{ row.drawing_no or row.product_name }}的{{ '入库数量' if mode == 'inbound' else '实际数量' }}" value="{% if mode == 'adjust' %}{{ row.balances.get(row.location_id|string, 0) }}{% elif order_mode and row.ordered_quantity > row.received %}{{ row.ordered_quantity - row.received }}{% endif %}"></td>
+        </tr>{% else %}<tr><td colspan="10" class="empty">没有匹配明细，请调整查询条件。</td></tr>{% endfor %}</tbody>
+      </table></div>
+      <div class="batch-footer">
+        <label>{{ '调整原因（必填）' if mode == 'adjust' else '入库备注（选填）' }}<textarea name="remark" maxlength="500" rows="2" {% if mode == 'adjust' %}required{% endif %} placeholder="{{ '例如：9月成品盘点修正' if mode == 'adjust' else '例如：本次生产完工入库' }}"></textarea></label>
+        <p id="batch-message" role="status" aria-live="polite"></p>
+        <button type="submit" id="batch-submit">{{ '确认批量入库' if mode == 'inbound' else '确认批量调整' }}</button>
+        <span>仅提交勾选行；整批校验通过后保存并生成库存流水。</span>
+      </div>
+    </form>
+  </section>
+  {% include 'inventory_location_creator.html' %}
+</div>
+<script id="inventory-batch-data" type="application/json">{{ client_data|tojson }}</script>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='inventory-batch-core.js', v=static_version) }}" defer></script>
+<script src="{{ url_for('static', filename='inventory-locations.js', v=static_version) }}" defer></script>
+<script src="{{ url_for('static', filename='inventory-batch.js', v=static_version) }}" defer></script>
+{% endblock %}

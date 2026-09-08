@@ -1,0 +1,384 @@
+.reconciliation-page {
+  color: #000;
+}
+
+.reconciliation-head-actions,
+.reconciliation-actions,
+.reconciliation-copy-row,
+.reconciliation-void-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.reconciliation-panel,
+.reconciliation-page .panel,
+.reconciliation-page .erp-query-panel {
+  border-color: #202020;
+}
+
+.reconciliation-filter-form {
+  grid-template-columns: minmax(180px, 1.2fr) minmax(150px, 1fr) minmax(130px, .8fr) minmax(150px, .9fr) auto;
+}
+
+.reconciliation-table {
+  width: 100%;
+  min-width: 1060px;
+  border-collapse: collapse;
+  color: #000;
+  font-size: 13px;
+}
+
+.reconciliation-table th,
+.reconciliation-table td {
+  border: 1px solid #2d2d2d;
+  padding: 7px 8px;
+  vertical-align: middle;
+}
+
+.reconciliation-table th {
+  background: #e7e7e7;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.reconciliation-detail-table {
+  min-width: 1540px;
+}
+
+.reconciliation-detail-table tfoot th,
+.reconciliation-detail-table tfoot td {
+  background: #ededed;
+  font-weight: 700;
+}
+
+.reconciliation-status {
+  display: inline-block;
+  padding: 3px 7px;
+  border: 1px solid #222;
+  border-radius: 2px;
+  background: #f2f2f2;
+  color: #000;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.reconciliation-status.status-confirmed { background: #dceedd; }
+.reconciliation-status.status-disputed { background: #fff0c7; }
+.reconciliation-status.status-void { background: #e2e2e2; }
+
+.reconciliation-credentials {
+  border: 2px solid #111 !important;
+  background: #fff8d8;
+}
+
+.reconciliation-warning {
+  margin: 0 0 12px;
+  font-weight: 700;
+}
+
+.reconciliation-credentials > label {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-weight: 700;
+}
+
+.reconciliation-copy-row input {
+  flex: 1 1 420px;
+  min-width: 0;
+  color: #000;
+  border-color: #222;
+}
+
+.reconciliation-meta-grid,
+.reconciliation-snapshot-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid #333;
+  border-left: 1px solid #333;
+}
+
+.reconciliation-meta-grid > div,
+.reconciliation-snapshot-list > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  border-right: 1px solid #333;
+  border-bottom: 1px solid #333;
+}
+
+.reconciliation-meta-grid dt,
+.reconciliation-meta-grid dd,
+.reconciliation-snapshot-list dt,
+.reconciliation-snapshot-list dd {
+  margin: 0;
+  padding: 7px 8px;
+}
+
+.reconciliation-meta-grid dt,
+.reconciliation-snapshot-list dt {
+  background: #e7e7e7;
+  border-right: 1px solid #333;
+  font-weight: 700;
+}
+
+.reconciliation-meta-grid .wide { grid-column: 1 / -1; }
+
+.reconciliation-snapshot-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.reconciliation-snapshot-list {
+  grid-template-columns: 1fr;
+}
+
+.reconciliation-actions {
+  align-items: end;
+}
+
+.reconciliation-actions h2 {
+  flex-basis: 100%;
+  margin-bottom: 4px;
+}
+
+.reconciliation-create-form {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 24px;
+  margin: -6px 0 10px;
+}
+
+.reconciliation-source-cell,
+.reconciliation-row-select {
+  min-width: 92px;
+  font-size: 12px;
+}
+
+.reconciliation-source-cell label,
+.reconciliation-row-select label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #000;
+}
+
+.reconciliation-row-select {
+  display: grid;
+  gap: 3px;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid #333;
+}
+
+.reconciliation-void-form {
+  margin-left: auto;
+}
+
+.reconciliation-void-form input {
+  width: min(340px, 55vw);
+  border-color: #222;
+}
+
+@media (max-width: 900px) {
+  .reconciliation-filter-form,
+  .reconciliation-snapshot-columns,
+  .reconciliation-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .reconciliation-meta-grid .wide { grid-column: auto; }
+  .reconciliation-void-form { margin-left: 0; }
+}
+
+.reconciliation-public-page {
+  margin: 0;
+  min-height: 100vh;
+  background: #f1f3f5;
+  color: #171717;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.reconciliation-public-shell {
+  width: min(1440px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 48px;
+}
+
+.reconciliation-public-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.reconciliation-public-header h1,
+.reconciliation-public-card h1,
+.reconciliation-public-card h2 { margin: 0 0 12px; }
+
+.reconciliation-public-eyebrow { margin: 0 0 5px; color: #555; }
+
+.reconciliation-public-card {
+  margin-bottom: 16px;
+  padding: 20px;
+  border: 1px solid #bbb;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+}
+
+.reconciliation-password-card {
+  width: min(420px, calc(100% - 32px));
+  margin: 12vh auto 0;
+}
+
+.reconciliation-password-card form,
+.reconciliation-public-actions form {
+  display: grid;
+  gap: 10px;
+}
+
+.reconciliation-public-page input,
+.reconciliation-public-page textarea,
+.reconciliation-public-page button {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #777;
+  border-radius: 4px;
+  font: inherit;
+}
+
+.reconciliation-public-page button {
+  border-color: #164b2d;
+  background: #176b3a;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.reconciliation-public-page button.secondary { background: #fff; color: #222; border-color: #777; }
+.reconciliation-public-page button.danger { background: #8d2c23; border-color: #76231c; }
+
+.reconciliation-public-error {
+  padding: 10px 12px;
+  border: 1px solid #b53127;
+  background: #fff0ef;
+  color: #7a1d17;
+}
+
+.reconciliation-public-meta {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+}
+
+.reconciliation-public-meta div { min-width: 0; }
+.reconciliation-public-meta dt { color: #666; font-size: 13px; }
+.reconciliation-public-meta dd { margin: 4px 0 0; font-weight: 650; overflow-wrap: anywhere; }
+
+.reconciliation-public-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.reconciliation-public-table {
+  width: 100%;
+  min-width: 1280px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.reconciliation-public-table th,
+.reconciliation-public-table td {
+  padding: 8px;
+  border: 1px solid #888;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.reconciliation-public-table th { background: #eee; }
+.reconciliation-public-table tfoot { font-weight: 700; }
+
+.reconciliation-public-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.reconciliation-signature-canvas {
+  box-sizing: border-box;
+  width: 100%;
+  height: 220px;
+  border: 1px solid #555;
+  background: #fff;
+  touch-action: none;
+}
+
+.reconciliation-signature-controls {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 10px;
+}
+
+.reconciliation-public-signature {
+  display: block;
+  max-width: min(100%, 520px);
+  max-height: 200px;
+  margin-top: 14px;
+  border: 1px solid #aaa;
+}
+
+.reconciliation-dispute-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 720px) {
+  .reconciliation-public-shell { width: min(100% - 20px, 1440px); padding-top: 16px; }
+  .reconciliation-public-header { align-items: flex-start; }
+  .reconciliation-public-meta,
+  .reconciliation-public-actions { grid-template-columns: 1fr; }
+  .reconciliation-public-card { padding: 14px; }
+  .reconciliation-password-card { width: auto; margin-top: 7vh; }
+  .reconciliation-public-table { min-width: 1280px; }
+}
+
+@media (max-width: 760px) {
+  .reconciliation-page .reconciliation-table-wrap {
+    overflow-x: auto;
+    overflow-y: auto;
+    border: 1px solid #202020;
+    background: #fff;
+  }
+
+  .reconciliation-page .reconciliation-table {
+    display: table;
+  }
+
+  .reconciliation-page .reconciliation-table thead {
+    display: table-header-group;
+  }
+
+  .reconciliation-page .reconciliation-table tbody {
+    display: table-row-group;
+  }
+
+  .reconciliation-page .reconciliation-table tfoot {
+    display: table-footer-group;
+  }
+
+  .reconciliation-page .reconciliation-table tr {
+    display: table-row;
+  }
+
+  .reconciliation-page .reconciliation-table th,
+  .reconciliation-page .reconciliation-table td {
+    display: table-cell;
+  }
+}

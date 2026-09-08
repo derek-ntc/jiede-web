@@ -1,0 +1,433 @@
+/* SAP-inspired list styling; scoped to orders and shipping subpages. */
+body:is(.page-admin_orders, .page-shipped_orders, .page-shipment_operations) {
+  --primary: #0a6ebd;
+  --primary-dark: #085a9b;
+  --text: #32363a;
+  --muted: #626d77;
+  --line: #d5dadd;
+  --panel: #fff;
+  background: #f3f5f7;
+  font-family: Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+:is(.page-admin_orders, .page-shipped_orders, .page-shipment_operations) .container {
+  width: calc(100% - 32px);
+  max-width: 1800px;
+  margin: 14px auto 24px;
+}
+
+.erp-page:is(.order-page, .shipped-page) {
+  width: 100%;
+  min-width: 0;
+  margin-left: 0;
+}
+.erp-page [hidden] { display: none !important; }
+
+.erp-page .shipment-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 24px;
+  margin-bottom: 14px;
+  padding: 0 14px;
+  border: 1px solid #d5dadd;
+  background: #fff;
+}
+.erp-page .shipment-subnav a {
+  padding: 11px 4px 9px;
+  border-bottom: 3px solid transparent;
+  color: #515c66;
+  text-decoration: none;
+  font-size: 14px;
+}
+.erp-page .shipment-subnav a[aria-current="page"] {
+  border-bottom-color: #0a6ebd;
+  color: #075c9b;
+  font-weight: 600;
+}
+.erp-page .shipment-subnav a:hover { color: #075c9b; }
+.erp-page .shipment-subnav a:focus-visible { outline: 2px solid #0a6ebd; outline-offset: -2px; }
+
+.erp-page .page-head {
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.erp-page .page-head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.erp-page .page-head p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.erp-page .head-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  width: auto;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.erp-page .head-stat strong { font-size: 20px; font-weight: 500; color: #075c9b; }
+.erp-page .head-stat span { margin: 0; font-size: 12px; }
+
+.erp-page .panel {
+  min-width: 0;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #cbd3d9;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.erp-page .section-head {
+  gap: 12px;
+  min-height: 34px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.erp-page :is(.section-head h2, .erp-query-panel h2) {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.erp-page :is(.section-actions, .section-title-actions, .toolbar-actions) {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.erp-page .shipped-toolbar { flex: 0 1 auto; }
+
+.erp-page .erp-query-panel {
+  padding: 0;
+  border: 1px solid #cbd3d9;
+  border-radius: 2px;
+  margin-bottom: 14px;
+}
+
+.erp-page .erp-query-panel > h2 {
+  padding: 10px 14px;
+  border-bottom: 1px solid #e1e5e8;
+  background: #f8f9fa;
+}
+
+.erp-query-form {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.5fr) minmax(220px, 1fr);
+  gap: 14px 32px;
+  margin: 0;
+  padding: 18px 18px 14px;
+}
+
+.erp-shipped-query { grid-template-columns: minmax(280px, 1.5fr) repeat(2, minmax(220px, 1fr)); }
+.erp-filter-field { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 8px; }
+.erp-filter-field > label { margin: 0; color: #515c66; font-weight: 400; text-align: right; }
+.erp-query-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 66px; }
+.erp-query-actions > span { margin-left: 6px; color: var(--muted); font-size: 12px; }
+
+.erp-page :is(input:not([type="checkbox"]):not([type="hidden"]), select, textarea) {
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid #aebbc5;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: none;
+  font: inherit;
+}
+
+.erp-page :is(input, select, textarea):focus {
+  border-color: #0a6ebd;
+  outline: 1px solid #0a6ebd;
+  outline-offset: -1px;
+  box-shadow: none;
+}
+
+.erp-page :is(button, .button) {
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid #0a6ebd;
+  border-radius: 3px;
+  background: #0a6ebd;
+  color: #fff;
+  box-shadow: none;
+  font: inherit;
+  font-weight: 400;
+}
+
+.erp-page :is(button, .button):hover { background: #085a9b; }
+.erp-page :is(button, .button).secondary { border-color: #a8bac8; background: #fff; color: #075c9b; }
+.erp-page :is(button, .button).secondary:hover { background: #edf4f9; }
+.erp-page :is(button, .button).danger { border-color: #d7b2b2; background: #fff; color: #aa3030; }
+.erp-page :is(button, .button).danger:hover { background: #fff0f0; }
+.erp-page :is(input, select, textarea, button):disabled { opacity: .6; cursor: not-allowed; }
+.erp-page input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; accent-color: #0a6ebd; }
+.erp-page :is(a, button, summary, input, select, textarea):focus-visible { outline: 2px solid #0a6ebd; outline-offset: 2px; }
+
+.erp-page .shipped-export-form { margin: 0; }
+.erp-page .shipped-export-bar {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid #dce2e7;
+  background: #f5f7f9;
+  font-size: 12px;
+}
+.erp-page .shipped-export-bar > .empty-text { margin-right: auto; }
+.erp-page .inline-date-field { font-size: 12px; font-weight: 400; }
+.erp-page .empty-text { font-size: 12px; }
+
+.erp-page .table-wrap {
+  min-width: 0;
+  border: 1px solid #cbd3d9;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+}
+.erp-page .order-table-wrap { max-height: calc(100vh - 335px); min-height: 220px; }
+.erp-page :is(.order-table, .shipped-order-table) { min-width: 100%; }
+.erp-page table { font-size: 13px; }
+.erp-page table th {
+  padding: 8px;
+  border-right: 1px solid #d5dadd;
+  border-bottom: 1px solid #bfcbd4;
+  background: #eef2f5;
+  color: #475560;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  vertical-align: middle;
+}
+.erp-page table td {
+  height: 38px;
+  padding: 6px 8px;
+  border-right: 1px solid #e0e4e7;
+  border-bottom: 1px solid #e0e4e7;
+  background: #fff;
+  font-size: 13px;
+  line-height: 1.35;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+.erp-page table tr:nth-child(even) td { background: #fafbfd; }
+.erp-page table tr:hover td { background: #f0f6fb; }
+.erp-page table tr:has(.shipment-select:checked) td { background: #e8f3fc; }
+.erp-page table tr.order-completed td { color: #7b8790; background: #eef1f3; }
+.erp-page table td.due-warning { background: #fff3d6; color: #8a5a11; font-weight: 600; }
+.erp-page table td.due-overdue { color: #b32626; font-weight: 600; }
+.erp-page table .sort-link { color: inherit; font-weight: inherit; }
+.erp-page table .sort-link.active { color: #075c9b; }
+.erp-page table td:is([data-label="组装套数"], [data-label="订单数量"], [data-label="已发货数量"], [data-label="未发数量"], [data-label="材料库存情况"], [data-label="发货数量"], [data-label="发货单价"], [data-label="发货金额"], [data-label="每套用量"], [data-label="计算数量"], [data-label="实际数量"], [data-label="实际发货数量"], [data-label="订单未发"], [data-label="计划数量"], [data-label="计划剩余"], [data-label="实际发货"]) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.erp-page .inventory-stock-cell { justify-content: flex-end; }
+.erp-page .action-buttons { gap: 4px 8px; }
+.erp-page :is(.order-table .action-buttons, .shipment-edit-cell) :is(button, .button) {
+  min-height: 24px;
+  padding: 1px 0;
+  border-color: transparent;
+  background: transparent;
+  color: #075c9b;
+  font-size: 12px;
+}
+.erp-page .order-table .action-buttons .danger { color: #aa3030; }
+.erp-page .status-pill { padding: 2px 6px; font-size: 11px; border-radius: 3px; box-shadow: none; }
+.erp-page .signature-details { min-width: 0; border-radius: 2px; box-shadow: none; }
+.erp-page .signature-details summary { font-size: 12px; }
+.erp-page .signature-details-body { padding: 8px; border-radius: 2px; background: #f8fafc; }
+.erp-page .signature-details-body :is(input, textarea) { width: 100%; }
+.erp-page .erp-text-details summary { display: flex; align-items: center; gap: 4px; cursor: pointer; color: #526778; }
+.erp-page .erp-text-details summary::before { content: "▸"; flex: 0 0 auto; color: #0a6ebd; }
+.erp-page .erp-text-details[open] summary::before { content: "▾"; }
+.erp-page .erp-text-details summary span { display: block; max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.erp-page .erp-text-details > div { padding-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.erp-page .shipment-price-form { grid-template-columns: minmax(62px, 1fr) 66px; }
+.erp-page .shipment-price-form button { grid-column: 1 / -1; min-height: 26px; padding: 2px 6px; font-size: 12px; }
+.erp-page .shipment-price-form :is(input, select) { width: 100%; font-size: 12px; padding: 3px 5px; }
+
+.erp-page :is(.assembly-history, .assembly-history-list, .shipment-plan-stack) { min-width: 0; }
+.erp-page :is(.shipment-plan-card, .assembly-history-card) { min-width: 0; padding: 10px; border-radius: 2px; background: #fafbfd; box-shadow: none; }
+.erp-page .shipment-plan-card > form:empty { display: none; }
+.erp-page :is(.shipment-plan-head strong, .assembly-history-card-head strong) { font-size: 13px; }
+.erp-page .assembly-history-head h3 { font-size: 14px; }
+.erp-page .assembly-history-meta { font-size: 12px; }
+.erp-page .assembly-history-card-head { gap: 10px; }
+.erp-page .shipment-plan-actions { justify-content: flex-start; gap: 8px 12px; }
+.erp-page .shipment-plan-actions label { flex: 1 1 150px; max-width: 240px; font-size: 12px; }
+.erp-page .shipment-plan-actions input { width: 100%; }
+.erp-page .compact-number-input { width: 90px; max-width: 100%; text-align: right; }
+.erp-page .summary-strip { gap: 6px 12px; padding: 6px 8px; border-radius: 2px; background: #eef2f5; font-size: 12px; }
+.erp-page .shipment-mode-tabs { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #d5dadd; }
+.erp-page .shipment-mode-tab:not(.active) { background: #fff; border-color: #a8bac8; color: #075c9b; }
+.erp-page .shipment-create-form { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 16px; }
+.erp-page .shipment-create-lines { grid-column: 1 / -1; gap: 8px; }
+.erp-page .shipment-create-line { grid-template-columns: minmax(0, 1fr) 130px auto; gap: 8px; }
+.erp-page .shipment-create-remark { grid-column: 1 / 3; }
+.erp-page .shipment-create-images { grid-column: 2 / 4; }
+.erp-page .shipment-create-actions { grid-column: 3; justify-self: end; }
+.erp-page :is(.shipment-create-form, .assembly-shipment-form) label { color: #515c66; font-size: 12px; font-weight: 400; }
+.erp-page .shipment-create-form :is(input, select) { width: 100%; }
+.erp-page .assembly-shipment-form { gap: 12px 16px; }
+.erp-page .assembly-warning { border-radius: 2px; font-size: 12px; }
+
+@media (max-width: 1100px) {
+  .erp-query-form { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; }
+  .erp-shipped-query .erp-keyword-field { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+  :is(.page-admin_orders, .page-shipped_orders, .page-shipment_operations) .container { width: calc(100% - 20px); margin-top: 12px; }
+  .erp-page .page-head { flex-direction: row; }
+  .erp-page .page-head p { display: none; }
+  .erp-page .panel { padding: 10px; }
+  .erp-page .erp-query-panel { padding: 0; }
+  .erp-query-form { grid-template-columns: 1fr; padding: 14px 10px; }
+  .erp-query-actions > span { display: none; }
+  .erp-page .section-actions { justify-content: flex-start; }
+  .erp-page .shipped-export-bar > .empty-text { flex-basis: 100%; }
+  .erp-page .shipped-export-bar .inline-date-field { width: 100%; }
+  .erp-page .table-wrap { border: 0; max-height: none; min-height: 0; overflow: visible; background: transparent; }
+  .erp-page table { width: 100% !important; min-width: 0; }
+  .erp-page table tbody { display: grid; gap: 10px; }
+  .erp-page table tbody tr { border: 1px solid #cbd3d9; border-radius: 2px; box-shadow: none; }
+  .erp-page table td {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 36px;
+    padding: 7px 9px;
+    border-right: 0;
+    grid-template-columns: 80px minmax(0, 1fr);
+    gap: 8px;
+  }
+  .erp-page table td::before { text-align: left; color: #66727d; font-size: 12px; font-weight: 400; }
+  .erp-page table td.empty { display: block; text-align: center; }
+  .erp-page table td.empty::before { display: none; }
+  .erp-page table td.actions::before { grid-row: auto; }
+  .erp-page table .action-buttons { flex-direction: row; flex-wrap: wrap; width: auto; }
+  .erp-page table .action-buttons :is(.button, button, form) { width: auto; }
+  .erp-page table .shipment-select-cell { display: grid; text-align: left; }
+  .erp-page .shipment-select-cell .shipment-select { margin: 0; }
+  .erp-page input[type="checkbox"] { width: 18px; height: 18px; }
+  .erp-page .inventory-stock-cell { justify-content: flex-end; }
+  .erp-page :is(.signature-details, .signature-compact, .shipment-price-cell) { min-width: 0; }
+  .erp-page .shipment-price-cell > :not(:first-child) { grid-column: 2; }
+  .erp-page .shipment-price-cell > strong { grid-column: 2; }
+  .erp-page .shipment-price-form { text-align: left; }
+  .erp-page .shipment-edit-cell > .button { justify-self: start; }
+  .erp-page .signature-compact-row { flex-wrap: wrap; }
+  .erp-page .shipment-plan-actions label { max-width: none; flex-basis: 100%; }
+  .erp-page .shipment-plan-head-right { justify-content: flex-start; }
+  .erp-page .shipment-plan-table td { width: 100%; }
+  .erp-page .shipment-plan-table input[type="hidden"] + input { grid-column: 2; }
+  .erp-page .shipment-mode-tabs { display: flex; }
+  .erp-page .shipment-create-form { grid-template-columns: 1fr; }
+  .erp-page .shipment-create-form > * { grid-column: 1 / -1; }
+  .erp-page .shipment-create-line { grid-template-columns: minmax(0, 1fr) auto; }
+  .erp-page .shipment-create-line .shipment-create-order { grid-column: 1 / -1; }
+  .erp-page .shipment-create-line .shipment-create-quantity { grid-column: 1; }
+  .erp-page .shipment-create-actions { justify-self: start; }
+  .erp-page .assembly-shipment-form { grid-template-columns: 1fr; }
+  .erp-page .assembly-shipment-form > * { grid-column: 1 / -1; }
+  .erp-page .assembly-history-card-head { align-items: flex-start; }
+  .erp-page table .assembly-preview-item { padding: 0; margin: 0; background: #fff; }
+  .erp-page .assembly-preview-table td::before { margin-bottom: 0; }
+  .erp-page .assembly-preview-table input[type="number"] { width: 100%; }
+  .erp-page .assembly-history-table tr { padding: 0; }
+}
+
+/* User-requested high contrast, confined to the two shipping content panes. */
+.shipped-page.erp-page {
+  --text: #000;
+  --muted: #000;
+  --line: #657482;
+  --shipping-border: #657482;
+  --shipping-focus: #334e63;
+}
+
+/* Keep text truly black, including semantic labels, hover and mobile pseudo-labels. */
+.shipped-page.erp-page,
+.shipped-page.erp-page *,
+.shipped-page.erp-page *::before,
+.shipped-page.erp-page *::after,
+:is(.page-shipped_orders, .page-shipment_operations) .messages,
+:is(.page-shipped_orders, .page-shipment_operations) .messages * {
+  color: #000 !important;
+}
+.shipped-page.erp-page * { border-color: var(--shipping-border) !important; }
+:is(.page-shipped_orders, .page-shipment_operations) .message { border-color: #657482; }
+.shipped-page.erp-page :is(input, textarea)::placeholder {
+  color: #000;
+  opacity: 1;
+}
+.shipped-page.erp-page :is(input, select, textarea) { -webkit-text-fill-color: #000; }
+.shipped-page.erp-page :is(input, select, textarea, button):disabled {
+  opacity: 1;
+  background: #e1e5e8 !important;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.shipped-page.erp-page :is(button, .button):not(:disabled) { background: #bfd3e2 !important; }
+.shipped-page.erp-page :is(button, .button):not(:disabled):hover { background: #a5bfd2 !important; }
+.shipped-page.erp-page :is(button, .button).secondary:not(:disabled),
+.shipped-page.erp-page .shipment-mode-tabs button:not(.is-active) { background: #e7eff5 !important; }
+.shipped-page.erp-page :is(button, .button).secondary:not(:disabled):hover,
+.shipped-page.erp-page .shipment-mode-tabs button:not(.is-active):hover { background: #cedeea !important; }
+.shipped-page.erp-page :is(button, .button).danger:not(:disabled) { background: #f1d2d2 !important; }
+.shipped-page.erp-page :is(button, .button).danger:not(:disabled):hover { background: #e6baba !important; }
+.shipped-page.erp-page .shipment-mode-tabs button.is-active { background: #a5bfd2 !important; font-weight: 700; }
+.shipped-page.erp-page input[type="file"]::file-selector-button {
+  color: #000;
+  background: #e7eff5;
+  border: 1px solid var(--shipping-border);
+  border-radius: 2px;
+  margin-right: 8px;
+}
+
+.shipped-page.erp-page .shipment-subnav { gap: 8px; padding: 6px; }
+.shipped-page.erp-page .shipment-subnav a {
+  padding: 9px 18px;
+  border: 1px solid var(--shipping-border);
+  border-bottom-width: 3px;
+  border-radius: 3px;
+  background: #e7eff5;
+}
+.shipped-page.erp-page .shipment-subnav a:hover { background: #cedeea; }
+.shipped-page.erp-page .shipment-subnav a[aria-current="page"] {
+  background: #9fbcd1;
+  border-color: var(--shipping-focus) !important;
+  font-weight: 700;
+}
+.shipped-page.erp-page :is(a, button, summary, input, select, textarea):focus-visible {
+  outline: 2px solid var(--shipping-focus);
+  outline-offset: 2px;
+}
+.shipped-page.erp-page :is(input, select, textarea):focus { border-color: var(--shipping-focus) !important; }

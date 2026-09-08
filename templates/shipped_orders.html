@@ -1,7 +1,11 @@
 {% extends "base.html" %}
-{% block title %}发货{% endblock %}
+{% block title %}已发货清单{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='business-lists.css', v=static_version) }}">
+  {% if can_manage_finance %}<link rel="stylesheet" href="{{ url_for('static', filename='reconciliation.css', v=static_version) }}">{% endif %}
+{% endblock %}
 {% block content %}
-  <div class="shipped-page">
+  <div class="shipped-page erp-page">
   <section class="page-head">
     <div>
       <h1>发货</h1>
@@ -9,30 +13,49 @@
     </div>
     <div class="head-stat">
       <strong data-shipment-history-count>{{ (shipped_orders|length) + (assembly_batches|length) }}</strong>
-      <span>{% if query %}条搜索结果{% else %}条发货记录{% endif %}</span>
+      <span>{% if query or selected_customer or selected_shipped_at %}条搜索结果{% else %}条发货记录{% endif %}</span>
     </div>
   </section>
 
+  {% include "shipment_tabs.html" %}
+
   <section class="panel shipped-panel">
-    <div class="section-head">
-      <h2>已发货物清单</h2>
-      <div class="shipped-toolbar">
-        <form class="search shipped-search" method="get">
-          <input type="search" name="q" value="{{ query }}" placeholder="搜索发货时间、订单号、产品、客户、供应商" data-auto-submit-search>
-          <select name="customer" aria-label="客户筛选" onchange="this.form.submit()">
-            <option value="">客户：全部</option>
+    <section class="erp-query-panel" aria-labelledby="shipment-query-title">
+      <h2 id="shipment-query-title">已发记录查询</h2>
+      <form class="erp-query-form erp-shipped-query" method="get">
+        <div class="erp-filter-field erp-keyword-field">
+          <label for="shipment-query">关键词</label>
+          <input id="shipment-query" type="search" name="q" value="{{ query }}" placeholder="发货时间 / 订单号 / 产品 / 供应商等" data-auto-submit-search>
+        </div>
+        <div class="erp-filter-field">
+          <label for="shipment-customer">客户</label>
+          <select id="shipment-customer" name="customer" aria-label="客户筛选" onchange="this.form.submit()">
+            <option value="">全部客户</option>
             {% for customer in customers %}
               <option value="{{ customer }}" {% if customer == selected_customer %}selected{% endif %}>{{ customer }}</option>
             {% endfor %}
           </select>
-          <input type="date" name="shipped_at" value="{{ selected_shipped_at }}" aria-label="发货时间筛选" onchange="this.form.submit()">
+        </div>
+        <div class="erp-filter-field">
+          <label for="shipment-date">发货日期</label>
+          <input id="shipment-date" type="date" name="shipped_at" value="{{ selected_shipped_at }}" aria-label="发货时间筛选" onchange="this.form.submit()">
+        </div>
+        <div class="erp-query-actions">
           <button type="submit">搜索</button>
-          {% if query or selected_customer or selected_shipped_at %}
-            <a class="button secondary" href="{{ url_for('shipped_orders') }}">清除</a>
-          {% endif %}
-        </form>
+          <a class="button secondary" href="{{ url_for('shipped_orders') }}">清空</a>
+          <span>筛选普通发货记录及组装发货批次</span>
+        </div>
+      </form>
+    </section>
+    <div class="section-head">
+      <h2>已发货清单</h2>
+      <div class="shipped-toolbar">
         <div class="toolbar-actions">
           <a class="button secondary" href="{{ url_for('export_shipped_orders', format='xlsx', q=query, customer=selected_customer, shipped_at=selected_shipped_at) }}">导出 Excel</a>
+          {% if can_manage_finance %}
+            <button type="submit" form="reconciliation-create-form">生成对账单</button>
+            <a class="button secondary" href="{{ url_for('reconciliation_statements') }}">对账单列表</a>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -46,6 +69,14 @@
         <button type="submit" class="secondary">导出选中 PDF</button>
       </div>
     </form>
+
+    {% if can_manage_finance %}
+      <form id="reconciliation-create-form" class="reconciliation-create-form" method="post" action="{{ url_for('create_reconciliation_statement_route') }}">
+        <input type="hidden" name="reconciliation_csrf_token" value="{{ reconciliation_admin_csrf_token() }}">
+        <div data-reconciliation-source-fields></div>
+        <span class="empty-text" data-reconciliation-selection-summary>请选择同一客户、同一币种且已定价的发货明细。</span>
+      </form>
+    {% endif %}
 
     {% if assembly_batches %}
       <section class="assembly-history" aria-labelledby="assembly-history-title">
@@ -91,6 +122,7 @@
                       {% endif %}
                       <th>订单分配</th>
                       <th>库存结果</th>
+                      {% if can_manage_finance %}<th>对账选择</th>{% endif %}
                     </tr>
                   </thead>
                   <tbody>
@@ -148,6 +180,24 @@
                             <span>无库存缺口</span>
                           {% endif %}
                         </td>
+                        {% if can_manage_finance %}
+                          <td data-label="对账选择" class="reconciliation-source-cell">
+                            <label>
+                              <input type="checkbox"
+                                     data-reconciliation-source
+                                     data-customer="{{ batch.customer }}"
+                                     data-currency="{{ item.currency or '' }}"
+                                     name="reconciliation_source_ref"
+                                     value="assembly_item:{{ item.id }}"
+                                     {% if item.reconciliation_claim or item.unit_price_minor is none %}disabled{% endif %}>
+                              <span>{% if item.reconciliation_claim %}已对账{% elif item.unit_price_minor is none %}未定价{% else %}选择{% endif %}</span>
+                            </label>
+                            {% if item.reconciliation_claim %}
+                              <a href="{{ url_for('reconciliation_statement_detail', statement_id=item.reconciliation_claim.statement_id) }}">{{ item.reconciliation_claim.statement_no }}</a>
+                              <span class="status-pill muted">{{ item.reconciliation_claim.status_label }}</span>
+                            {% endif %}
+                          </td>
+                        {% endif %}
                       </tr>
                     {% endfor %}
                   </tbody>
@@ -364,6 +414,24 @@
               </td>
               <td class="shipment-select-cell" data-label="选择">
                 <input type="checkbox" class="shipment-select" name="shipment_id" value="{{ shipment.id }}" form="shipped-export-form">
+                {% if can_manage_finance %}
+                  <div class="reconciliation-row-select">
+                    <label>
+                      <input type="checkbox"
+                             data-reconciliation-source
+                             data-customer="{{ shipment.order_customer or shipment.product_customer or '' }}"
+                             data-currency="{{ shipment.currency or '' }}"
+                             name="reconciliation_source_ref"
+                             value="ordinary:{{ shipment.id }}"
+                             {% if shipment.reconciliation_claim or shipment.unit_price_minor is none %}disabled{% endif %}>
+                      <span>{% if shipment.reconciliation_claim %}已对账{% elif shipment.unit_price_minor is none %}未定价{% else %}对账{% endif %}</span>
+                    </label>
+                    {% if shipment.reconciliation_claim %}
+                      <a href="{{ url_for('reconciliation_statement_detail', statement_id=shipment.reconciliation_claim.statement_id) }}">{{ shipment.reconciliation_claim.statement_no }}</a>
+                      <span class="status-pill muted">{{ shipment.reconciliation_claim.status_label }}</span>
+                    {% endif %}
+                  </div>
+                {% endif %}
               </td>
             </tr>
           {% else %}
@@ -386,200 +454,9 @@
     {% endif %}
   </section>
 
-  {% if can_manage_shipped %}
-  <section class="panel">
-    <div class="section-head">
-      <h2>计划发货清单</h2>
-      <span class="empty-text">选择生产订单生成计划后，在这里审核实际发货。</span>
-    </div>
-    {% if shipment_plans %}
-      <div class="shipment-plan-stack">
-        {% for plan in shipment_plans %}
-          <div class="shipment-plan-card">
-            <form id="shipment-plan-save-{{ plan.id }}" method="post" action="{{ url_for('update_shipment_plan_quantities', plan_id=plan.id) }}"></form>
-            <form id="shipment-plan-approve-{{ plan.id }}" method="post" action="{{ url_for('approve_shipment_plan', plan_id=plan.id) }}" enctype="multipart/form-data"></form>
-            <form id="shipment-plan-inspection-upload-{{ plan.id }}" method="post" action="{{ url_for('upload_shipment_plan_inspection_reports', plan_id=plan.id) }}" enctype="multipart/form-data"></form>
-            <form id="shipment-plan-delete-{{ plan.id }}" method="post" action="{{ url_for('delete_shipment_plan', plan_id=plan.id) }}" onsubmit="return confirm('确定删除这张计划发货清单吗？');"></form>
-            <div class="shipment-plan-head">
-              <div>
-                <strong>{{ plan.plan_no }}</strong>
-                <span>{{ plan.customer or "未指定客户" }} / {{ plan.planned_ship_at or "-" }} / {{ plan.status }}</span>
-              </div>
-              <div class="shipment-plan-head-right">
-                <div class="summary-strip compact-summary-strip">
-                  <span>项数：<strong>{{ plan.item_count }}</strong></span>
-                  <span>计划：<strong>{{ plan.total_planned_quantity }}</strong></span>
-                  <span>已发：<strong>{{ plan.total_shipped_quantity }}</strong></span>
-                </div>
-                <div class="shipment-plan-head-actions">
-                  <a class="button secondary compact-button" href="{{ url_for('preview_shipment_plan', plan_id=plan.id) }}" target="_blank">计划单</a>
-                  <a class="button compact-button" href="{{ url_for('preview_inspection_report', plan_id=plan.id) }}" target="_blank">检验报告</a>
-                </div>
-              </div>
-            </div>
-            <div class="table-wrap shipment-plan-table-wrap">
-              <table class="shipment-plan-table">
-                <thead>
-                  <tr>
-                    <th>订单号</th>
-                    <th>图号</th>
-                    <th>产品名称</th>
-                    <th>客户</th>
-                    <th>订单未发</th>
-                    <th>计划数量</th>
-                    <th>计划剩余</th>
-                    <th>实际发货</th>
-                  </tr>
-                </thead>
-                <tbody>
-                    {% for item in plan.plan_items %}
-                    <tr>
-                      <td>{{ item.order_no }}</td>
-                      <td>{{ item.drawing_no or "-" }}</td>
-                      <td>{{ item.product_name or "-" }}</td>
-                      <td>{{ item.order_customer or item.product_customer or "-" }}</td>
-                      <td>{{ item.unshipped_quantity }}</td>
-                      <td>
-                        <input type="hidden" name="plan_item_id" value="{{ item.id }}" form="shipment-plan-save-{{ plan.id }}">
-                        <input class="compact-number-input" type="number" name="planned_quantity" min="{{ item.shipped_quantity }}" step="1" value="{{ item.planned_quantity }}" form="shipment-plan-save-{{ plan.id }}" {% if plan.status == '已完成' %}disabled{% endif %}>
-                      </td>
-                      <td>{{ item.remaining_plan_quantity }}</td>
-                      <td>
-                        <input type="hidden" name="plan_item_id" value="{{ item.id }}" form="shipment-plan-approve-{{ plan.id }}">
-                        <input class="compact-number-input" type="number" name="shipped_quantity" min="0" max="{{ item.max_ship_quantity }}" step="1" value="{{ item.max_ship_quantity }}" form="shipment-plan-approve-{{ plan.id }}" {% if plan.status == '已完成' %}disabled{% endif %}>
-                      </td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-            <div class="shipment-plan-actions">
-              <label>
-                发货时间
-                <input type="date" name="shipped_at" value="{{ default_shipped_at }}" required form="shipment-plan-approve-{{ plan.id }}" {% if plan.status == '已完成' %}disabled{% endif %}>
-              </label>
-              <label>
-                发货备注
-                <input type="text" name="logistics_no" placeholder="可选" form="shipment-plan-approve-{{ plan.id }}" {% if plan.status == '已完成' %}disabled{% endif %}>
-              </label>
-              <label>
-                发货图片
-                <input type="file" name="images" accept="image/*" multiple form="shipment-plan-approve-{{ plan.id }}" {% if plan.status == '已完成' %}disabled{% endif %}>
-              </label>
-              <label>
-                完成检验报告
-                <input type="file" name="inspection_reports" multiple form="shipment-plan-inspection-upload-{{ plan.id }}">
-              </label>
-              <a class="button secondary" href="{{ url_for('preview_shipment_plan', plan_id=plan.id) }}" target="_blank">预览计划单</a>
-              <a class="button secondary" href="{{ url_for('preview_inspection_report', plan_id=plan.id) }}" target="_blank">检验报告</a>
-              <button class="secondary" type="submit" form="shipment-plan-inspection-upload-{{ plan.id }}">上传报告</button>
-              <button class="danger" type="submit" form="shipment-plan-delete-{{ plan.id }}">删除计划单</button>
-              {% if plan.status != '已完成' %}
-                <button class="secondary" type="submit" form="shipment-plan-save-{{ plan.id }}">保存计划数量</button>
-                <button type="submit" form="shipment-plan-approve-{{ plan.id }}">审核发货</button>
-              {% endif %}
-            </div>
-            {% if plan.inspection_reports %}
-              <div class="inspection-report-files">
-                <span class="empty-text">已上传检验报告：</span>
-                {% for report in plan.inspection_reports %}
-                  <a class="inline-link" href="{{ url_for('inspection_report_file', filename=report.filename) }}" target="_blank" rel="noopener">{{ report.original_filename }}</a>
-                {% endfor %}
-              </div>
-            {% endif %}
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <p class="empty">暂无待发货计划清单</p>
-    {% endif %}
-  </section>
-
-  <section class="panel">
-    <div class="section-head">
-      <h2>发货操作</h2>
-      <span class="empty-text">可按订单发货，或按组装件图号展开配件发货。</span>
-    </div>
-    <div class="shipment-mode-tabs" aria-label="发货方式">
-      <button type="button" class="is-active" aria-controls="shipment-order-mode" id="shipment-order-tab" data-shipment-mode="order">按订单发货</button>
-      <button type="button" aria-controls="shipment-assembly-mode" id="shipment-assembly-tab" data-shipment-mode="assembly">按组装件发货</button>
-    </div>
-    <div id="shipment-order-mode" data-shipment-mode-panel="order">
-    <form method="post" action="{{ url_for('create_shipment_from_shipped_page') }}" class="grid-form shipment-create-form" enctype="multipart/form-data" data-shipment-create-form>
-      <label class="shipment-create-search-order">
-        订单号搜索
-        <input type="search" placeholder="输入订单号" data-shipment-order-search>
-      </label>
-      <label class="shipment-create-search-customer">
-        客户搜索
-        <select data-shipment-customer-search>
-          <option value="">客户：全部</option>
-          {% for customer in customers %}
-            <option value="{{ customer }}">{{ customer }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label class="shipment-create-search-product">
-        产品搜索
-        <input type="search" placeholder="输入图号或产品名称" data-shipment-product-search>
-      </label>
-      <div class="shipment-create-lines" data-shipment-lines>
-        <div class="shipment-create-line" data-shipment-line>
-          <label class="shipment-create-order">
-            未发完订单
-            <select name="order_id" data-shipment-order-select required>
-              <option value="" data-unshipped="">请选择订单</option>
-              {% for order in unshipped_orders %}
-                <option
-                  value="{{ order.id }}"
-                  data-unshipped="{{ order.unshipped_quantity }}"
-                  data-order-no="{{ order.order_no }}"
-                  data-drawing-no="{{ order.drawing_no or '' }}"
-                  data-product-name="{{ order.product_name or '' }}"
-                  data-customer="{{ order.order_customer or order.product_customer or '' }}"
-                >
-                  {{ order.order_no }} / {{ order.drawing_no or "-" }} / {{ order.product_name or "-" }} / 未发 {{ order.unshipped_quantity }} / {{ order.order_customer or order.product_customer or "-" }}
-                </option>
-              {% endfor %}
-            </select>
-          </label>
-          <label class="shipment-create-quantity">
-            本次发货数量
-            <input type="number" name="shipped_quantity" min="1" step="1" required data-shipment-quantity>
-          </label>
-          <button type="button" class="secondary compact-button shipment-line-remove" data-remove-shipment-line>删除</button>
-        </div>
-        <button type="button" class="secondary compact-button shipment-line-add" data-add-shipment-line>增加产品</button>
-      </div>
-      <label class="shipment-create-date">
-        发货时间
-        <input type="date" name="shipped_at" value="{{ default_shipped_at }}" required>
-      </label>
-      <label class="shipment-create-images">
-        发货图片
-        <input type="file" name="images" accept="image/*" multiple>
-      </label>
-      <label class="shipment-create-remark">
-        发货备注
-        <input type="text" name="logistics_no" placeholder="可选">
-      </label>
-      <div class="shipment-create-actions form-actions">
-        <button type="submit" {% if not unshipped_orders %}disabled{% endif %}>保存发货</button>
-        {% if not unshipped_orders %}
-          <span class="empty-text">当前没有未发完订单</span>
-        {% endif %}
-      </div>
-    </form>
-    </div>
-    <div id="shipment-assembly-mode" data-shipment-mode-panel="assembly" hidden>
-      {% include "assembly_shipping_form.html" %}
-    </div>
-  </section>
-  {% endif %}
   </div>
 {% endblock %}
 {% block scripts %}
-  <script src="{{ url_for('static', filename='assembly_shipping.js', v=static_version) }}"></script>
   <script>
     (() => {
       const search = document.querySelector('input[data-auto-submit-search]');
@@ -591,106 +468,6 @@
         window.clearTimeout(timer);
         timer = window.setTimeout(() => form.submit(), 300);
       });
-    })();
-
-    (() => {
-      const form = document.querySelector("[data-shipment-create-form]");
-      if (!form) return;
-      const lines = form.querySelector("[data-shipment-lines]");
-      const addLineButton = form.querySelector("[data-add-shipment-line]");
-      const orderSearch = form.querySelector("[data-shipment-order-search]");
-      const customerSearch = form.querySelector("[data-shipment-customer-search]");
-      const productSearch = form.querySelector("[data-shipment-product-search]");
-
-      function shipmentLines() {
-        return Array.from(form.querySelectorAll("[data-shipment-line]"));
-      }
-
-      function syncQuantityLimit(line) {
-        const select = line.querySelector("[data-shipment-order-select]");
-        const quantity = line.querySelector("[data-shipment-quantity]");
-        const unshipped = select.selectedOptions[0]?.dataset.unshipped || "";
-        if (unshipped) {
-          quantity.max = unshipped;
-          quantity.placeholder = `最多 ${unshipped}`;
-        } else {
-          quantity.removeAttribute("max");
-          quantity.placeholder = "";
-        }
-      }
-
-      function updateRemoveButtons() {
-        const currentLines = shipmentLines();
-        currentLines.forEach((line) => {
-          const removeButton = line.querySelector("[data-remove-shipment-line]");
-          if (removeButton) removeButton.hidden = currentLines.length <= 1;
-        });
-      }
-
-      function normalize(value) {
-        return (value || "").trim().toLowerCase();
-      }
-
-      function filterOrders() {
-        const orderQuery = normalize(orderSearch.value);
-        const customerQuery = normalize(customerSearch.value);
-        const productQuery = normalize(productSearch.value);
-        shipmentLines().forEach((line) => {
-          const select = line.querySelector("[data-shipment-order-select]");
-          const currentValue = select.value;
-          let currentStillVisible = false;
-          Array.from(select.options).forEach((option, index) => {
-            if (index === 0) return;
-            const orderText = normalize(option.dataset.orderNo);
-            const customerText = normalize(option.dataset.customer);
-            const productText = normalize(`${option.dataset.drawingNo} ${option.dataset.productName}`);
-            const visible = (!orderQuery || orderText.includes(orderQuery)) &&
-              (!customerQuery || customerText.includes(customerQuery)) &&
-              (!productQuery || productText.includes(productQuery));
-            option.hidden = !visible;
-            if (visible && option.value === currentValue) {
-              currentStillVisible = true;
-            }
-          });
-          if (!currentStillVisible) {
-            select.value = "";
-            syncQuantityLimit(line);
-          }
-        });
-      }
-
-      function bindLine(line) {
-        const select = line.querySelector("[data-shipment-order-select]");
-        const removeButton = line.querySelector("[data-remove-shipment-line]");
-        select.addEventListener("change", () => syncQuantityLimit(line));
-        removeButton.addEventListener("click", () => {
-          if (shipmentLines().length <= 1) return;
-          line.remove();
-          updateRemoveButtons();
-        });
-        syncQuantityLimit(line);
-      }
-
-      addLineButton.addEventListener("click", () => {
-        const source = shipmentLines()[0];
-        const clone = source.cloneNode(true);
-        clone.querySelector("[data-shipment-order-select]").value = "";
-        const quantity = clone.querySelector("[data-shipment-quantity]");
-        quantity.value = "";
-        quantity.removeAttribute("max");
-        quantity.placeholder = "";
-        lines.insertBefore(clone, addLineButton);
-        bindLine(clone);
-        filterOrders();
-        updateRemoveButtons();
-      });
-
-      shipmentLines().forEach(bindLine);
-      orderSearch.addEventListener("input", filterOrders);
-      customerSearch.addEventListener("change", filterOrders);
-      productSearch.addEventListener("input", filterOrders);
-      updateRemoveButtons();
-      filterOrders();
     })();
 
     (() => {
@@ -786,6 +563,47 @@
           }
         });
       }
+    })();
+
+    (() => {
+      const form = document.getElementById("reconciliation-create-form");
+      if (!form) return;
+      const checkboxes = Array.from(document.querySelectorAll("[data-reconciliation-source]"));
+      const fields = form.querySelector("[data-reconciliation-source-fields]");
+      const summary = form.querySelector("[data-reconciliation-selection-summary]");
+
+      const selected = () => checkboxes.filter((checkbox) => checkbox.checked);
+      const updateSummary = () => {
+        const count = selected().length;
+        summary.textContent = count
+          ? `已选择 ${count} 条发货明细`
+          : "请选择同一客户、同一币种且已定价的发货明细。";
+      };
+      checkboxes.forEach((checkbox) => checkbox.addEventListener("change", updateSummary));
+      updateSummary();
+
+      form.addEventListener("submit", (event) => {
+        const chosen = selected();
+        if (!chosen.length) {
+          event.preventDefault();
+          alert("请先选择要生成对账单的发货明细");
+          return;
+        }
+        const customers = new Set(chosen.map((checkbox) => checkbox.dataset.customer));
+        const currencies = new Set(chosen.map((checkbox) => checkbox.dataset.currency));
+        if (customers.size !== 1 || currencies.size !== 1) {
+          event.preventDefault();
+          alert("只能选择同一客户、同一币种的发货明细");
+          return;
+        }
+        fields.replaceChildren(...chosen.map((checkbox) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = "source_ref";
+          input.value = checkbox.value;
+          return input;
+        }));
+      });
     })();
 
     (() => {

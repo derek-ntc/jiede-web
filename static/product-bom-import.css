@@ -1,0 +1,116 @@
+body.page-import_product_bom,
+body.page-confirm_product_bom_import {
+  background: #f3f5f7;
+  color: #000;
+  font-family: Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+.product-import-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #9aa4ad;
+}
+
+.product-import-heading h1,
+.product-import-heading p {
+  margin-bottom: 6px;
+}
+
+.product-import-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.product-import-help {
+  margin-top: 18px;
+  border-color: #9aa4ad;
+  color: #000;
+}
+
+.product-import-help p {
+  margin: 0;
+  color: #000;
+}
+
+.product-import-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.product-import-stat {
+  display: grid;
+  gap: 6px;
+  min-height: 78px;
+  padding: 12px 14px;
+  border: 1px solid #8e9ba5;
+  border-left: 6px solid #0a6ebd;
+  border-radius: 4px;
+  background: #f8fafb;
+}
+
+.product-import-stat span {
+  color: #32363a;
+  font-size: 13px;
+}
+
+.product-import-stat strong {
+  align-self: end;
+  color: #000;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.page-import_product_bom table {
+  min-width: 980px;
+}
+
+.product-import-product-table {
+  margin-bottom: 18px;
+}
+
+.product-import-product-table table {
+  min-width: 760px;
+}
+
+.product-import-empty {
+  margin: 0 0 18px;
+  padding: 14px;
+  border: 1px dashed #7b8790;
+  color: #000;
+  background: #f8fafb;
+}
+
+.page-import_product_bom th,
+.page-import_product_bom td {
+  border-color: #aab2b8;
+  color: #000;
+}
+
+@media (max-width: 900px) {
+  .product-import-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .product-import-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .product-import-heading-actions {
+    justify-content: flex-start;
+  }
+
+  .product-import-stats {
+    grid-template-columns: 1fr;
+  }
+}

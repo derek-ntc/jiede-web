@@ -1,0 +1,37 @@
+.inventory-batch-page, .inventory-batch-page input, .inventory-batch-page select,
+.inventory-batch-page textarea, .inventory-batch-page button, .inventory-batch-page a { color: #000; }
+.batch-query { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 12px; padding: 12px 16px; }
+.batch-query label, .batch-tools label, .batch-footer label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.batch-query-actions { display: flex; align-items: end; gap: 8px; }
+.batch-tools { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding: 12px 16px; background: #e7eef5; border-block: 1px solid #63778b; }
+.batch-tools input { width: 130px; }
+.batch-tools select { min-width: 180px; }
+.batch-notice { margin: 0; padding: 10px 16px; background: #f0f4f8; border-top: 1px solid #63778b; line-height: 1.6; }
+.batch-table { min-width: 1040px; width: 100%; }
+.batch-table th, .batch-table td { border: 1px solid #63778b; padding: 8px 10px; color: #000; }
+.batch-table th { background: #d7e4ef; }
+.batch-table tr:has([data-row-select]:checked) { background: #d3e5f5; }
+.batch-table td:first-child { width: 38px; text-align: center; }
+.batch-table select { min-width: 165px; max-width: 230px; }
+.batch-table input[type=number] { width: 110px; }
+.batch-table input, .batch-table select, .batch-query input, .batch-query select, .batch-tools input, .batch-tools select, .batch-footer textarea { border: 1px solid #53677a; color: #000; }
+.batch-product-name { display: block; margin-top: 3px; }
+.batch-table small { color: #000; }
+.batch-footer { padding: 14px 16px; }
+.batch-footer textarea { max-width: 750px; width: 100%; box-sizing: border-box; }
+.batch-footer > span { margin-left: 10px; }
+#batch-message { white-space: pre-line; font-weight: 600; }
+.inventory-batch-page .inventory-tabs a { background: #e0eaf3; border: 1px solid #53677a; }
+.inventory-batch-page .inventory-tabs a.active-nav-link { background: #a9c6e0; border: 2px solid #304e6a; font-weight: 700; }
+@media (max-width: 900px) { .batch-query { grid-template-columns: repeat(2,minmax(0,1fr)); } .batch-footer > span { display: block; margin: 10px 0; } }
+@media (max-width: 520px) { .batch-query { grid-template-columns: 1fr; } .batch-tools > * { max-width: 100%; } }
+.inventory-batch-page .head-stat strong, .inventory-batch-page .page-head p, .inventory-batch-page .head-stat span { color: #000; }
+/* Batch entry remains a grid at narrow widths; horizontal scrolling preserves
+   column headers and the select-all control instead of converting to cards. */
+.inventory-batch-page .table-wrap { overflow: auto; max-width: 100%; }
+.inventory-batch-page .batch-table { display: table; min-width: 1040px; width: 100% !important; border-collapse: collapse; }
+.inventory-batch-page .batch-table thead { display: table-header-group; }
+.inventory-batch-page .batch-table tbody { display: table-row-group; }
+.inventory-batch-page .batch-table tr { display: table-row; box-shadow: none; }
+.inventory-batch-page .batch-table th, .inventory-batch-page .batch-table td { display: table-cell; width: auto; min-width: 0; border: 1px solid #63778b; }
+.inventory-batch-page .batch-table td::before { display: none; }

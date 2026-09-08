@@ -25,9 +25,13 @@
 
 - Create `tests/test_product_bom_import.py`: Excel 多区块解析、冲突校验、规划、确认写入、权限和页面行为测试。
 - Create `templates/product_bom_import.html`: 客户和 Excel 上传表单、校验错误及预览摘要/明细、确认按钮。
+- Create `static/product-bom-import.css`: 导入页预览统计、表格和移动端布局。
 - Modify `app.py`: `unit` 幂等迁移、Excel 解析、导入规划与事务写入、签名令牌、预览和确认路由。
 - Modify `templates/index.html`: 产品列表导入入口和单位列。
+- Modify `templates/admin.html`: 新增产品表单的单位字段。
 - Modify `templates/edit.html`: 产品基本信息单位字段。
+- Modify `templates/detail.html`: 产品基本信息的单位展示。
+- Modify `templates/base.html`: 导入页保持产品列表导航选中状态。
 - Modify `static/product-list.css`: 为新增单位列和导入按钮保持紧凑布局。
 
 ---
@@ -457,9 +461,13 @@ Expected: PASS.
 
 **Files:**
 - Modify: `templates/index.html`
+- Modify: `templates/admin.html`
 - Modify: `templates/edit.html`
+- Modify: `templates/detail.html`
+- Modify: `templates/base.html`
 - Modify: `app.py`（产品编辑字段和查询）
 - Modify: `static/product-list.css`
+- Create: `static/product-bom-import.css`
 - Test: `tests/test_product_bom_import.py`
 
 **Interfaces:**

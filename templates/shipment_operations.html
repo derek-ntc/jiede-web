@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}发货操作{% endblock %}
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='business-lists.css', v=static_version) }}">
+{% endblock %}
+{% block content %}
+  <div class="shipped-page erp-page">
+  <section class="page-head">
+    <div>
+      <h1>发货</h1>
+      <p>按订单或组装件新增发货，保存后可在已发货清单中查看。</p>
+    </div>
+    <div class="head-stat">
+      <strong>{{ unshipped_orders|length }}</strong>
+      <span>条未发完订单</span>
+    </div>
+  </section>
+  {% include "shipment_tabs.html" %}
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>发货操作</h2>
+      <span class="empty-text">可按订单发货，或按组装件图号展开配件发货。</span>
+    </div>
+    <div class="shipment-mode-tabs" aria-label="发货方式">
+      <button type="button" class="is-active" aria-controls="shipment-order-mode" id="shipment-order-tab" data-shipment-mode="order">按订单发货</button>
+      <button type="button" aria-controls="shipment-assembly-mode" id="shipment-assembly-tab" data-shipment-mode="assembly">按组装件发货</button>
+    </div>
+    <div id="shipment-order-mode" data-shipment-mode-panel="order">
+    <form method="post" action="{{ url_for('create_shipment_from_shipped_page') }}" class="grid-form shipment-create-form" enctype="multipart/form-data" data-shipment-create-form>
+      <label class="shipment-create-search-order">
+        订单号搜索
+        <input type="search" placeholder="输入订单号" data-shipment-order-search>
+      </label>
+      <label class="shipment-create-search-customer">
+        客户搜索
+        <select data-shipment-customer-search>
+          <option value="">客户：全部</option>
+          {% for customer in customers %}
+            <option value="{{ customer }}">{{ customer }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="shipment-create-search-product">
+        产品搜索
+        <input type="search" placeholder="输入图号或产品名称" data-shipment-product-search>
+      </label>
+      <div class="shipment-create-lines" data-shipment-lines>
+        <div class="shipment-create-line" data-shipment-line>
+          <label class="shipment-create-order">
+            未发完订单
+            <select name="order_id" data-shipment-order-select required>
+              <option value="" data-unshipped="">请选择订单</option>
+              {% for order in unshipped_orders %}
+                <option
+                  value="{{ order.id }}"
+                  data-unshipped="{{ order.unshipped_quantity }}"
+                  data-order-no="{{ order.order_no }}"
+                  data-drawing-no="{{ order.drawing_no or '' }}"
+                  data-product-name="{{ order.product_name or '' }}"
+                  data-customer="{{ order.order_customer or order.product_customer or '' }}"
+                >
+                  {{ order.order_no }} / {{ order.drawing_no or "-" }} / {{ order.product_name or "-" }} / 未发 {{ order.unshipped_quantity }} / {{ order.order_customer or order.product_customer or "-" }}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="shipment-create-quantity">
+            本次发货数量
+            <input type="number" name="shipped_quantity" min="1" step="1" required data-shipment-quantity>
+          </label>
+          <button type="button" class="secondary compact-button shipment-line-remove" data-remove-shipment-line>删除</button>
+        </div>
+        <button type="button" class="secondary compact-button shipment-line-add" data-add-shipment-line>增加产品</button>
+      </div>
+      <label class="shipment-create-date">
+        发货时间
+        <input type="date" name="shipped_at" value="{{ default_shipped_at }}" required>
+      </label>
+      <label class="shipment-create-images">
+        发货图片
+        <input type="file" name="images" accept="image/*" multiple>
+      </label>
+      <label class="shipment-create-remark">
+        发货备注
+        <input type="text" name="logistics_no" placeholder="可选">
+      </label>
+      <div class="shipment-create-actions form-actions">
+        <button type="submit" {% if not unshipped_orders %}disabled{% endif %}>保存发货</button>
+        {% if not unshipped_orders %}
+          <span class="empty-text">当前没有未发完订单</span>
+        {% endif %}
+      </div>
+    </form>
+    </div>
+    <div id="shipment-assembly-mode" data-shipment-mode-panel="assembly" hidden>
+      {% include "assembly_shipping_form.html" %}
+    </div>
+  </section>
+  </div>
+{% endblock %}
+{% block scripts %}
+  <script src="{{ url_for('static', filename='assembly_shipping.js', v=static_version) }}"></script>
+  <script>
+    (() => {
+      const form = document.querySelector("[data-shipment-create-form]");
+      if (!form) return;
+      const lines = form.querySelector("[data-shipment-lines]");
+      const addLineButton = form.querySelector("[data-add-shipment-line]");
+      const orderSearch = form.querySelector("[data-shipment-order-search]");
+      const customerSearch = form.querySelector("[data-shipment-customer-search]");
+      const productSearch = form.querySelector("[data-shipment-product-search]");
+
+      function shipmentLines() {
+        return Array.from(form.querySelectorAll("[data-shipment-line]"));
+      }
+
+      function syncQuantityLimit(line) {
+        const select = line.querySelector("[data-shipment-order-select]");
+        const quantity = line.querySelector("[data-shipment-quantity]");
+        const unshipped = select.selectedOptions[0]?.dataset.unshipped || "";
+        if (unshipped) {
+          quantity.max = unshipped;
+          quantity.placeholder = `最多 ${unshipped}`;
+        } else {
+          quantity.removeAttribute("max");
+          quantity.placeholder = "";
+        }
+      }
+
+      function updateRemoveButtons() {
+        const currentLines = shipmentLines();
+        currentLines.forEach((line) => {
+          const removeButton = line.querySelector("[data-remove-shipment-line]");
+          if (removeButton) removeButton.hidden = currentLines.length <= 1;
+        });
+      }
+
+      function normalize(value) {
+        return (value || "").trim().toLowerCase();
+      }
+
+      function filterOrders() {
+        const orderQuery = normalize(orderSearch.value);
+        const customerQuery = normalize(customerSearch.value);
+        const productQuery = normalize(productSearch.value);
+        shipmentLines().forEach((line) => {
+          const select = line.querySelector("[data-shipment-order-select]");
+          const currentValue = select.value;
+          let currentStillVisible = false;
+          Array.from(select.options).forEach((option, index) => {
+            if (index === 0) return;
+            const orderText = normalize(option.dataset.orderNo);
+            const customerText = normalize(option.dataset.customer);
+            const productText = normalize(`${option.dataset.drawingNo} ${option.dataset.productName}`);
+            const visible = (!orderQuery || orderText.includes(orderQuery)) &&
+              (!customerQuery || customerText.includes(customerQuery)) &&
+              (!productQuery || productText.includes(productQuery));
+            option.hidden = !visible;
+            if (visible && option.value === currentValue) {
+              currentStillVisible = true;
+            }
+          });
+          if (!currentStillVisible) {
+            select.value = "";
+            syncQuantityLimit(line);
+          }
+        });
+      }
+
+      function bindLine(line) {
+        const select = line.querySelector("[data-shipment-order-select]");
+        const removeButton = line.querySelector("[data-remove-shipment-line]");
+        select.addEventListener("change", () => syncQuantityLimit(line));
+        removeButton.addEventListener("click", () => {
+          if (shipmentLines().length <= 1) return;
+          line.remove();
+          updateRemoveButtons();
+        });
+        syncQuantityLimit(line);
+      }
+
+      addLineButton.addEventListener("click", () => {
+        const source = shipmentLines()[0];
+        const clone = source.cloneNode(true);
+        clone.querySelector("[data-shipment-order-select]").value = "";
+        const quantity = clone.querySelector("[data-shipment-quantity]");
+        quantity.value = "";
+        quantity.removeAttribute("max");
+        quantity.placeholder = "";
+        lines.insertBefore(clone, addLineButton);
+        bindLine(clone);
+        filterOrders();
+        updateRemoveButtons();
+      });
+
+      shipmentLines().forEach(bindLine);
+      orderSearch.addEventListener("input", filterOrders);
+      customerSearch.addEventListener("change", filterOrders);
+      productSearch.addEventListener("input", filterOrders);
+      updateRemoveButtons();
+      filterOrders();
+    })();
+  </script>
+{% endblock %}

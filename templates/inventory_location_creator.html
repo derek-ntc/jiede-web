@@ -1,0 +1,9 @@
+<dialog id="inventory-location-dialog" class="inventory-location-dialog">
+  <form id="inventory-location-form" data-csrf="{{ inventory_csrf_token() }}" action="{{ url_for('inventory_quick_location') }}">
+    <h2>新增库位</h2>
+    <label>库位编码<input name="code" required maxlength="50" placeholder="例如 A-01-02"></label>
+    <label>库位名称<input name="name" required maxlength="100" placeholder="例如 成品仓A区第二层"></label>
+    <p data-location-error role="alert"></p>
+    <div class="form-actions"><button type="submit">保存并使用</button><button type="button" class="secondary" data-close-location>取消</button></div>
+  </form>
+</dialog>
