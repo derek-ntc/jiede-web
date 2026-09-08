@@ -88,6 +88,10 @@ def ensure_shipping_workflow_tables(conn):
         invalidated INTEGER NOT NULL DEFAULT 0,
         UNIQUE(operation_id, customer)
     )""")
+    if 'customer_id' not in _table_columns(conn, 'delivery_notes'):
+        # Old rows deliberately remain NULL: a historical name alone cannot
+        # establish ownership if a rename/reassignment already happened.
+        conn.execute('ALTER TABLE delivery_notes ADD COLUMN customer_id INTEGER')
     conn.execute("""CREATE TABLE IF NOT EXISTS delivery_note_sources (
         note_id INTEGER NOT NULL REFERENCES delivery_notes(id),
         source_type TEXT NOT NULL CHECK(source_type IN ('ordinary', 'assembly')),
@@ -108,6 +112,13 @@ def ensure_shipping_workflow_tables(conn):
                 WHERE id IN (SELECT note_id FROM delivery_note_sources
                     WHERE source_type = '{source_type}' AND source_id = OLD.id);
                 END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS delivery_ordinary_order_update
+        AFTER UPDATE OF order_no, manual_id, customer ON product_orders BEGIN
+        UPDATE delivery_notes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id IN (SELECT d.note_id FROM delivery_note_sources d
+            JOIN product_order_shipments s ON s.id=d.source_id
+            WHERE d.source_type='ordinary' AND s.order_id=OLD.id);
+        END""")
 
 
 class DeliveryOperationConflict(ValueError):
@@ -182,13 +193,15 @@ def delivery_source_items(conn, source_type, source_id):
     if source_type == 'ordinary':
         rows = conn.execute("""SELECT s.id AS source_id, s.shipped_at,
             s.shipped_quantity, m.drawing_no, m.product_name, m.unit,
-            COALESCE(NULLIF(o.customer, ''), m.customer, '') AS customer,
+            COALESCE(NULLIF(o.customer, ''), m.customer, '') AS customer, c.id AS customer_id,
             COALESCE(s.specification_snapshot, m.supplier, '') AS specification,
             o.order_no, s.signature_status, s.signature_image, s.signed_at
             FROM product_order_shipments s JOIN product_orders o ON o.id=s.order_id
-            JOIN manuals m ON m.id=o.manual_id WHERE s.id=?""", (source_id,)).fetchall()
+            JOIN manuals m ON m.id=o.manual_id
+            LEFT JOIN customers c ON c.name=COALESCE(NULLIF(o.customer, ''), m.customer, '')
+            WHERE s.id=?""", (source_id,)).fetchall()
     elif source_type == 'assembly':
-        rows = conn.execute("""SELECT b.id AS source_id, b.customer, b.shipped_at,
+        rows = conn.execute("""SELECT b.id AS source_id, b.customer, c.id AS customer_id, b.shipped_at,
             i.shipped_quantity, i.drawing_no, i.product_name, COALESCE(m.unit, '') AS unit,
             COALESCE(i.specification_snapshot, m.supplier, '') AS specification,
             b.assembly_drawing_no,
@@ -198,7 +211,8 @@ def delivery_source_items(conn, source_type, source_id):
             '' AS signature_status,
             '' AS signature_image, '' AS signed_at
             FROM assembly_shipment_batches b JOIN assembly_shipment_items i ON i.batch_id=b.id
-            LEFT JOIN manuals m ON m.id=i.manual_id WHERE b.id=? ORDER BY i.id""", (source_id,)).fetchall()
+            LEFT JOIN manuals m ON m.id=i.manual_id
+            LEFT JOIN customers c ON c.name=b.customer WHERE b.id=? ORDER BY i.id""", (source_id,)).fetchall()
     else:
         raise ValueError('送货单来源类型无效')
     return [dict(row, source_type=source_type, order_customer=row['customer']) for row in rows]
@@ -229,14 +243,15 @@ def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides
     now = datetime.now(timezone.utc).isoformat()
     note_ids = []
     for customer, refs in sorted(groups.items()):
-        defaults = conn.execute('SELECT recipient_name, recipient_phone, address FROM customers WHERE name=?', (customer,)).fetchone()
+        defaults = conn.execute('SELECT id, recipient_name, recipient_phone, address FROM customers WHERE name=?', (customer,)).fetchone()
         recipient = dict(defaults) if defaults else dict(recipient_name='', recipient_phone='', address='')
         recipient.update(recipient_overrides.get(customer, {}))
         document_no = f'DN-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:12].upper()}'
         note_id = conn.execute("""INSERT INTO delivery_notes (document_no, operation_id,
-            customer, recipient_name, recipient_phone, address, operator, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (document_no, operation_id, customer, recipient['recipient_name'], recipient['recipient_phone'], recipient['address'], operator, now, now)).lastrowid
+            customer, recipient_name, recipient_phone, address, operator, created_at, updated_at, customer_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (document_no, operation_id, customer, recipient['recipient_name'], recipient['recipient_phone'], recipient['address'], operator, now, now,
+             defaults['id'] if defaults else None)).lastrowid
         conn.executemany('INSERT INTO delivery_note_sources (note_id, source_type, source_id) VALUES (?, ?, ?)',
                          [(note_id, kind, sid) for kind, sid in refs])
         note_ids.append(note_id)
@@ -253,13 +268,35 @@ def load_delivery_note(conn, note_id):
     note['items'] = []
     for source in note['sources']:
         items = delivery_source_items(conn, source['source_type'], source['source_id'])
-        if not items or any(item['customer'] != note['customer'] for item in items):
+        # ID-bound notes must never fall back to a matching name (which may now
+        # belong to a different customer). Unbound legacy/no-master sources use
+        # only exact original names; unknown historical renames remain invalid.
+        if not items or any(
+            item['customer_id'] != note['customer_id']
+            if note['customer_id'] is not None
+            else item['customer'] != note['customer']
+            for item in items
+        ):
             note['invalidated'] = 1
         note['items'].extend(items)
     if not note['sources']:
         note['invalidated'] = 1
     note['missing_recipient'] = any(not note[field] for field in ('recipient_name', 'recipient_phone', 'address'))
     return note
+
+
+def bind_legacy_delivery_customer_identity(conn, customer_id, previous_name):
+    """Bind provably owned old notes immediately BEFORE a controlled rename.
+
+    Caller owns the same transaction as customer/source renaming. Never repair
+    an already invalidated note or infer ownership across a name mismatch.
+    """
+    candidates = conn.execute('''SELECT id FROM delivery_notes WHERE customer_id IS NULL
+        AND customer=? AND invalidated=0''', (previous_name,)).fetchall()
+    for row in candidates:
+        note = load_delivery_note(conn, row['id'])
+        if not note['invalidated'] and all(item['customer_id'] == customer_id for item in note['items']):
+            conn.execute('UPDATE delivery_notes SET customer_id=? WHERE id=?', (customer_id, row['id']))
 
 
 def normalize_recipient_fields(recipient_name, recipient_phone):

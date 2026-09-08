@@ -1176,14 +1176,27 @@ class AssemblyShippingPageTests(AssemblyAppTestCase):
             planned.push(response(201, {redirect_url: "/admin/shipped-orders"}));
             await race.form.emit("submit");
             assert.equal(navigations.length, 1);
+            for (const redirect of ["/admin/delivery-notes/operations/1", "https://factory.test/admin/delivery-notes/operations/42"]) {
+              planned.push(response(201, {redirect_url: redirect}));
+              const before = navigations.length;
+              await race.form.emit("submit");
+              assert.equal(navigations.length, before + 1, `201 must navigate to ${redirect}`);
+              assert.equal(navigations.at(-1), new URL(redirect, window.location.origin).href);
+            }
             const invalid = formFixture();
             api.initializeAssemblyShipmentForm(invalid.form);
             invalid.form._assemblyPreview = preview("invalid");
-            planned.push(response(201, {redirect_url: "https://evil.example/"}));
-            await invalid.form.emit("submit");
-            assert.equal(navigations.length, 1);
-            assert.equal(invalid.submit.disabled, false);
-            assert.match(invalid.status.textContent, /跳转地址/);
+            for (const redirect of ["https://evil.example/", "https://evil.example/admin/delivery-notes/operations/1",
+                "/admin/delivery-notes/operations/0", "/admin/delivery-notes/operations/-1",
+                "/admin/delivery-notes/operations/01", "/admin/delivery-notes/operations/1.2",
+                "/admin/delivery-notes/operations/nope", "/admin/delivery-notes/operations/1/extra", "/admin/users"]) {
+              planned.push(response(201, {redirect_url: redirect}));
+              const before = navigations.length;
+              await invalid.form.emit("submit");
+              assert.equal(navigations.length, before, `must not navigate to ${redirect}`);
+              assert.equal(invalid.submit.disabled, false);
+              assert.match(invalid.status.textContent, /跳转地址/);
+            }
             planned.push(response(500, {error: "保存失败"}));
             await invalid.form.emit("submit");
             assert.equal(invalid.submit.disabled, false);

@@ -410,3 +410,125 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         html = self.client.get(f'/admin/delivery-notes/operations/{note["operation_id"]}').get_data(as_text=True)
         self.assertIn('2026-09-08 23:03:25（北京时间）', html)
         self.assertEqual(self.note_rows()[0]['updated_at'], '2026-09-08T15:03:25.123456+00:00')
+
+    def save_both_note_modes(self):
+        self.client.post('/admin/shipped-orders/new', data={**self.ordinary_data(), 'shipped_quantity': '2'})
+        response = self.client.post('/admin/shipped-orders/assembly/new', data=self.save_data(self.post_preview(sets=2).get_json()))
+        self.assertEqual(response.status_code, 201)
+        return self.note_rows()
+
+    def rename_customer(self, name):
+        with app.get_db() as conn:
+            customer_id = conn.execute("SELECT id FROM customers WHERE name='客户A'").fetchone()[0]
+        return self.client.post(f'/admin/customers/{customer_id}/edit', data={
+            'name': name, 'recipient_name': '新联系人', 'recipient_phone': '456', 'address': '新地址'})
+
+    def test_customer_rename_preserves_identity_and_frozen_display_for_both_modes(self):
+        notes = self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute("UPDATE delivery_notes SET updated_at='2000-01-01'")
+        self.assertEqual(self.rename_customer('客户新名称').status_code, 302)
+        for saved in notes:
+            with app.get_db() as conn:
+                note = shipping_workflow.load_delivery_note(conn, saved['id'])
+            self.assertEqual(note['invalidated'], 0)
+            self.assertEqual(note['customer'], '客户A')
+            self.assertEqual(note['recipient_name'], '张师傅')
+            self.assertEqual(note['recipient_phone'], '13800000000')
+            self.assertEqual(note['address'], '宁波仓库')
+            self.assertNotEqual(note['updated_at'], '2000-01-01')
+            self.assertEqual(self.client.get(f'/admin/delivery-notes/{saved["id"]}.pdf').status_code, 200)
+
+    def test_true_customer_reassignment_invalidates_both_note_modes(self):
+        notes = self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute("INSERT INTO customers (name,created_at,updated_at) VALUES ('客户B','','')")
+            conn.execute("UPDATE product_orders SET customer='客户B'")
+            conn.execute("UPDATE assembly_shipment_batches SET customer='客户B'")
+        for note in notes:
+            self.assertEqual(self.client.get(f'/admin/delivery-notes/{note["id"]}.pdf').status_code, 410)
+
+    def test_customer_id_does_not_fall_back_to_same_name_after_identity_replacement(self):
+        notes = self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute("DELETE FROM customers WHERE name='客户A'")
+            conn.execute("INSERT INTO customers (name,created_at,updated_at) VALUES ('客户A','','')")
+        for note in notes:
+            self.assertEqual(self.client.get(f'/admin/delivery-notes/{note["id"]}.pdf').status_code, 410)
+
+    def test_null_legacy_notes_bind_only_valid_ownership_during_controlled_rename(self):
+        notes = self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute('UPDATE delivery_notes SET customer_id=NULL')
+        self.rename_customer('客户新名称')
+        for saved in notes:
+            with app.get_db() as conn:
+                note = shipping_workflow.load_delivery_note(conn, saved['id'])
+            self.assertEqual(note['invalidated'], 0)
+            self.assertIsNotNone(note['customer_id'])
+            self.assertEqual(note['customer'], '客户A')
+            self.assertEqual(self.client.get(f'/admin/delivery-notes/{saved["id"]}.pdf').status_code, 200)
+
+    def test_unproven_or_invalidated_legacy_note_is_not_rebound_on_rename(self):
+        notes = self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute('UPDATE delivery_notes SET customer_id=NULL')
+            conn.execute("UPDATE product_orders SET customer='另一客户'")
+            conn.execute('UPDATE delivery_notes SET invalidated=1 WHERE id=?', (notes[1]['id'],))
+        self.rename_customer('客户新名称')
+        for saved in notes:
+            with app.get_db() as conn:
+                note = shipping_workflow.load_delivery_note(conn, saved['id'])
+            self.assertEqual(note['invalidated'], 1)
+            self.assertIsNone(note['customer_id'])
+
+    def test_legacy_identity_binding_rolls_back_with_failed_customer_rename(self):
+        self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute('UPDATE delivery_notes SET customer_id=NULL')
+            conn.execute("INSERT INTO customers (name,created_at,updated_at) VALUES ('重名客户','','')")
+        self.rename_customer('重名客户')
+        with app.get_db() as conn:
+            self.assertIsNotNone(conn.execute("SELECT id FROM customers WHERE name='客户A'").fetchone())
+            for row in conn.execute('SELECT customer_id FROM delivery_notes'):
+                self.assertIsNone(row['customer_id'])
+
+    def test_unregistered_and_nameless_customer_notes_use_strict_name_fallback(self):
+        # Complete the app's first-request customer backfill before simulating
+        # a name-only source with no customer master record.
+        self.client.get('/admin/shipped-orders')
+        with app.get_db() as conn:
+            conn.execute("DELETE FROM customers WHERE name='客户A'")
+        notes = self.save_both_note_modes()
+        for saved in notes:
+            with app.get_db() as conn:
+                note = shipping_workflow.load_delivery_note(conn, saved['id'])
+            self.assertIsNone(note['customer_id'])
+            self.assertEqual(note['invalidated'], 0)
+        with app.get_db() as conn:
+            conn.execute("UPDATE product_orders SET customer=''")
+            conn.execute("UPDATE manuals SET customer=''")
+        response = self.client.post('/admin/shipped-orders/new', data={
+            **self.ordinary_data(), 'shipped_quantity': '1', 'operation_token': 'nameless'})
+        self.assertEqual(response.status_code, 302)
+        nameless_id = self.note_rows()[-1]['id']
+        with app.get_db() as conn:
+            note = shipping_workflow.load_delivery_note(conn, nameless_id)
+            self.assertEqual(note['customer'], '')
+            self.assertEqual(note['invalidated'], 0)
+            conn.execute("UPDATE product_orders SET customer='新归属'")
+        self.assertEqual(self.client.get(f'/admin/delivery-notes/{nameless_id}.pdf').status_code, 410)
+
+    def test_customer_identity_migration_is_additive_and_idempotent(self):
+        notes = self.save_both_note_modes()
+        with app.get_db() as conn:
+            conn.execute('ALTER TABLE delivery_notes DROP COLUMN customer_id')
+            before = [dict(row) for row in conn.execute('SELECT * FROM delivery_notes')]
+            shipping_workflow.ensure_shipping_workflow_tables(conn)
+            shipping_workflow.ensure_shipping_workflow_tables(conn)
+            after = [dict(row) for row in conn.execute('SELECT * FROM delivery_notes')]
+        for old, migrated in zip(before, after):
+            self.assertIsNone(migrated.pop('customer_id'))
+            self.assertEqual(old, migrated)
+        for saved in notes:
+            self.assertEqual(self.client.get(f'/admin/delivery-notes/{saved["id"]}.pdf').status_code, 200)

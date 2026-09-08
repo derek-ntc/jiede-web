@@ -121,6 +121,7 @@ from reconciliation import (
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
 from shipping_workflow import (
     DeliveryOperationConflict,
+    bind_legacy_delivery_customer_identity,
     create_delivery_notes,
     delivery_request_identity,
     find_delivery_operation,
@@ -9984,6 +9985,8 @@ def edit_customer(customer_id):
             if customer is None:
                 abort(404)
             previous_name = str(customer["name"] or "").strip()
+            if name != previous_name:
+                bind_legacy_delivery_customer_identity(conn, customer_id, previous_name)
             conn.execute(
                 """
                 UPDATE customers

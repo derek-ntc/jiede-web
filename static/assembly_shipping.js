@@ -204,7 +204,9 @@ function populateAssemblyDrawings(form, drawings) {
 function sameOriginShippedOrdersRedirect(value) {
   if (typeof value !== "string" || !value) throw new Error("保存响应缺少跳转地址");
   const redirect = new URL(value, window.location.origin);
-  if (redirect.origin !== window.location.origin || redirect.pathname !== "/admin/shipped-orders") {
+  const allowedPath = redirect.pathname === "/admin/shipped-orders" ||
+    /^\/admin\/delivery-notes\/operations\/[1-9]\d*$/.test(redirect.pathname);
+  if (redirect.origin !== window.location.origin || !allowedPath) {
     throw new Error("保存响应包含无效的跳转地址");
   }
   return redirect.href;
