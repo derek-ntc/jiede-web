@@ -13,7 +13,7 @@
   {% else %}
   {% if note.missing_recipient %}<p role="status">提示：收货资料未完整填写，请与客户核对。已保存的收货快照不会随客户资料变更。</p>{% endif %}
   <div class="table-wrap"><table><thead><tr><th>产品图号</th><th>产品名称</th><th>规格型号</th><th>单位</th><th>数量</th></tr></thead>
-  <tbody>{% for item in note['items'] %}<tr><td>{{ item.drawing_no }}</td><td>{{ item.product_name }}</td><td>{{ item.specification }}</td><td>{{ item.unit }}</td><td>{{ item.shipped_quantity }}</td></tr>{% endfor %}</tbody></table></div>
+  <tbody>{% for item in note['items'] %}<tr><td>{{ item.drawing_no }}</td><td>{{ item.product_name }}</td><td>{{ item.specification }}{% if item.specification_is_fallback %}<span class="empty-text">（当前规格，历史未保存）</span>{% endif %}</td><td>{{ item.unit }}</td><td>{{ item.shipped_quantity }}</td></tr>{% endfor %}</tbody></table></div>
   <a class="button" href="{{ url_for('download_delivery_note', note_id=note.id) }}">下载送货单 PDF</a>
   {% endif %}
 </section>

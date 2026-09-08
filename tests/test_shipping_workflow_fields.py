@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import app
 from tests.test_assembly_shipping import AssemblyAppTestCase
+from tests.test_shipped_pdf_company import ShippedPdfCompanyTests
 
 
 class ShippingWorkflowFieldTests(AssemblyAppTestCase):
@@ -210,9 +212,12 @@ class ShippingWorkflowFieldTests(AssemblyAppTestCase):
             ).lastrowid
             rows = app.fetch_shipped_orders(conn)
 
-        specifications = {row["id"]: row["specification"] for row in rows}
-        self.assertEqual(specifications[saved["id"]], "规格-A")
-        self.assertEqual(specifications[legacy_id], "规格-B")
+        specifications = {
+            row["id"]: (row["specification"], row["specification_is_fallback"])
+            for row in rows
+        }
+        self.assertEqual(specifications[saved["id"]], ("规格-A", 0))
+        self.assertEqual(specifications[legacy_id], ("规格-B", 1))
 
     def test_new_empty_specification_snapshot_does_not_fall_back_after_product_change(self):
         product = self.create_product("P-EMPTY-SPEC", "客户A")
@@ -234,6 +239,7 @@ class ShippingWorkflowFieldTests(AssemblyAppTestCase):
             conn.execute("UPDATE manuals SET supplier = '后来填写' WHERE id = ?", (product,))
             shipment = app.fetch_shipment_by_id(conn, shipment_id)
         self.assertEqual(shipment["specification"], "")
+        self.assertEqual(shipment["specification_is_fallback"], 0)
 
     def test_assembly_create_and_edit_preserve_specification_snapshot(self):
         product = self.create_product("P-ASM-SPEC", "客户A")
@@ -287,7 +293,68 @@ class ShippingWorkflowFieldTests(AssemblyAppTestCase):
         workbook = app.build_shipped_orders_workbook(shipped_orders, "", "", "")
         worksheet = workbook.active
         self.assertEqual(worksheet.cell(row=3, column=6).value, "规格型号")
-        self.assertEqual(worksheet.cell(row=4, column=6).value, "导出规格")
+        self.assertEqual(
+            worksheet.cell(row=4, column=6).value,
+            "导出规格（当前规格，历史未保存）",
+        )
+
+    def test_legacy_specification_fallback_is_labeled_in_history_result_pdf_and_excel(self):
+        product = self.create_product("P-LEGACY-LABEL", "客户A")
+        order = self.create_order(product, "SO-LEGACY-LABEL", 2)
+        self.stock_product(product, 2)
+        response = self.client.post(
+            "/admin/shipped-orders/new",
+            data={
+                "operation_token": "legacy-label",
+                "shipped_at": "2026-09-08",
+                "order_id": str(order),
+                "shipped_quantity": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            shipment_id = conn.execute(
+                "SELECT id FROM product_order_shipments WHERE order_id=?", (order,)
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE product_order_shipments SET specification_snapshot=NULL WHERE id=?",
+                (shipment_id,),
+            )
+            conn.execute(
+                "UPDATE manuals SET supplier='当前产品规格' WHERE id=?", (product,)
+            )
+            shipment = app.fetch_shipment_by_id(conn, shipment_id)
+            note_id = conn.execute(
+                "SELECT note_id FROM delivery_note_sources WHERE source_type='ordinary' AND source_id=?",
+                (shipment_id,),
+            ).fetchone()[0]
+            note = app.load_delivery_note(conn, note_id)
+
+        label = "当前规格，历史未保存"
+        self.assertEqual(shipment["specification"], "当前产品规格")
+        self.assertEqual(shipment["specification_is_fallback"], 1)
+        self.assertEqual(note["items"][0]["specification_is_fallback"], 1)
+        self.assertIn(label, self.client.get('/admin/shipped-orders').get_data(as_text=True))
+        self.assertIn(label, self.client.get(response.location).get_data(as_text=True))
+
+        workbook = app.build_shipped_orders_workbook([shipment], "", "", "")
+        self.assertEqual(workbook.active.cell(row=4, column=6).value,
+                         f"当前产品规格（{label}）")
+        story = []
+        with patch.object(app.SimpleDocTemplate, 'build', lambda _doc, values: story.extend(values)):
+            app.build_shipped_orders_pdf(note['items'], '', note['customer'], '', recipient_metadata=note)
+        self.assertIn(label, ShippedPdfCompanyTests.collect_story_text(story))
+
+        with app.get_db() as conn:
+            conn.execute(
+                "UPDATE product_order_shipments SET specification_snapshot='' WHERE id=?",
+                (shipment_id,),
+            )
+            saved_empty = app.fetch_shipment_by_id(conn, shipment_id)
+        self.assertEqual(saved_empty["specification"], "")
+        self.assertEqual(saved_empty["specification_is_fallback"], 0)
+        empty_workbook = app.build_shipped_orders_workbook([saved_empty], "", "", "")
+        self.assertNotIn(label, str(empty_workbook.active.cell(row=4, column=6).value or ''))
 
     def test_product_import_help_keeps_legacy_specification_header_mapping_explicit(self):
         html = self.client.get("/admin/products/import").get_data(as_text=True)

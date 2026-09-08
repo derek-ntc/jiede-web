@@ -195,6 +195,7 @@ def delivery_source_items(conn, source_type, source_id):
             s.shipped_quantity, m.drawing_no, m.product_name, m.unit,
             COALESCE(NULLIF(o.customer, ''), m.customer, '') AS customer, c.id AS customer_id,
             COALESCE(s.specification_snapshot, m.supplier, '') AS specification,
+            s.specification_snapshot IS NULL AS specification_is_fallback,
             o.order_no, s.signature_status, s.signature_image, s.signed_at
             FROM product_order_shipments s JOIN product_orders o ON o.id=s.order_id
             JOIN manuals m ON m.id=o.manual_id
@@ -204,10 +205,22 @@ def delivery_source_items(conn, source_type, source_id):
         rows = conn.execute("""SELECT b.id AS source_id, b.customer, c.id AS customer_id, b.shipped_at,
             i.shipped_quantity, i.drawing_no, i.product_name, COALESCE(m.unit, '') AS unit,
             COALESCE(i.specification_snapshot, m.supplier, '') AS specification,
+            i.specification_snapshot IS NULL AS specification_is_fallback,
             b.assembly_drawing_no,
-            COALESCE((SELECT group_concat(DISTINCT o.order_no)
-                FROM assembly_shipment_allocations a JOIN product_orders o ON o.id=a.order_id
-                WHERE a.item_id=i.id), '未关联订单') AS order_no,
+            COALESCE((SELECT group_concat(allocation_label, ' / ') FROM (
+                SELECT CASE WHEN o.id IS NULL
+                    THEN CASE WHEN EXISTS (
+                        SELECT 1 FROM assembly_shipment_allocations linked
+                        WHERE linked.item_id=i.id AND linked.order_id IS NOT NULL
+                    ) THEN '未关联订单（' || SUM(a.quantity) || '）' ELSE '未关联订单' END
+                    ELSE o.order_no END AS allocation_label,
+                    CASE WHEN o.id IS NULL THEN 1 ELSE 0 END AS no_order
+                FROM assembly_shipment_allocations a
+                LEFT JOIN product_orders o ON o.id=a.order_id
+                WHERE a.item_id=i.id
+                GROUP BY a.order_id, o.id, o.order_no
+                ORDER BY no_order, o.order_no
+            )), '未关联订单') AS order_no,
             '' AS signature_status,
             '' AS signature_image, '' AS signed_at
             FROM assembly_shipment_batches b JOIN assembly_shipment_items i ON i.batch_id=b.id

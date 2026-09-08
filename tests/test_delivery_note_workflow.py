@@ -46,6 +46,155 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         with app.get_db() as conn:
             return [dict(row) for row in conn.execute('SELECT * FROM delivery_notes ORDER BY id')]
 
+    def create_plan(self, order_ids):
+        response = self.client.post('/admin/orders/shipment-plans', data={
+            'order_id': [str(order_id) for order_id in order_ids],
+            'planned_ship_at': '2026-09-10',
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            plan = conn.execute('SELECT * FROM shipment_plans ORDER BY id DESC LIMIT 1').fetchone()
+            items = conn.execute(
+                'SELECT * FROM shipment_plan_items WHERE plan_id=? ORDER BY id',
+                (plan['id'],),
+            ).fetchall()
+        return dict(plan), [dict(item) for item in items]
+
+    @staticmethod
+    def plan_approval_data(items, *, token='plan-token', images=None, overrides=None):
+        data = {
+            'operation_token': token,
+            'shipped_at': '2026-09-09',
+            'logistics_no': '计划发货',
+            'plan_item_id': [str(item['id']) for item in items],
+            'shipped_quantity': ['2'] * len(items),
+            'recipient_overrides': json.dumps(overrides or {}),
+        }
+        if images is not None:
+            data['images'] = images
+        return data
+
+    def test_plan_approval_snapshots_prices_recipients_and_replays_original_result(self):
+        product_b = self.create_product('P-PLAN-B', '客户B')
+        order_b = self.create_order(product_b, 'SO-PLAN-B', 5, customer='客户B')
+        self.stock_product(product_b, 5)
+        with app.get_db() as conn:
+            conn.execute("UPDATE manuals SET supplier='计划规格-A', unit_price_minor=0, currency='CNY' WHERE id=?", (self.product,))
+            conn.execute("UPDATE manuals SET supplier='计划规格-B', unit_price_minor=NULL, currency='USD' WHERE id=?", (product_b,))
+            conn.execute("INSERT INTO customers (name,recipient_name,recipient_phone,address,created_at,updated_at) VALUES ('客户B','李师傅','13900000000','上海仓库','','')")
+        plan, items = self.create_plan([self.order, order_b])
+        request_data = lambda: self.plan_approval_data(
+            items,
+            images=(BytesIO(VALID_PNG_BYTES), 'plan.png'),
+            overrides={'客户A': {'recipient_name': '临时收货人', 'recipient_phone': '123', 'address': '临时仓'}},
+        )
+
+        first = self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=request_data())
+        self.assertEqual(first.status_code, 302)
+        self.assertRegex(first.location, r'/admin/delivery-notes/operations/\d+$')
+        with app.get_db() as conn:
+            shipments = [dict(row) for row in conn.execute(
+                '''SELECT s.*, o.customer FROM product_order_shipments s
+                   JOIN product_orders o ON o.id=s.order_id ORDER BY s.id''')]
+            notes = [dict(row) for row in conn.execute('SELECT * FROM delivery_notes ORDER BY customer')]
+            stock_after_first = {
+                self.product: app.inventory_total_for_manual(conn, self.product),
+                product_b: app.inventory_total_for_manual(conn, product_b),
+            }
+            plan_after_first = dict(conn.execute('SELECT * FROM shipment_plans WHERE id=?', (plan['id'],)).fetchone())
+            plan_items_after_first = [dict(row) for row in conn.execute(
+                'SELECT * FROM shipment_plan_items WHERE plan_id=? ORDER BY id', (plan['id'],))]
+        self.assertEqual([(row['specification_snapshot'], row['unit_price_minor'], row['currency']) for row in shipments],
+                         [('计划规格-A', 0, 'CNY'), ('计划规格-B', None, 'USD')])
+        self.assertTrue(shipments[0]['price_recorded_by'])
+        self.assertFalse(shipments[1]['price_recorded_by'])
+        self.assertEqual([(note['customer'], note['recipient_name'], note['address']) for note in notes],
+                         [('客户A', '临时收货人', '临时仓'), ('客户B', '李师傅', '上海仓库')])
+        self.assertEqual(plan_after_first['status'], '已完成')
+        self.assertEqual([item['shipped_quantity'] for item in plan_items_after_first], [2, 2])
+        self.assertEqual(stock_after_first, {self.product: 18, product_b: 3})
+
+        with app.get_db() as conn:
+            conn.execute("UPDATE manuals SET supplier='已修改规格', unit_price_minor=99999")
+            conn.execute("UPDATE customers SET recipient_name='已修改收货人'")
+        retry = self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=request_data())
+        self.assertEqual(retry.status_code, 302)
+        self.assertEqual(retry.location, first.location)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipments').fetchone()[0], 2)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM delivery_notes').fetchone()[0], 2)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipment_images').fetchone()[0], 2)
+            self.assertEqual({
+                self.product: app.inventory_total_for_manual(conn, self.product),
+                product_b: app.inventory_total_for_manual(conn, product_b),
+            }, stock_after_first)
+            self.assertEqual(
+                [row[0] for row in conn.execute('SELECT specification_snapshot FROM product_order_shipments ORDER BY id')],
+                ['计划规格-A', '计划规格-B'],
+            )
+
+        conflict_data = self.plan_approval_data(items, token='plan-token')
+        conflict_data['shipped_quantity'] = ['1', '2']
+        self.assertEqual(
+            self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=conflict_data).status_code,
+            409,
+        )
+
+    def test_plan_approval_failure_rolls_back_images_inventory_notes_and_can_retry(self):
+        product_b = self.create_product('P-PLAN-ROLLBACK', '客户A')
+        order_b = self.create_order(product_b, 'SO-PLAN-ROLLBACK', 5)
+        self.stock_product(product_b, 5)
+        plan, items = self.create_plan([self.order, order_b])
+        invalid = self.plan_approval_data(
+            items, token='plan-invalid-image', images=(BytesIO(b'not an image'), 'broken.png'))
+        response = self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=invalid)
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipments').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT status FROM shipment_plans WHERE id=?', (plan['id'],)).fetchone()[0], '待发货')
+
+        failing = self.plan_approval_data(
+            items, token='plan-note-failure', images=(BytesIO(VALID_PNG_BYTES), 'plan.png'))
+        with patch.object(app, 'create_delivery_notes', side_effect=sqlite3.OperationalError('injected plan note failure')):
+            response = self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=failing)
+        self.assertEqual(response.status_code, 500)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipments').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0], 0)
+            self.assertEqual(app.inventory_total_for_manual(conn, self.product), 20)
+            self.assertEqual(app.inventory_total_for_manual(conn, product_b), 5)
+        self.assertEqual(list(app.SHIPMENT_IMAGES_DIR.iterdir()), [])
+        self.assertEqual(
+            self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=self.plan_approval_data(items, token='plan-note-failure')).status_code,
+            302,
+        )
+
+    def test_plan_approval_commit_exit_returns_receipt_and_retry_is_read_only(self):
+        plan, items = self.create_plan([self.order])
+        data = self.plan_approval_data(items, token='plan-commit-exit')
+        original_get_db = app.get_db
+
+        @contextmanager
+        def fail_after_commit():
+            with original_get_db() as conn:
+                before = conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0]
+                yield conn
+                after = conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0]
+            if after > before:
+                raise RuntimeError('injected committed plan context exit')
+
+        with patch.object(app, 'get_db', fail_after_commit):
+            first = self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=data)
+        self.assertEqual(first.status_code, 302)
+        self.assertRegex(first.location, r'/admin/delivery-notes/operations/\d+$')
+        retry = self.client.post(f"/admin/shipped-orders/plans/{plan['id']}/approve", data=data)
+        self.assertEqual(retry.location, first.location)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipments').fetchone()[0], 1)
+            self.assertEqual(app.inventory_total_for_manual(conn, self.product), 18)
+
     def test_ordinary_retry_returns_same_receipt_after_stock_and_customer_change(self):
         first = self.client.post('/admin/shipped-orders/new', data=self.ordinary_data())
         self.assertRegex(first.location, r'/admin/delivery-notes/operations/\d+$')
@@ -394,6 +543,51 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         with app.get_db() as conn:
             note = shipping_workflow.load_delivery_note(conn, last_note_id)
         self.assertEqual(note['items'][0]['order_no'], '未关联订单')
+
+    def test_assembly_note_retains_mixed_allocated_and_unallocated_order_quantities(self):
+        preview = self.post_preview(sets=10).get_json()
+        response = self.client.post('/admin/shipped-orders/assembly/new', data=self.save_data(preview))
+        self.assertEqual(response.status_code, 201, response.get_json())
+        note_id = self.note_rows()[0]['id']
+        with app.get_db() as conn:
+            item = conn.execute('SELECT id FROM assembly_shipment_items').fetchone()
+            conn.execute(
+                'UPDATE assembly_shipment_allocations SET quantity=6 WHERE item_id=?',
+                (item['id'],),
+            )
+            conn.execute(
+                '''INSERT INTO assembly_shipment_allocations
+                   (item_id, order_id, quantity, created_at) VALUES (?, NULL, 4, '')''',
+                (item['id'],),
+            )
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+        self.assertEqual(note['items'][0]['order_no'], 'SO-DN / 未关联订单（4）')
+        story = []
+        from tests.test_shipped_pdf_company import ShippedPdfCompanyTests
+        with patch.object(app.SimpleDocTemplate, 'build', lambda _doc, values: story.extend(values)):
+            app.build_shipped_orders_pdf(note['items'], '', note['customer'], '', recipient_metadata=note)
+        text = ShippedPdfCompanyTests.collect_story_text(story)
+        self.assertIn('SO-DN', text)
+        self.assertIn('未关联订单（4）', text)
+
+    def test_assembly_legacy_specification_fallback_is_marked_but_saved_empty_is_not(self):
+        preview = self.post_preview(sets=2).get_json()
+        response = self.client.post('/admin/shipped-orders/assembly/new', data=self.save_data(preview))
+        self.assertEqual(response.status_code, 201, response.get_json())
+        note_id = self.note_rows()[0]['id']
+        with app.get_db() as conn:
+            item_id = conn.execute('SELECT id FROM assembly_shipment_items').fetchone()[0]
+            conn.execute('UPDATE assembly_shipment_items SET specification_snapshot=NULL WHERE id=?', (item_id,))
+            conn.execute("UPDATE manuals SET supplier='当前组装规格' WHERE id=?", (self.product,))
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+        self.assertEqual(note['items'][0]['specification'], '当前组装规格')
+        self.assertEqual(note['items'][0]['specification_is_fallback'], 1)
+        self.assertIn('当前规格，历史未保存', self.client.get(response.get_json()['redirect_url']).get_data(as_text=True))
+        with app.get_db() as conn:
+            conn.execute("UPDATE assembly_shipment_items SET specification_snapshot='' WHERE id=?", (item_id,))
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+        self.assertEqual(note['items'][0]['specification'], '')
+        self.assertEqual(note['items'][0]['specification_is_fallback'], 0)
 
     def test_delivery_timestamp_display_converts_utc_without_changing_snapshot(self):
         self.client.post('/admin/shipped-orders/new', data=self.ordinary_data())

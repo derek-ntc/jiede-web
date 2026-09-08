@@ -4214,7 +4214,8 @@ def get_shipped_orders_query(include_prices=False):
                 WHEN product_order_shipments.specification_snapshot IS NULL
                 THEN COALESCE(manuals.supplier, '')
                 ELSE product_order_shipments.specification_snapshot
-            END AS supplier
+            END AS supplier,
+            product_order_shipments.specification_snapshot IS NULL AS specification_is_fallback
             {price_columns}
         FROM product_order_shipments
         LEFT JOIN product_orders ON product_orders.id = product_order_shipments.order_id
@@ -5886,7 +5887,8 @@ def _fetch_assembly_shipment_batches_by_ids(
                        WHEN assembly_shipment_items.specification_snapshot IS NULL
                        THEN COALESCE(manuals.supplier, '')
                        ELSE assembly_shipment_items.specification_snapshot
-                   END AS specification
+                   END AS specification,
+                   assembly_shipment_items.specification_snapshot IS NULL AS specification_is_fallback
                    {item_price_columns}
             FROM assembly_shipment_items
             LEFT JOIN manuals ON manuals.id = assembly_shipment_items.manual_id
@@ -7768,6 +7770,22 @@ def get_pdf_font_name():
     return PDF_FONT_NAME
 
 
+def display_shipment_specification(shipment, specification=None):
+    if specification is None:
+        specification = (
+            shipment["specification"]
+            if "specification" in shipment.keys()
+            else shipment["supplier"] if "supplier" in shipment.keys() else ""
+        )
+    value = str(specification or "")
+    if (
+        "specification_is_fallback" in shipment.keys()
+        and shipment["specification_is_fallback"]
+    ):
+        return f"{value or '-'}（当前规格，历史未保存）"
+    return value
+
+
 def build_shipped_orders_workbook(shipped_orders, query, selected_customer, shipped_at):
     workbook = Workbook()
     worksheet = workbook.active
@@ -7811,7 +7829,11 @@ def build_shipped_orders_workbook(shipped_orders, query, selected_customer, ship
             worksheet.cell(row=row_index, column=3, value=shipment["shipped_quantity"])
             worksheet.cell(row=row_index, column=4, value=shipment["order_no"])
             worksheet.cell(row=row_index, column=5, value=shipment["order_customer"] or shipment["product_customer"] or "")
-            worksheet.cell(row=row_index, column=6, value=specification or "")
+            worksheet.cell(
+                row=row_index,
+                column=6,
+                value=display_shipment_specification(shipment, specification),
+            )
             worksheet.cell(row=row_index, column=7, value=shipment["drawing_no"] or "")
             worksheet.cell(row=row_index, column=8, value=shipment["ordered_at"])
             worksheet.cell(row=row_index, column=9, value=shipment["planned_ship_at"])
@@ -8121,7 +8143,7 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
             Paragraph(str(index), cell_style),
             Paragraph(xml_escape(shipment["drawing_no"] or "-"), cell_style),
             Paragraph(xml_escape(shipment["product_name"] or "-"), cell_style),
-            Paragraph(xml_escape(str(shipment['specification'] if 'specification' in shipment.keys() else (shipment['supplier'] if 'supplier' in shipment.keys() else ''))), cell_style),
+            Paragraph(xml_escape(display_shipment_specification(shipment)), cell_style),
             Paragraph(xml_escape(str(shipment['unit'] or '') if 'unit' in shipment.keys() else ''), cell_style),
             Paragraph(str(shipment["shipped_quantity"] or 0), cell_style),
             Paragraph(xml_escape(shipment["order_no"] or "-"), cell_style),
@@ -9043,7 +9065,7 @@ def require_production_followup_csrf():
         or not isinstance(submitted, str)
         or not expected
         or not submitted
-        or not secrets.compare_digest(expected, submitted)
+        or not secrets.compare_digest(expected.encode("utf-8"), submitted.encode("utf-8"))
     ):
         abort(403, description="请求已失效，请刷新页面后重试")
 
@@ -15734,6 +15756,35 @@ def upload_shipment_plan_inspection_reports(plan_id):
 @app.route("/admin/shipped-orders/plans/<int:plan_id>/approve", methods=["POST"])
 @permission_required("shipped_manage")
 def approve_shipment_plan(plan_id):
+    state = {"committed": False, "saved_images": [], "operation_id": None}
+    try:
+        return _approve_shipment_plan(plan_id, state)
+    except DeliveryOperationConflict as error:
+        return str(error), 409
+    except ValueError as error:
+        if not state["committed"]:
+            flash(str(error), "error")
+            return redirect(url_for("shipped_orders"))
+    except (sqlite3.DatabaseError, OSError):
+        if not state["committed"]:
+            app.logger.exception("计划发货保存失败，数据库已回滚")
+            return "计划发货保存失败，所有更改已回滚，可重试。", 500
+        app.logger.exception("计划发货已提交，但连接退出失败")
+    except Exception:
+        if not state["committed"]:
+            raise
+        app.logger.exception("计划发货已提交，但请求退出异常")
+    finally:
+        if not state["committed"]:
+            for filename in state["saved_images"]:
+                try:
+                    (SHIPMENT_IMAGES_DIR / filename).unlink(missing_ok=True)
+                except OSError:
+                    app.logger.exception("回滚后无法清理计划发货图片：%s", filename)
+    return redirect(url_for("delivery_note_result", operation_id=state["operation_id"]))
+
+
+def _approve_shipment_plan(plan_id, state):
     shipped_at = request.form.get("shipped_at", "").strip()
     logistics_no = request.form.get("logistics_no", "").strip()
     item_ids = request.form.getlist("plan_item_id")
@@ -15763,7 +15814,21 @@ def approve_shipment_plan(plan_id):
     now = datetime.utcnow().isoformat(timespec="seconds")
     shipment_ids = []
     image_files = selected_shipment_images()
+    operation_token, request_digest = delivery_request_identity(
+        request.form, image_files, f"plan-approval:{plan_id}"
+    )
+    operator = current_admin_username()
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = find_delivery_operation(
+            conn, operation_token, request_digest, operator
+        )
+        if existing:
+            state.update(committed=True, operation_id=existing["id"])
+            return redirect(
+                url_for("delivery_note_result", operation_id=existing["id"])
+            )
+        recipient_overrides = parse_recipient_overrides(request.form)
         plan = conn.execute(
             "SELECT * FROM shipment_plans WHERE id = ?",
             (plan_id,),
@@ -15820,6 +15885,9 @@ def approve_shipment_plan(plan_id):
             specification_snapshot = current_specification_snapshots(
                 conn, [item["manual_id"]]
             )[int(item["manual_id"])]
+            price_snapshot = current_product_price_snapshot(
+                conn, item["manual_id"], operator, now
+            )
             signature_token = unique_signature_token(conn)
             photo_upload_token = unique_shipment_photo_token(conn)
             signature_expires = signature_expires_at()
@@ -15828,9 +15896,10 @@ def approve_shipment_plan(plan_id):
                 INSERT INTO product_order_shipments (
                     order_id, shipped_quantity, shipped_at, created_at, email_sent_at, logistics_no,
                     signature_token, signature_status, signature_expires_at, photo_upload_token,
-                    specification_snapshot
+                    specification_snapshot,
+                    unit_price_minor, currency, price_recorded_by, price_recorded_at
                 )
-                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?)
+                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item["order_id"],
@@ -15842,6 +15911,10 @@ def approve_shipment_plan(plan_id):
                     signature_expires,
                     photo_upload_token,
                     specification_snapshot,
+                    price_snapshot["unit_price_minor"],
+                    price_snapshot["currency"],
+                    price_snapshot["price_recorded_by"],
+                    price_snapshot["price_recorded_at"],
                 ),
             )
             shipment_id = cursor.lastrowid
@@ -15859,7 +15932,9 @@ def approve_shipment_plan(plan_id):
                     except Exception:
                         pass
                 try:
-                    save_shipment_images(conn, shipment_id, image_files)
+                    state["saved_images"].extend(
+                        save_shipment_images(conn, shipment_id, image_files)
+                    )
                 except ValueError as error:
                     conn.rollback()
                     flash(f"发货图片格式不支持：{error}", "error")
@@ -15892,11 +15967,24 @@ def approve_shipment_plan(plan_id):
             """,
             (status, now, plan_id),
         )
+        operation_id = start_delivery_operation(
+            conn, operation_token, request_digest, operator
+        )
+        create_delivery_notes(
+            conn,
+            operation_id,
+            [("ordinary", shipment_id) for shipment_id in shipment_ids],
+            recipient_overrides,
+            operator,
+        )
+        state["operation_id"] = operation_id
+        conn.commit()
+        state["committed"] = True
 
     flash(f"计划发货清单已审核，状态：{status}", "success")
     if shipment_ids:
         flash(f"已生成 {len(shipment_ids)} 条发货记录", "success")
-    return redirect(url_for("shipped_orders"))
+    return redirect(url_for("delivery_note_result", operation_id=operation_id))
 
 
 @app.route("/admin/shipped-orders/<int:shipment_id>/signature-link", methods=["POST"])

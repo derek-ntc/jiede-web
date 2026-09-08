@@ -143,7 +143,7 @@
                       <tr>
                         <td data-label="配件图号">{{ item.drawing_no or "-" }}</td>
                         <td data-label="产品名称">{{ item.product_name or "-" }}</td>
-                        <td data-label="规格型号">{{ item.specification or "-" }}</td>
+                        <td data-label="规格型号">{{ item.specification or "-" }}{% if item.specification_is_fallback %}<span class="empty-text">（当前规格，历史未保存）</span>{% endif %}</td>
                         <td data-label="来源">{{ "临时追加" if item.source_kind == "extra" else "BOM" }}</td>
                         <td data-label="每套用量">{{ "—" if item.source_kind == "extra" else item.quantity_per_set }}</td>
                         <td data-label="计算数量">{{ "—" if item.source_kind == "extra" else item.calculated_quantity }}</td>
@@ -277,7 +277,7 @@
                 {% endif %}
               </td>
               <td data-label="发货产品">{{ shipment.product_name or "-" }}</td>
-              <td data-label="规格型号">{{ shipment.specification or "-" }}</td>
+              <td data-label="规格型号">{{ shipment.specification or "-" }}{% if shipment.specification_is_fallback %}<span class="empty-text">（当前规格，历史未保存）</span>{% endif %}</td>
               <td data-label="发货数量">{{ shipment.shipped_quantity }}</td>
               {% if can_view_prices %}
                 <td data-label="发货单价" class="shipment-price-cell">

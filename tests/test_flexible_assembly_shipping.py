@@ -339,10 +339,13 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
           await removeButtons()[0].emit('click');
           await waitFor(()=>previews.length===previewCount+1,'preview after removing the first remaining component');
           await removeButtons()[0].emit('click');
-          await waitFor(()=>form._assemblySelectedIds?.length===0,'explicit empty component selection');
+          await waitFor(()=>form._assemblySelectedIds?.length===0 && removeButtons().length===0 &&
+            all(nodes.preview).map(el=>el.textContent || '').join('')==='本次明细为空，请搜索追加至少一个配件。' &&
+            nodes.submit.disabled===true,'rendered explicit empty component state');
           assert.deepEqual(form._assemblySelectedIds,[]);
+          assert.equal(removeButtons().length,0,'empty selection must replace stale shipment rows');
           assert.equal(nodes.submit.disabled,true);
-          assert.match(all(nodes.preview).map(el=>el.textContent || '').join(''),/至少|空|追加/);
+          assert.equal(all(nodes.preview).map(el=>el.textContent || '').join(''),'本次明细为空，请搜索追加至少一个配件。');
           nodes['component-search'].value='old'; await nodes['component-search'].emit('input');
           await waitFor(()=>searches.length===2,'old-customer component search request');
           nodes.customer.value='客户B'; await nodes.customer.emit('change');

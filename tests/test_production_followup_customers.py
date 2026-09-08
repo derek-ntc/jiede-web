@@ -316,6 +316,22 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertEqual(tuple(followup), ("客户A", None, now))
         self.assertEqual([row["original_filename"] for row in files], ["旧图纸.pdf"])
 
+    def test_customer_classification_rejects_non_ascii_csrf_without_side_effects(self):
+        self._csrf_token()
+        response = self.client.post(
+            "/admin/production-followups/4/customer",
+            data={
+                "customer": "客户A",
+                "production_followup_csrf_token": "中文令牌",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+        with app.get_db() as conn:
+            followup = conn.execute(
+                "SELECT customer, manual_id FROM production_followups WHERE id=4"
+            ).fetchone()
+        self.assertEqual(tuple(followup), ("", None))
+
     def test_stage_redirect_and_rendered_action_forms_preserve_active_filters(self):
         response = self.client.post(
             "/admin/production-followups/1/laser",
