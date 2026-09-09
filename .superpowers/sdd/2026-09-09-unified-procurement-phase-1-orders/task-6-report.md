@@ -97,3 +97,51 @@ Dynamic SQL identifiers come exclusively from fixed internal allowlists or inter
 - Historical rows with invalid data intentionally remain unmigrated and require later operator correction. Supplier conflicts need human review; no automated overwrite or conflict resolution was attempted.
 - Complete suite was run twice only because the first revealed an obsolete assertion and the controller explicitly required final full-suite evidence after correction. Final production code was unchanged between those two runs; only that test assertion changed.
 - No fresh browser visual QA was requested for this migration task; permission-aware navigation was verified using real Flask responses. The existing opt-in browser regression remains the only skip.
+
+## Review fix round 1 — 2026-09-10
+
+Fix implementation commit: `20202f24082be6db2951e50eb1fa5f6ed74dd125` (`fix: preserve procurement provenance and lock reports`). This round addresses all three Important findings under the controller's updated ledger rulings. The receiving-code-review, test-driven-development, systematic-debugging, and verification-before-completion skills guided evidence-first reproduction, minimal changes, and final verification. No subagents or production resources were used.
+
+### Permanent source rows and editable carton dimensions
+
+- Any existing item whose `legacy_source` or `legacy_id` is non-null is now rejected by the domain layer if omitted from an update. The rejection occurs before any order mutation and returns the explicit business error `历史来源明细不能删除；可以编辑业务字段或新增明细`, not an attachment-trigger `IntegrityError`/HTTP 500.
+- The editor disables deletion for these rows and displays `历史来源（不可删除）`. JavaScript preserves the provenance while adding/reordering rows; new rows receive no provenance and remain removable. Error rendering reattaches provenance exclusively from saved database rows and restores an omitted source row so the form remains repairable. Posted metadata is never trusted.
+- Carton `dimension_text` is now an allowed, visible text control labeled `尺寸说明/历史尺寸`. Real rendered-form submissions preserve migrated free text, support explicit replacement/clearing, and retain submitted text on validation failure. Numeric length/width/height remain independent; free text is not converted into invented dimensions.
+- XLSX/PDF documents show the carton text in the existing `其他要求` cell alongside the original remark. Existing carton columns and widths are preserved, including both price-visible and price-hidden exports.
+
+### Shared-lock read-only CLI
+
+The earlier report section's statement that `mode=ro` plus `BEGIN` alone guarantees a consistent application snapshot is superseded: the application can write using SQLite `nolock=1`, so the CLI must also cooperate with its application lock.
+
+- The CLI does not import `app`. Lock selection is explicit `--lock-path`, then `JIEDE_WRITE_LOCK_PATH`, then the application default `/tmp/jiede-web-write.lock`.
+- The selected lock must already exist. It is opened as `rb`, acquired with `fcntl.flock(LOCK_EX)`, and held before opening the `mode=ro` database and throughout `BEGIN`, report reads, and connection close. Only then is the lock released. Lock contents and mtime are not modified.
+- A missing/unreadable lock fails clearly and is not created. `--offline` is an explicit mutually exclusive escape hatch only for static copies or a stopped application; both help and stderr warn that concurrent `nolock` writers can make the report inconsistent. Sorted JSON remains on stdout.
+- All tests use explicitly selected or environment-selected temporary lock paths. The default `/tmp` application lock was never opened by this work. All CLI database targets are synthetic temporary fixtures.
+
+### Strict RED → GREEN evidence
+
+1. **Source-row protection RED:** two new route tests exposed attachment deletion raising `IntegrityError`, attachment-free deletion incorrectly returning 302, and the enabled source-row delete button. The new Node test also failed (4/5 passed) because the source row could be removed. **GREEN:** both route tests and all five Node tests passed. Tests cover attachment/no-attachment HTTP 400 with complete before/after SQL dumps unchanged, disabled UI, append while retaining the source row, migration rerun creating zero orders, and complete report source accounting.
+2. **Carton text RED:** real visible-form and document tests failed because the field was missing and historical text was omitted from exports. **GREEN:** both tests passed after adding the field and export rendering. Export assertions account for existing cell/PDF wrapping without changing layout. The form test covers unchanged, modified, cleared, and validation-error values with absent numeric dimensions remaining null.
+3. **CLI lock RED:** three CLI tests failed on the unsupported `--lock-path`, missing-lock success, and lack of a shared-lock acquisition barrier. **GREEN:** all three passed with default/environment/override selection, missing-lock noncreation, explicit offline warning, stable sorted JSON, and real subprocess concurrency.
+
+The concurrency test starts a writer against a temporary database with `mode=rw&nolock=1` while holding a pre-created temporary application lock. The writer commits only the legacy half, signals a barrier, and stays locked. The actual report CLI signals its lock attempt and cannot finish during a 0.2-second bounded assertion. The writer then commits the unified half and signals a second barrier while still holding the lock. After release, the CLI reports only the completed state: carton quantities **15 → 15**, amounts **4,245 → 4,245 minor units**. Database SHA-256 and nanosecond mtime captured at the completed-but-still-locked barrier are unchanged after the CLI exits. This exercises actual processes and the application's `nolock` model, not a mocked lock or a normal SQLite writer.
+
+### Final verification and persisted QA
+
+- Phase 1 focused suite: **100 tests in 6.625 seconds, all passed, no skips** (`tests.test_procurement_schema`, `tests.test_procurement_permissions`, `tests.test_suppliers`, `tests.test_purchase_orders`, `tests.test_purchase_order_exports`, `tests.test_procurement_migration`).
+- Final complete Python suite, run once in this fix round on the final production/test changes with bundled Poppler explicitly on PATH: **664 tests in 63.951 seconds, OK, skipped=1 (663 passed)**. The sole skip remains the existing opt-in real-browser shipping-color check; no export tests skipped.
+- `node --test tests/js/purchase-orders.test.js`: **5/5 passed**, no skips.
+- `git diff --check` and staged diff check passed. Self-reviewed all nine changed files, including provenance reconstruction, normalization allowlists, transaction ordering, document escaping, lock lifetime/error paths, old-schema compatibility, and temporary-only test targets. No new dynamic SQL, table migration, permission expansion, legacy source mutation, or unrelated changes were introduced.
+
+Logs are under `/private/tmp/jiede-procurement-task6-qa/`: `fix1-focused.log`, `fix1-full-suite.log`, and `fix1-node.log`.
+
+The actual CLI was also rerun against the existing synthetic `valid.db`, explicitly using the pre-created `fix1-report.lock`. Its output is saved as `fix1-locked-report.json`, with lock acquisition diagnostics in `fix1-locked-report.stderr`. `cmp` against `valid-report.json` passed: all source counts, totals, and canonical JSON bytes are unchanged (4 migrated orders, 14 supplier links, 8 supplier conflicts, 1 attachment, 1 deferred arrival row).
+
+| File | Unchanged SHA-256 before/after locked CLI | Unchanged mtime_ns |
+| --- | --- | --- |
+| Synthetic `valid.db` | `974dc3b5a39a0fbb470d4767be5e7099e74505411af8d6593dd747ae1168db8d` | `1788968068698495263` |
+| Pre-created `fix1-report.lock` | `14e98e71f404e5c646ccde557961d69c8aebe2062f0ff37b05790f6e29c9671a` | `1788969602228878356` |
+
+Changed files in this round: `app.py`, `procurement.py`, `procurement_documents.py`, `scripts/report_procurement_migration.py`, `static/purchase-orders.js`, `templates/purchase_order_form.html`, `tests/js/purchase-orders.test.js`, `tests/test_procurement_migration.py`, and `tests/test_purchase_order_exports.py`.
+
+Residual boundaries: direct out-of-band SQL is not an authorized editor and must preserve legacy provenance; all application updates use the protected domain path. Consistent online reporting depends on every writer using the same stable lock inode/path, as the application already does. `--offline` deliberately disables that protection and must not be used against a live writable database. These are documented operational constraints, not permission to touch a live database or deploy this branch.
