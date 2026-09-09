@@ -15755,7 +15755,8 @@ def build_order_shipment_preview(conn, rows):
         if not row['legacy'] and (customer, manual_id) in seen:
             raise ValueError('同一客户产品请合并为一行')
         seen.add((customer, manual_id))
-        orders = conn.execute(f'''SELECT o.id,o.order_no,
+        orders = conn.execute(f'''SELECT o.id,o.order_no,o.planned_ship_at,o.quantity,
+            COALESCE(s.shipped_total,o.shipped_quantity,0) AS shipped_quantity,
             o.quantity-COALESCE(s.shipped_total,o.shipped_quantity,0) AS unshipped_quantity
             FROM product_orders o JOIN manuals m ON m.id=o.manual_id
             LEFT JOIN ({order_shipment_summary_subquery(include_assembly=True, conn=conn)}) s ON s.order_id=o.id
@@ -15769,6 +15770,7 @@ def build_order_shipment_preview(conn, rows):
                 candidates.append(dict(candidate, unshipped_quantity=remaining_by_order[candidate['id']]))
         if row['legacy'] and row['quantity'] > sum(c['unshipped_quantity'] for c in candidates):
             raise ValueError('发货数量不能大于未发数量')
+        # Fingerprint every candidate input, including orders this quantity does not reach.
         allocations = allocate_quantity(row['quantity'], candidates)
         for allocation in allocations:
             if allocation['order_id'] is not None:
@@ -15783,7 +15785,7 @@ def build_order_shipment_preview(conn, rows):
         item = dict(row, manual_id=manual_id, customer=customer,
                     drawing_no=manual['drawing_no'] or '', product_name=manual['product_name'] or '',
                     specification=manual['supplier'] or '', unit=manual['unit'] or '',
-                    allocations=allocations, available_inventory=available,
+                    allocation_candidates=candidates, allocations=allocations, available_inventory=available,
                     inventory_deducted_quantity=deducted, inventory_shortage_quantity=row['quantity']-deducted,
                     unallocated_quantity=sum(a['quantity'] for a in allocations if a['order_id'] is None),
                     order_no=' / '.join(a['order_no'] for a in allocations) or (order['order_no'] if order else '未关联订单'))
@@ -16587,7 +16589,9 @@ def edit_shipment(shipment_id):
                 return redirect(url_for("edit_shipment", shipment_id=shipment_id))
 
             now = datetime.utcnow().isoformat(timespec="seconds")
-            reverse_shipment_inventory_deduction(conn, shipment_id)
+            quantity_changed = shipped_quantity_value != int(shipment["shipped_quantity"])
+            if quantity_changed:
+                reverse_shipment_inventory_deduction(conn, shipment_id)
             conn.execute(
                 """
                 UPDATE product_order_shipments
@@ -16598,13 +16602,14 @@ def edit_shipment(shipment_id):
                 """,
                 (shipped_quantity_value, shipped_at, logistics_no, shipment_id),
             )
-            deduct_inventory_for_shipment(
-                conn,
-                shipment_id,
-                shipment["order_id"],
-                shipped_quantity_value,
-                allow_shortage=True,
-            )
+            if quantity_changed:
+                deduct_inventory_for_shipment(
+                    conn,
+                    shipment_id,
+                    shipment["order_id"],
+                    shipped_quantity_value,
+                    allow_shortage=True,
+                )
             signature_reset = shipment["signature_status"] == "已签收" or bool(shipment["signed_at"])
             if signature_reset:
                 reset_shipment_signature_state(conn, shipment_id)
@@ -16659,6 +16664,8 @@ def reverse_supplemental_inventory(conn, shipment_id):
 @app.route('/admin/shipped-orders/supplemental/<int:shipment_id>/edit', methods=['GET', 'POST'])
 @permission_required('shipped_manage')
 def edit_supplemental_shipment(shipment_id):
+    if request.method == 'POST':
+        require_shipment_price_csrf()
     try:
         with get_db() as conn:
             if request.method == 'POST':
@@ -16701,6 +16708,7 @@ def edit_supplemental_shipment(shipment_id):
 @app.route('/admin/shipped-orders/supplemental/<int:shipment_id>/delete', methods=['POST'])
 @permission_required('shipped_manage')
 def delete_supplemental_shipment(shipment_id):
+    require_shipment_price_csrf()
     image_files = []
     try:
         with get_db() as conn:

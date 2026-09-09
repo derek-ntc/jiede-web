@@ -6,6 +6,7 @@
   <p>{{ shipment.customer }} / {{ shipment.drawing_no }} / {{ shipment.product_name }} / 未关联订单</p>
   {% if shipment.claimed %}<p role="alert">已加入开票或对账单，数量、日期和行备注已锁定；仍可更新物流备注。</p>{% endif %}
   <form method="post" class="grid-form">
+    <input type="hidden" name="csrf_token" value="{{ shipment_price_csrf_token() }}">
     <label>规格型号<input value="{{ shipment.specification_snapshot }}" disabled></label>
     <label>发货日期<input name="shipped_at" type="date" value="{{ shipment.shipped_at }}" required {% if shipment.claimed %}readonly{% endif %}></label>
     <label>数量<input name="shipped_quantity" type="number" min="1" max="2147483647" value="{{ shipment.shipped_quantity }}" required {% if shipment.claimed %}readonly{% endif %}></label>

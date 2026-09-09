@@ -53,9 +53,18 @@ function initializeOrderShipmentLines(form, {shipmentLines, bindLine, syncRecipi
       const data = await response.json();
       if (generation !== current || composing) return;
       if (!response.ok) {status.textContent=data.error || '预览失败';return;}
-      token.value=data.preview_token;
       const selected = shipmentLines().filter(row=>identity(row));
       data.items.forEach((item,index)=>{
+        const row = selected[index], option = selection(row);
+        const candidate = item.allocation_candidates.find(order=>String(order.id)===option.value);
+        Object.assign(option.dataset, {drawingNo:item.drawing_no,productName:item.product_name,
+          specification:item.specification,unit:item.unit});
+        if (candidate) Object.assign(option.dataset, {orderNo:candidate.order_no,unshipped:String(candidate.unshipped_quantity)});
+        option.textContent = option.value.startsWith('extra:')
+          ? `${item.drawing_no || '-'} / ${item.product_name || '-'} / ${item.customer}（追加产品）`
+          : `${option.dataset.orderNo || item.order_no} / ${item.drawing_no || '-'} / ${item.product_name || '-'} / 未发 ${option.dataset.unshipped || 0} / ${item.customer}`;
+        field(row, 'order-line-spec').textContent=item.specification || '';
+        field(row, 'shipment-quantity').placeholder=candidate ? `订单未发 ${candidate.unshipped_quantity}` : '';
         const messages = [];
         if (Number(item.quantity) === 0) messages.push('本次不发');
         if (item.unallocated_quantity) messages.push(`未关联订单 ${item.unallocated_quantity}：将保存为补充发货`);
@@ -63,6 +72,7 @@ function initializeOrderShipmentLines(form, {shipmentLines, bindLine, syncRecipi
         field(selected[index], 'order-line-status').textContent=messages.join('；');
       });
       status.textContent = '已核对；0 行仅保留在送货单，库存不足只扣除现有库存。';
+      token.value=data.preview_token;
       submit.disabled=false;
     } catch {if(generation===current)status.textContent='预览失败，请重试';}
   }

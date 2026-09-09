@@ -2,6 +2,7 @@
 
 import sqlite3
 import json
+import re
 import subprocess
 from pathlib import Path
 from io import BytesIO
@@ -111,6 +112,12 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
             'logistics_no': '整车物流', 'operation_token': token,
             'preview_token': preview.get_json()['preview_token'], **extra})
 
+    def supplemental_post(self, path, data=None):
+        self.client.get('/admin/shipped-orders')
+        with self.client.session_transaction() as session:
+            csrf = session['shipment_price_csrf_token']
+        return self.client.post(path, data={'csrf_token': csrf, **(data or {})})
+
     def test_added_product_allocates_delivery_date_then_id_and_supplemental_remainder(self):
         lines = [self.line(quantity=11), self.line(self.zero, 0)]
         lines[0]['remark'] = '<两箱> & 小心'
@@ -205,7 +212,7 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
             sid = conn.execute('SELECT id FROM supplemental_shipments').fetchone()[0]
             note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
             conn.execute('UPDATE manuals SET unit_price_minor=999')
-        response = self.client.post(f'/admin/shipped-orders/supplemental/{sid}/edit', data={
+        response = self.supplemental_post(f'/admin/shipped-orders/supplemental/{sid}/edit', data={
             'shipped_quantity': '2', 'shipped_at': '2026-09-10', 'remark': '新备注', 'logistics_no': '新物流'})
         self.assertEqual(response.status_code, 302)
         with app.get_db() as conn:
@@ -213,7 +220,7 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
             self.assertEqual((row['shipped_quantity'], row['inventory_deducted_quantity'], row['inventory_shortage_quantity'], row['unit_price_minor']), (2, 2, 0, 123))
             self.assertEqual(app.inventory_total_for_manual(conn, self.zero), 1)
             self.assertEqual(shipping.load_delivery_note(conn, note_id)['items'][0]['quantity'], 5)
-        self.assertEqual(self.client.post(f'/admin/shipped-orders/supplemental/{sid}/delete').status_code, 302)
+        self.assertEqual(self.supplemental_post(f'/admin/shipped-orders/supplemental/{sid}/delete').status_code, 302)
         with app.get_db() as conn:
             self.assertEqual(app.inventory_total_for_manual(conn, self.zero), 3)
             self.assertEqual(shipping.load_delivery_note(conn, note_id)['invalidated'], 1)
@@ -228,10 +235,12 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
                     claim = app.create_finance_invoice(conn, self.customer, refs, 'admin')
                 else:
                     claim = app.create_reconciliation_statement(conn, refs, 'admin')['statement_id']
-            self.assertEqual(self.client.post(f'/admin/shipped-orders/supplemental/{sid}/edit', data={'shipped_quantity': '1', 'shipped_at': '2026-09-09', 'remark': 'new'}).status_code, 302)
-            self.assertEqual(self.client.post(f'/admin/shipped-orders/supplemental/{sid}/delete').status_code, 302)
+            self.assertEqual(self.supplemental_post(f'/admin/shipped-orders/supplemental/{sid}/edit', data={'shipped_quantity': '1', 'shipped_at': '2026-09-09', 'remark': 'new'}).status_code, 302)
+            self.assertEqual(self.supplemental_post(f'/admin/shipped-orders/supplemental/{sid}/delete').status_code, 302)
+            self.assertEqual(self.supplemental_post(f'/admin/shipped-orders/supplemental/{sid}/edit', data={'shipped_quantity': '2', 'shipped_at': '2026-09-09', 'remark': '', 'logistics_no': '已锁定仍可更新物流'}).status_code, 302)
             with app.get_db() as conn:
                 self.assertEqual(conn.execute('SELECT shipped_quantity FROM supplemental_shipments WHERE id=?', (sid,)).fetchone()[0], 2)
+                self.assertEqual(conn.execute('SELECT logistics_no FROM supplemental_shipments WHERE id=?', (sid,)).fetchone()[0], '已锁定仍可更新物流')
                 if kind == 'finance':
                     app.delete_pending_finance_invoice(conn, claim)
                 else:
@@ -268,6 +277,10 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
         result = subprocess.run(['node', 'tests/order_shipping_ui.cjs'], cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_order_browser_refreshes_stale_specification_without_losing_edits_or_ime(self):
+        result = subprocess.run(['node', 'tests/order_shipping_ui.cjs', 'stale-spec'], cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_supplemental_only_images_are_saved_and_invalid_image_rolls_back(self):
         response = self.save([self.line(self.zero, 2)], token='invalid-photo', images=(BytesIO(b'not-png'), 'bad.png'))
         self.assertEqual(response.location, '/admin/shipped-orders/create')
@@ -280,7 +293,7 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
             image = conn.execute('SELECT * FROM supplemental_shipment_images').fetchone()
             self.assertEqual(image['original_filename'], 'photo.png')
         self.assertEqual(self.client.get('/shipment-image/'+image['filename']).status_code, 200)
-        self.client.post('/admin/shipped-orders/supplemental/1/delete')
+        self.supplemental_post('/admin/shipped-orders/supplemental/1/delete')
         self.assertEqual(list(app.SHIPMENT_IMAGES_DIR.iterdir()), [])
 
     def test_zero_only_customer_note_survives_master_edit_but_operation_source_delete_invalidates(self):
@@ -340,3 +353,99 @@ class OrderShipmentLineTests(AssemblyTask7TestCase):
         with app.get_db() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM supplemental_shipments').fetchone()[0], 0)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_order_shipments').fetchone()[0], 0)
+
+    def test_ordinary_metadata_edit_preserves_shortage_after_replenishment(self):
+        order_id = self.create_order(self.zero, 'SHORTAGE', 10)
+        self.stock_product(self.zero, 2)
+        response = self.client.post('/admin/shipped-orders/new', data={
+            'order_id': str(order_id), 'shipped_quantity': '5', 'shipped_at': '2026-09-09'})
+        self.assertRegex(response.location, r'/admin/delivery-notes/operations/\d+$')
+        self.stock_product(self.zero, 3)
+        with app.get_db() as conn:
+            sid = conn.execute('SELECT id FROM product_order_shipments').fetchone()[0]
+            transactions = [tuple(row) for row in conn.execute("SELECT * FROM inventory_transactions WHERE type='out' ORDER BY id")]
+            self.assertEqual(app.shipment_inventory_deducted_quantity(conn, sid), 2)
+        for date, note in [('2026-09-09', '只改物流'), ('2026-09-10', '再改日期')]:
+            with self.subTest(date=date):
+                response = self.client.post(f'/admin/shipped-orders/{sid}/edit', data={
+                    'shipped_quantity': '5', 'shipped_at': date, 'logistics_no': note})
+                self.assertEqual(response.location, '/admin/shipped-orders')
+                with app.get_db() as conn:
+                    source = conn.execute('SELECT * FROM product_order_shipments WHERE id=?', (sid,)).fetchone()
+                    self.assertEqual((source['shipped_at'], source['logistics_no']), (date, note))
+                    deducted = app.shipment_inventory_deducted_quantity(conn, sid)
+                    self.assertEqual((deducted, source['shipped_quantity'] - deducted), (2, 3))
+                    self.assertEqual(app.inventory_total_for_manual(conn, self.zero), 3)
+                    self.assertEqual([tuple(row) for row in conn.execute("SELECT * FROM inventory_transactions WHERE type='out' ORDER BY id")], transactions)
+
+    def test_preview_rejects_changed_allocation_inputs_even_when_allocation_is_unchanged(self):
+        lines = [self.line(quantity=1)]
+        for name, statement, values in [
+            ('balance', 'UPDATE product_orders SET shipped_quantity=1 WHERE id=?', (self.early,)),
+            ('later-balance', 'UPDATE product_orders SET quantity=8 WHERE id=?', (self.late,)),
+            ('date', 'UPDATE product_orders SET planned_ship_at=? WHERE id=?', ('2026-08-31', self.early)),
+        ]:
+            with self.subTest(change=name):
+                before = self.preview(lines).get_json()
+                with app.get_db() as conn:
+                    conn.execute(statement, values)
+                after = self.preview(lines).get_json()
+                self.assertEqual(before['items'][0]['allocations'], after['items'][0]['allocations'])
+                response = self.client.post('/admin/shipped-orders/new', data={
+                    'shipment_lines': json.dumps(lines), 'shipped_at': '2026-09-09',
+                    'preview_token': before['preview_token'], 'operation_token': 'changed-' + name})
+                self.assertEqual(response.status_code, 409)
+                self.assertNotEqual(before['preview_token'], after['preview_token'])
+                self.assertEqual(response.get_json()['preview']['preview_token'], after['preview_token'])
+                with app.get_db() as conn:
+                    for table in ('delivery_operations', 'product_order_shipments', 'supplemental_shipments'):
+                        self.assertEqual(conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 0)
+                    self.assertEqual(app.inventory_total_for_manual(conn, self.product), 4)
+
+    def test_supplemental_mutations_require_session_csrf_and_templates_supply_it(self):
+        self.stock_product(self.zero, 2)
+        self.save([self.line(self.zero, 3)])
+        edit_url = '/admin/shipped-orders/supplemental/1/edit'
+        delete_url = '/admin/shipped-orders/supplemental/1/delete'
+        data = {'shipped_quantity': '1', 'shipped_at': '2026-09-10', 'remark': '修改'}
+        edit_page = self.client.get(edit_url).get_data(as_text=True)
+        token_match = re.search(r'name="csrf_token" value="([^"]+)"', edit_page)
+        self.assertIsNotNone(token_match)
+        csrf = token_match.group(1)
+        with self.client.session_transaction() as session:
+            self.assertEqual(csrf, session['shipment_price_csrf_token'])
+        for url in (edit_url, delete_url):
+            for supplied in ({}, {'csrf_token': 'invalid'}):
+                with self.subTest(url=url, supplied=supplied):
+                    self.assertEqual(self.client.post(url, data={**data, **supplied}).status_code, 403)
+        page = self.client.get('/admin/shipped-orders').get_data(as_text=True)
+        delete_form = re.search(r'<form[^>]+action="' + delete_url + r'".*?</form>', page, re.S)
+        self.assertIsNotNone(delete_form)
+        self.assertIn(f'name="csrf_token" value="{csrf}"', delete_form.group(0))
+        with app.get_db() as conn:
+            self.assertEqual(tuple(conn.execute('SELECT shipped_quantity,inventory_deducted_quantity FROM supplemental_shipments').fetchone()), (3, 2))
+            self.assertEqual(app.inventory_total_for_manual(conn, self.zero), 0)
+        self.assertEqual(self.client.post(edit_url, data={**data, 'csrf_token': csrf}).status_code, 302)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT shipped_quantity FROM supplemental_shipments').fetchone()[0], 1)
+        self.assertEqual(self.client.post(delete_url, data={'csrf_token': csrf}).status_code, 302)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM supplemental_shipments').fetchone()[0], 0)
+            self.assertEqual(app.inventory_total_for_manual(conn, self.zero), 2)
+
+    def test_supplemental_csrf_does_not_grant_shipment_permission(self):
+        self.save([self.line(self.zero, 2)])
+        self.client.get('/admin/shipped-orders')
+        with app.get_db() as conn:
+            conn.execute("INSERT INTO users(username,password_hash,role,can_manage_shipped,can_view_shipped,created_at,updated_at) VALUES ('view-only','hash','operator',0,1,'','')")
+        with self.client.session_transaction() as session:
+            csrf = session['shipment_price_csrf_token']
+            session['admin_username'] = 'view-only'
+            session['admin_role'] = 'operator'
+        for action in ('edit', 'delete'):
+            response = self.client.post(f'/admin/shipped-orders/supplemental/1/{action}', data={
+                'csrf_token': csrf, 'shipped_quantity': '1', 'shipped_at': '2026-09-10'})
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, '/admin')
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT shipped_quantity FROM supplemental_shipments').fetchone()[0], 2)
