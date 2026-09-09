@@ -154,9 +154,9 @@ def ensure_procurement_tables(conn) -> None:
             thickness REAL,
             expected_at TEXT NOT NULL,
             remark TEXT NOT NULL,
-            ordered_quantity INTEGER NOT NULL CHECK (ordered_quantity > 0),
-            unit_price_minor INTEGER CHECK (unit_price_minor IS NULL OR unit_price_minor >= 0),
-            line_total_minor INTEGER CHECK (line_total_minor IS NULL OR line_total_minor >= 0),
+            ordered_quantity INTEGER NOT NULL CHECK (typeof(ordered_quantity) = 'integer' AND ordered_quantity > 0),
+            unit_price_minor INTEGER CHECK (unit_price_minor IS NULL OR (typeof(unit_price_minor) = 'integer' AND unit_price_minor >= 0)),
+            line_total_minor INTEGER CHECK (line_total_minor IS NULL OR (typeof(line_total_minor) = 'integer' AND line_total_minor >= 0)),
             legacy_source TEXT,
             legacy_id INTEGER,
             created_at TEXT NOT NULL,
@@ -202,4 +202,94 @@ def ensure_procurement_tables(conn) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_order_items_legacy_source_id "
         "ON purchase_order_items (legacy_source, legacy_id) "
         "WHERE legacy_source IS NOT NULL AND legacy_id IS NOT NULL"
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_supplier_legacy_links_require_supplier_insert
+        BEFORE INSERT ON supplier_legacy_links
+        FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM suppliers WHERE id = NEW.supplier_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'supplier_legacy_links.supplier_id references no supplier');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_supplier_legacy_links_require_supplier_update
+        BEFORE UPDATE OF supplier_id ON supplier_legacy_links
+        FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM suppliers WHERE id = NEW.supplier_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'supplier_legacy_links.supplier_id references no supplier');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_suppliers_restrict_purchase_order_delete
+        BEFORE DELETE ON suppliers
+        FOR EACH ROW WHEN EXISTS (SELECT 1 FROM purchase_orders WHERE supplier_id = OLD.id)
+        BEGIN
+            SELECT RAISE(ABORT, 'supplier has purchase orders');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_suppliers_cascade_legacy_links_delete
+        AFTER DELETE ON suppliers
+        FOR EACH ROW
+        BEGIN
+            DELETE FROM supplier_legacy_links WHERE supplier_id = OLD.id;
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchase_orders_require_supplier_insert
+        BEFORE INSERT ON purchase_orders
+        FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM suppliers WHERE id = NEW.supplier_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase_orders.supplier_id references no supplier');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchase_orders_require_supplier_update
+        BEFORE UPDATE OF supplier_id ON purchase_orders
+        FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM suppliers WHERE id = NEW.supplier_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase_orders.supplier_id references no supplier');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchase_order_items_require_order_insert
+        BEFORE INSERT ON purchase_order_items
+        FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM purchase_orders WHERE id = NEW.purchase_order_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase_order_items.purchase_order_id references no purchase order');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchase_order_items_require_order_update
+        BEFORE UPDATE OF purchase_order_id ON purchase_order_items
+        FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM purchase_orders WHERE id = NEW.purchase_order_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase_order_items.purchase_order_id references no purchase order');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchase_orders_cascade_items_delete
+        AFTER DELETE ON purchase_orders
+        FOR EACH ROW
+        BEGIN
+            DELETE FROM purchase_order_items WHERE purchase_order_id = OLD.id;
+        END
+        """
     )
