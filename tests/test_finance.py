@@ -1,4 +1,5 @@
 import sqlite3
+import re
 import tempfile
 import unittest
 from io import BytesIO
@@ -809,6 +810,43 @@ class FinanceRouteTests(FinanceDomainTestCase):
             session["admin_username"] = username
             session["admin_role"] = "operator"
 
+    def test_rendered_supplemental_selection_creates_invoice_through_post(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            _, sid = insert_supplemental(conn, self.manual_a, currency='CNY')
+        self.login_as('finance-manager')
+        page = self.client.get('/admin/finance/new', query_string={'customer_id': self.customer_a})
+        self.assertEqual(page.status_code, 200)
+        selected_ref = re.search(r'value="(supplemental:[1-9][0-9]*)"', page.get_data(as_text=True))
+        self.assertIsNotNone(selected_ref)
+        response = self.client.post('/admin/finance/new', data={
+            'customer_id': self.customer_a, 'source_ref': selected_ref[1]})
+        self.assertRegex(response.location, r'/admin/finance/[0-9]+$')
+        with app.get_db() as conn:
+            item = conn.execute('SELECT * FROM finance_invoice_items').fetchone()
+            self.assertEqual((item['source_type'], item['source_id'], item['quantity'], item['line_total_minor']),
+                             ('supplemental', sid, 2, 226))
+            self.assertEqual(conn.execute('SELECT total_minor FROM finance_invoices').fetchone()[0], 226)
+
+    def test_rendered_supplemental_selection_replaces_invoice_items_through_post(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            _, sid = insert_supplemental(conn, self.manual_a, currency='CNY')
+            invoice_id = app.create_finance_invoice(conn, self.customer_a,
+                [('ordinary', self.ordinary_a_cny)], 'finance-manager')
+        self.login_as('finance-manager')
+        page = self.client.get(f'/admin/finance/{invoice_id}')
+        self.assertEqual(page.status_code, 200)
+        selected_ref = re.search(r'value="(supplemental:[1-9][0-9]*)"', page.get_data(as_text=True))
+        self.assertIsNotNone(selected_ref)
+        response = self.client.post(f'/admin/finance/{invoice_id}/items', data={'source_ref': selected_ref[1]})
+        self.assertEqual(response.location, f'/admin/finance/{invoice_id}')
+        with app.get_db() as conn:
+            items = conn.execute('SELECT source_type,source_id,active_claim_key FROM finance_invoice_items WHERE invoice_id=?', (invoice_id,)).fetchall()
+            self.assertEqual([tuple(item) for item in items], [('supplemental', sid, f'supplemental:{sid}')])
+            self.assertFalse(app.finance_source_is_claimed(conn, 'ordinary', self.ordinary_a_cny))
+            self.assertEqual(conn.execute('SELECT total_minor FROM finance_invoices WHERE id=?', (invoice_id,)).fetchone()[0], 226)
+
     def test_finance_manager_can_create_edit_and_complete_full_lifecycle(self):
         self.login_as("finance-manager")
         response = self.client.get(
@@ -930,6 +968,8 @@ class FinanceRouteTests(FinanceDomainTestCase):
             ["ordinary:not-a-number"],
             [f"ordinary:{self.ordinary_a_cny}", f"ordinary:{self.ordinary_a_cny}"],
             [f"unknown:{self.ordinary_a_cny}"],
+            ['supplemental:0'], ['supplemental:-1'], ['supplemental:1junk'],
+            ['supplemental:1', 'supplemental:1'],
         )
         for refs in cases:
             with self.subTest(refs=refs):

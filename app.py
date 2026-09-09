@@ -6144,7 +6144,7 @@ def finance_claim_key(source_type, source_id):
 def parse_finance_source_refs(raw_refs):
     refs = []
     for raw_ref in raw_refs or ():
-        match = re.fullmatch(r"(ordinary|assembly_item):([1-9][0-9]*)", str(raw_ref))
+        match = re.fullmatch(r"(ordinary|assembly_item|supplemental):([1-9][0-9]*)", str(raw_ref))
         if not match:
             raise ValueError("请选择有效的发货记录")
         refs.append((match.group(1), int(match.group(2))))
@@ -6584,7 +6584,7 @@ def parse_reconciliation_source_refs(raw_refs):
     refs = []
     for raw_ref in raw_refs or ():
         match = re.fullmatch(
-            r"(ordinary|assembly_item):([1-9][0-9]*)", str(raw_ref)
+            r"(ordinary|assembly_item|supplemental):([1-9][0-9]*)", str(raw_ref)
         )
         if not match:
             raise ValueError("请选择有效的发货记录")
@@ -10249,6 +10249,10 @@ def edit_customer(customer_id):
                 conn.execute(
                     "UPDATE assembly_shipment_batches SET customer = ? WHERE customer = ?",
                     (name, previous_name),
+                )
+                conn.execute(
+                    "UPDATE supplemental_shipments SET customer = ?, updated_at = ? WHERE customer = ?",
+                    (name, now, previous_name),
                 )
                 conn.execute(
                     """

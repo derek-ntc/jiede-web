@@ -956,6 +956,40 @@ class ReconciliationBackendRouteTests(ReconciliationDomainTestCase):
         self.assertNotIn("凭证仅显示一次", second_html)
         self.assertIn("重置访问凭证", second_html)
 
+    def test_rendered_supplemental_selection_creates_statement_through_post(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            _, sid = insert_supplemental(conn, self.manual_a, currency='CNY')
+        self.login_as('finance-manager', 'operator')
+        # Supplemental list UI is Task 6; the existing finance picker already
+        # renders the shared source_ref submitted to either finance endpoint.
+        picker = self.client.get('/admin/finance/new', query_string={'customer_id': self.customer_a})
+        self.assertEqual(picker.status_code, 200)
+        selected_ref = re.search(r'value="(supplemental:[1-9][0-9]*)"', picker.get_data(as_text=True))
+        self.assertIsNotNone(selected_ref)
+        token = self.admin_csrf_token_from('/admin/shipped-orders')
+        response = self.client.post('/admin/reconciliation-statements', data={
+            'source_ref': selected_ref[1], 'reconciliation_csrf_token': token})
+        self.assertRegex(response.location, r'/admin/reconciliation-statements/[0-9]+$')
+        with app.get_db() as conn:
+            item = conn.execute('SELECT * FROM reconciliation_statement_items').fetchone()
+            self.assertEqual((item['source_type'], item['source_id'], item['quantity'], item['amount_incl_tax_minor']),
+                             ('supplemental', sid, 2, 226))
+            self.assertEqual(conn.execute('SELECT amount_incl_tax_minor FROM reconciliation_statements').fetchone()[0], 226)
+
+    def test_malformed_and_duplicate_supplemental_refs_create_no_statement(self):
+        self.login_as('finance-manager', 'operator')
+        token = self.admin_csrf_token_from('/admin/shipped-orders')
+        for refs in (['supplemental:0'], ['supplemental:-1'], ['supplemental:1junk'],
+                     ['supplemental:1', 'supplemental:1'], ['unknown:1']):
+            with self.subTest(refs=refs):
+                response = self.client.post('/admin/reconciliation-statements', data={
+                    'source_ref': refs, 'reconciliation_csrf_token': token})
+                self.assertEqual(response.status_code, 302)
+                with app.get_db() as conn:
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM reconciliation_statements').fetchone()[0], 0)
+                    self.assertEqual(conn.execute('SELECT COUNT(*) FROM reconciliation_statement_items').fetchone()[0], 0)
+
     def test_cross_customer_create_error_inserts_no_statement_or_items(self):
         self.login_as("finance-manager", "operator")
         csrf_token = self.admin_csrf_token_from("/admin/shipped-orders")

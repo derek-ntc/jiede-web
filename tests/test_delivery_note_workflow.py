@@ -636,6 +636,44 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
             self.assertNotEqual(note['updated_at'], '2000-01-01')
             self.assertEqual(self.client.get(f'/admin/delivery-notes/{saved["id"]}.pdf').status_code, 200)
 
+    def test_customer_rename_keeps_supplemental_note_valid_and_moves_finance_source(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            operation_id, sid = insert_supplemental(conn, self.product)
+            note_id = shipping_workflow.create_delivery_notes(conn, operation_id,
+                [('supplemental', sid)], {}, 'shipper')[0]
+            original = shipping_workflow.load_delivery_note(conn, note_id)
+        self.assertEqual(self.rename_customer('客户新名称').status_code, 302)
+        with app.get_db() as conn:
+            source = conn.execute('SELECT customer FROM supplemental_shipments WHERE id=?', (sid,)).fetchone()
+            self.assertEqual(source['customer'], '客户新名称')
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+            self.assertEqual(note['invalidated'], 0)
+            self.assertEqual(note['items'], original['items'])
+            for field in ('customer_id', 'customer', 'recipient_name', 'recipient_phone', 'address'):
+                self.assertEqual(note[field], original[field])
+            self.assertIn(('supplemental', sid), {(s['source_type'], s['source_id'])
+                for s in app.fetch_available_finance_sources(conn, '客户新名称')})
+            self.assertNotIn(('supplemental', sid), {(s['source_type'], s['source_id'])
+                for s in app.fetch_available_finance_sources(conn, '客户A')})
+        pdf = self.client.get(f'/admin/delivery-notes/{note_id}.pdf')
+        self.assertEqual(pdf.status_code, 200)
+        self.assertTrue(pdf.data.startswith(b'%PDF'))
+
+    def test_supplemental_rename_failure_rolls_back_customer_and_related_sources(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            _, sid = insert_supplemental(conn, self.product)
+            conn.execute("""CREATE TRIGGER reject_supplemental_rename BEFORE UPDATE OF customer
+                ON supplemental_shipments BEGIN SELECT RAISE(ABORT, 'rename failure'); END""")
+        self.assertEqual(self.rename_customer('客户新名称').status_code, 302)
+        with app.get_db() as conn:
+            self.assertIsNotNone(conn.execute("SELECT id FROM customers WHERE name='客户A'").fetchone())
+            self.assertIsNone(conn.execute("SELECT id FROM customers WHERE name='客户新名称'").fetchone())
+            self.assertEqual(conn.execute('SELECT customer FROM manuals WHERE id=?', (self.product,)).fetchone()[0], '客户A')
+            self.assertEqual(conn.execute('SELECT customer FROM product_orders WHERE id=?', (self.order,)).fetchone()[0], '客户A')
+            self.assertEqual(conn.execute('SELECT customer FROM supplemental_shipments WHERE id=?', (sid,)).fetchone()[0], '客户A')
+
     def test_true_customer_reassignment_invalidates_both_note_modes(self):
         notes = self.save_both_note_modes()
         with app.get_db() as conn:
