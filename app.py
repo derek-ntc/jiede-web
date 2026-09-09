@@ -11792,8 +11792,11 @@ def purchase_page_context(category):
     fields = list(CATEGORY_VISIBLE_FIELDS[category]) + ["quantity", "unit", "expected_at", "remark"]
     if not user_can_view_purchase_prices():
         fields = [field for field in fields if field != "unit_price"]
+    labels = dict(PURCHASE_FIELD_LABELS)
+    if category == "carton":
+        labels["dimension_text"] = "尺寸说明/历史尺寸"
     return dict(category=category, category_slug=category.replace("_", "-"), category_labels=PURCHASE_CATEGORY_LABELS,
-                status_labels=PURCHASE_STATUS_LABELS, field_labels=PURCHASE_FIELD_LABELS, fields=fields)
+                status_labels=PURCHASE_STATUS_LABELS, field_labels=labels, fields=fields)
 
 
 def purchase_price_projection(order, items):
@@ -11854,6 +11857,7 @@ def purchase_form_response(conn, category, order=None, items=None, error=None, s
     else:
         order, items = purchase_price_projection(order, items)
     if submitted is not None:
+        saved_items = {str(item["id"]): item for item in items if item.get("id")}
         for field in ("supplier_id", "delivery_profile_id", "purchased_at", "delivery_address", "recipient", "recipient_phone", "remark"):
             if field in submitted:
                 order[field] = submitted[field]
@@ -11864,6 +11868,13 @@ def purchase_form_response(conn, category, order=None, items=None, error=None, s
             if match and match[2] in visible:
                 indexed.setdefault(int(match[1]), {})[match[2]] = value
         items = [indexed[index] for index in sorted(indexed)][:500] or [{}]
+        for item in items:
+            saved = saved_items.get(item.get("id"), {})
+            # Provenance is supplied only by the database, never by posted fields.
+            item.update({field: saved.get(field) for field in ("legacy_source", "legacy_id")})
+        submitted_ids = {item.get("id") for item in items}
+        items.extend(item for identifier, item in saved_items.items() if identifier not in submitted_ids
+                     and (item.get("legacy_source") is not None or item.get("legacy_id") is not None))
     return render_template("purchase_order_form.html", order=order, items=items, suppliers=suppliers, profiles=profiles, error=error, **purchase_page_context(category)), 400 if error else 200
 
 

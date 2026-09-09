@@ -29,3 +29,11 @@ test('field names reindex and boundary moves are harmless', () => {
   assert.deepEqual(api.moveRow([{id: '1'}], 0, -1), [{id: '1'}]);
   assert.equal(api.removeRow([{id: '1'}], 0).length, 1);
 });
+test('legacy provenance rows cannot be removed and newly added rows remain removable', () => {
+  const legacy = {id: '1', legacy_source: 'carton_purchases', legacy_id: '9', item_name: '来源', dimension_text: '异形尺寸 40×30×20'};
+  assert.deepEqual(api.removeRow([legacy], 0), [legacy]);
+  const rows = api.addRow([legacy]);
+  assert.deepEqual(api.removeRow(rows, 1), [legacy]);
+  assert.deepEqual(api.moveRow(rows, 0, 1), [{}, legacy]);
+  assert.deepEqual(rows[1], {});
+});

@@ -110,7 +110,7 @@ def next_purchase_order_no(conn, purchased_at: str) -> str:
 
 CATEGORY_VISIBLE_FIELDS = {
     "raw_material": ("item_name", "material", "length", "width", "thickness", "surface"),
-    "carton": ("item_name", "material", "length", "width", "height", "unit_price"),
+    "carton": ("item_name", "material", "length", "width", "height", "dimension_text", "unit_price"),
     "outsourcing": ("item_name", "drawing_no", "material", "dimension_text", "thickness", "surface", "unit_price"),
     "other": ("item_name", "spec", "material", "dimension_text", "thickness", "surface", "unit_price"),
 }
@@ -304,6 +304,9 @@ def update_purchase_order(conn, order_id, payload, actor, now) -> None:
         ids = [row["id"] for row in payload["rows"] if row.get("id")]
         if len(set(ids)) != len(ids) or any(item_id not in old_rows for item_id in ids):
             raise ValueError("采购明细 ID 重复或不属于此订单")
+        if any(row["id"] not in ids and (row["legacy_source"] is not None or row["legacy_id"] is not None)
+               for row in existing):
+            raise ValueError("历史来源明细不能删除；可以编辑业务字段或新增明细")
         history = _purchase_receipt_history(conn, order_id)
         if any(item_id not in ids for item_id in history):
             raise ValueError("有到货历史的明细不能删除")

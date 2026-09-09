@@ -96,6 +96,12 @@ def purchase_document_view(order, items, *, include_prices):
                 value = _join(item.get("item_name"), item.get("drawing_no" if category == "outsourcing" else "spec"))
             elif column.key == "details":
                 value = details
+            elif column.key == "remark" and category == "carton" and item.get("dimension_text"):
+                # Keep the established carton columns/print widths, while exposing
+                # free-text historical dimensions alongside the numeric columns.
+                value = "尺寸说明/历史尺寸：" + _text(item["dimension_text"])
+                if item.get("remark"):
+                    value += "\n" + _text(item["remark"])
             elif column.kind == "money":
                 value = _money(item.get(column.key + "_minor"))
             elif column.kind == "date":

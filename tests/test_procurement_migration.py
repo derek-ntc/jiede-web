@@ -2,11 +2,14 @@
 
 import hashlib
 import json
+import os
+import select
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,6 +58,37 @@ def fixture(conn):
     insert(conn, "powder_coating_products", id=12, product_name="支架", supplier_name=" 自由文本厂 ")
     insert(conn, "powder_coating_records", id=13, product_name="支架", delivered_at="2020-03-05", quantity=6)
     conn.commit()
+
+
+class PurchaseForm(HTMLParser):
+    """Collect the actual rendered editor controls, not a mirrored field list."""
+    def __init__(self, html):
+        super().__init__()
+        self.values = {}
+        self.controls = []
+        self.in_form = False
+        self.select = None
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form" and "data-purchase-form" in attrs:
+            self.in_form = True
+        if not self.in_form:
+            return
+        self.controls.append((tag, attrs))
+        if tag == "input" and attrs.get("name") and "disabled" not in attrs:
+            self.values[attrs["name"]] = attrs.get("value", "")
+        if tag == "select":
+            self.select = attrs.get("name")
+        if tag == "option" and self.select and (self.select not in self.values or "selected" in attrs):
+            self.values[self.select] = attrs.get("value", "")
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.in_form = False
+        if tag == "select":
+            self.select = None
 
 
 class MigrationTests(unittest.TestCase):
@@ -280,10 +314,13 @@ class MigrationTests(unittest.TestCase):
             image = Path(directory) / "kept.png"
             image.write_bytes(b"historical attachment: do not replace")
             image_before = (image.read_bytes(), image.stat().st_mtime_ns)
+            lock = Path(directory) / "application.lock"
+            lock.touch()
+            lock_before = (lock.read_bytes(), lock.stat().st_mtime_ns)
             with sqlite3.connect(db) as copy:
                 self.conn.backup(copy)
             before = (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns)
-            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--database", str(db)]
+            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--lock-path", str(lock), "--database", str(db)]
             first = subprocess.run(cmd, capture_output=True, text=True)
             second = subprocess.run(cmd, capture_output=True, text=True)
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -291,6 +328,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(first.stdout, json.dumps(json.loads(first.stdout), ensure_ascii=False, indent=2, sort_keys=True) + "\n")
             self.assertEqual(before, (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns))
             self.assertEqual(image_before, (image.read_bytes(), image.stat().st_mtime_ns))
+            self.assertEqual(lock_before, (lock.read_bytes(), lock.stat().st_mtime_ns))
             absent = Path(directory) / "missing.db"
             failed = subprocess.run(cmd[:-1] + [str(absent)], capture_output=True, text=True)
             self.assertNotEqual(failed.returncode, 0)
@@ -301,6 +339,91 @@ class MigrationTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("schema", failed.stderr.lower())
             self.assertEqual(empty.read_bytes(), b"")
+
+    def test_cli_requires_existing_lock_or_explicit_offline_copy_mode(self):
+        self.migrate()
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "copied.db"
+            lock = Path(directory) / "missing.lock"
+            with sqlite3.connect(db) as copy:
+                self.conn.backup(copy)
+            env = dict(os.environ, JIEDE_WRITE_LOCK_PATH=str(lock))
+            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--database", str(db)]
+            before = (db.read_bytes(), db.stat().st_mtime_ns)
+            failed = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("lock", failed.stderr.lower())
+            self.assertFalse(lock.exists())
+            offline = subprocess.run(cmd + ["--offline"], capture_output=True, text=True, env=env)
+            self.assertEqual(offline.returncode, 0, offline.stderr)
+            self.assertIn("offline", offline.stderr.lower())
+            self.assertIn("nolock", offline.stderr.lower())
+            self.assertEqual(json.loads(offline.stdout)["sources"]["carton_purchases"]["migrated"], 2)
+            self.assertEqual(before, (db.read_bytes(), db.stat().st_mtime_ns))
+            self.assertFalse(lock.exists())
+            # An explicit pre-existing path takes precedence over the environment.
+            override = Path(directory) / "override.lock"
+            override.touch()
+            success = subprocess.run(cmd + ["--lock-path", str(override)], capture_output=True, text=True, env=env)
+            self.assertEqual(success.returncode, 0, success.stderr)
+
+    def test_cli_waits_for_nolock_writer_and_reports_one_completed_snapshot(self):
+        self.migrate()
+        self.conn.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "concurrent.db"
+            lock = Path(directory) / "writer.lock"
+            lock.touch()
+            with sqlite3.connect(db) as copy:
+                self.conn.backup(copy)
+            writer_code = """
+import fcntl, sqlite3, sys
+from pathlib import Path
+with open(sys.argv[2], 'rb') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    conn = sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=rw&nolock=1', uri=True)
+    conn.execute('UPDATE carton_purchases SET quantity=13 WHERE id=7')
+    conn.commit()
+    print('half-written', flush=True)
+    sys.stdin.readline()
+    conn.execute("UPDATE purchase_order_items SET ordered_quantity=13,line_total_minor=4225 WHERE legacy_source='carton_purchases' AND legacy_id=7")
+    conn.commit()
+    print('fully-written-still-locked', flush=True)
+    sys.stdin.readline()
+    conn.close()
+"""
+            writer = subprocess.Popen([sys.executable, "-c", writer_code, str(db), str(lock)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            reporter = None
+            try:
+                self.assertTrue(select.select([writer.stdout], [], [], 5)[0])
+                self.assertEqual(writer.stdout.readline().strip(), "half-written")
+                reporter = subprocess.Popen([sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--database", str(db)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ, JIEDE_WRITE_LOCK_PATH=str(lock)))
+                self.assertTrue(select.select([reporter.stderr], [], [], 5)[0])
+                self.assertIn("application lock", reporter.stderr.readline().lower())
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    reporter.communicate(timeout=0.2)
+                writer.stdin.write("finish\n")
+                writer.stdin.flush()
+                self.assertTrue(select.select([writer.stdout], [], [], 5)[0])
+                self.assertEqual(writer.stdout.readline().strip(), "fully-written-still-locked")
+                before = (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns)
+                writer.stdin.write("release\n")
+                writer.stdin.flush()
+                stdout, stderr = reporter.communicate(timeout=5)
+                self.assertEqual(reporter.returncode, 0, stderr)
+                report = json.loads(stdout)
+                carton = report["sources"]["carton_purchases"]
+                self.assertEqual((carton["old_quantity"], carton["new_quantity"], carton["old_amount_minor"], carton["new_amount_minor"]), (15, 15, 4245, 4245))
+                self.assertEqual(before, (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns))
+            finally:
+                if writer.poll() is None:
+                    writer.communicate("finish\nrelease\n", timeout=5)
+                else:
+                    writer.communicate()
+                if reporter is not None:
+                    reporter.communicate(timeout=5)
+            self.assertEqual(writer.returncode, 0)
 
 
 class MigrationRouteTests(unittest.TestCase):
@@ -420,6 +543,72 @@ class MigrationRouteTests(unittest.TestCase):
         self.assertNotIn(f'/suppliers/{identifier}/reactivate', html)
         html = self.client.get("/admin/purchases/other/new").get_data(as_text=True)
         self.assertNotIn(f'<option value="{identifier}">历史未指定供应商', html)
+
+    def editable_form(self, order_id):
+        response = self.client.get(f"/admin/purchases/orders/{order_id}/edit")
+        self.assertEqual(response.status_code, 200)
+        form = PurchaseForm(response.get_data(as_text=True))
+        with app.get_db() as conn:
+            supplier_id = conn.execute("SELECT id FROM suppliers WHERE active=1 ORDER BY id LIMIT 1").fetchone()[0]
+        form.values.update(supplier_id=str(supplier_id), delivery_profile_id="", delivery_address="收货处", recipient="采购员", recipient_phone="123")
+        return form
+
+    def test_legacy_source_line_cannot_be_removed_with_or_without_attachment(self):
+        for legacy_id in (8, 9):
+            with self.subTest(legacy_id=legacy_id):
+                with app.get_db() as conn:
+                    order_id = conn.execute("SELECT id FROM purchase_orders WHERE legacy_source='purchase_followups' AND legacy_id=?", (legacy_id,)).fetchone()[0]
+                    before = list(conn.iterdump())
+                form = self.editable_form(order_id)
+                form.values["items[0][id]"] = ""
+                form.values["items[0][item_name]"] = "试图替换来源"
+                response = self.client.post(f"/admin/purchases/orders/{order_id}/edit", data=form.values)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("历史来源明细不能删除", response.get_data(as_text=True))
+                with app.get_db() as conn:
+                    self.assertEqual(list(conn.iterdump()), before)
+
+    def test_legacy_line_ui_protection_and_append_preserve_report_coverage(self):
+        with app.get_db() as conn:
+            order_id = conn.execute("SELECT id FROM purchase_orders WHERE legacy_source='purchase_followups' AND legacy_id=9").fetchone()[0]
+        form = self.editable_form(order_id)
+        buttons = [attrs for tag, attrs in form.controls if tag == "button" and attrs.get("data-row-action") == "remove"]
+        self.assertTrue(not buttons or all("disabled" in attrs for attrs in buttons))
+        self.assertIn("历史来源", self.client.get(f"/admin/purchases/orders/{order_id}/edit").get_data(as_text=True))
+        form.values.update({"items[1][item_name]": "追加行", "items[1][quantity]": "2", "items[1][expected_at]": "2020-02-02"})
+        response = self.client.post(f"/admin/purchases/orders/{order_id}/edit", data=form.values)
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            self.assertEqual(p.migrate_legacy_procurement(conn, NOW)["orders_created"], 0)
+            report = p.procurement_migration_report(conn)
+            self.assertEqual((report["sources"]["purchase_followups"]["migrated"], report["sources"]["purchase_followups"]["unmigrated"]), (2, 0))
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM purchase_order_items WHERE purchase_order_id=?", (order_id,)).fetchone()[0], 2)
+
+    def test_carton_historical_dimensions_round_trip_through_visible_form(self):
+        with app.get_db() as conn:
+            insert(conn, "carton_purchases", id=21, ordered_at="2020-02-03", print_mark="异形箱", supplier_name="Alpha", board_type="B", quantity=2, carton_size="按样 40×30×20，含折边")
+            p.migrate_legacy_procurement(conn, NOW)
+            order_id = conn.execute("SELECT id FROM purchase_orders WHERE legacy_source='carton_purchases' AND legacy_id=21").fetchone()[0]
+        form = self.editable_form(order_id)
+        field = "items[0][dimension_text]"
+        self.assertEqual(form.values.get(field), "按样 40×30×20，含折边")
+        control = next(attrs for tag, attrs in form.controls if attrs.get("name") == field)
+        self.assertEqual(control["type"], "text")
+        self.assertEqual(control["aria-label"], "尺寸说明/历史尺寸")
+        for value in ("按样 40×30×20，含折边", "修改为异形开槽", ""):
+            form.values[field] = value
+            response = self.client.post(f"/admin/purchases/orders/{order_id}/edit", data=form.values)
+            self.assertEqual(response.status_code, 302)
+            form = self.editable_form(order_id)
+            self.assertEqual(form.values[field], value)
+            with app.get_db() as conn:
+                row = conn.execute("SELECT dimension_text,length,width,height FROM purchase_order_items WHERE purchase_order_id=?", (order_id,)).fetchone()
+                self.assertEqual(tuple(row), (value, None, None, None))
+        form.values[field] = "验证失败也要保留"
+        form.values["items[0][quantity]"] = "0"
+        response = self.client.post(f"/admin/purchases/orders/{order_id}/edit", data=form.values)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(PurchaseForm(response.get_data(as_text=True)).values[field], "验证失败也要保留")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,23 @@ class PurchaseOrderBuilderTests(unittest.TestCase):
         self.docs = importlib.import_module("procurement_documents")
         self.order, self.items = sample_order(), sample_items()
 
+    def test_carton_historical_dimension_text_exports_alongside_dimensions_and_remark(self):
+        order = sample_order("carton")
+        items = sample_items()
+        items[0]["dimension_text"] = "按样异形开槽 40×30×20"
+        items[0]["remark"] = "原有备注仍保留"
+        for prices in (True, False):
+            with self.subTest(prices=prices):
+                workbook = self.docs.build_purchase_order_workbook(order, items, include_prices=prices)
+                text = workbook_text(workbook)
+                self.assertIn("按样异形开槽40×30×20", "".join(text.split()))
+                self.assertIn("原有备注仍保留", text)
+                self.assertIn("1200.5", text)
+                pdf = "".join(pdf_pages(self.docs.build_purchase_order_pdf(order, items, include_prices=prices)))
+                self.assertIn("按样异形开槽", "".join(pdf.split()))
+                self.assertIn("40×30×20", "".join(pdf.split()))
+                self.assertIn("原有备注仍保留", "".join(pdf.split()))
+
     def test_category_columns_do_not_export_irrelevant_storage_fields(self):
         contracts = {
             "raw_material": (["材质", "长", "宽", "厚度", "表面", "数量", "预计到货日期", "其他要求"], ["高", "图号", "规格", "单价"]),
