@@ -56,23 +56,19 @@
         <strong>{{ stats.common_infos }}</strong>
       </a>
     {% endif %}
-    {% if can_manage_purchase_followups %}
-      <a class="overview-card" href="{{ url_for('admin_purchase_followups') }}">
-        <span>其他采购</span>
-        <strong>{{ stats.purchase_followups }}</strong>
+    {% if can_view_purchases %}
+      <a class="overview-card" href="{{ url_for('purchase_orders', category='raw-material') }}">
+        <span>统一采购</span>
+        <strong>{{ stats.purchase_orders }}</strong>
         <span class="purchase-pending-line">
-          <span class="purchase-pending-highlight">待采购几条</span>
-          <span class="purchase-pending-count">{{ stats.purchase_followups_pending_purchase_at }} 条</span>
+          <span class="purchase-pending-highlight">采购草稿</span>
+          <span class="purchase-pending-count">{{ stats.purchase_drafts }} 张</span>
         </span>
       </a>
     {% endif %}
     {% if can_manage_carton_purchases %}
-      <a class="overview-card" href="{{ url_for('admin_carton_purchases') }}">
-        <span>纸箱采购管理</span>
-        <strong>{{ stats.carton_purchases }}</strong>
-      </a>
       <a class="overview-card" href="{{ url_for('admin_arrival_records') }}">
-        <span>到货记录</span>
+        <span>到货记录（历史）</span>
         <strong>{{ stats.arrival_records }}</strong>
       </a>
     {% endif %}
@@ -129,19 +125,15 @@
         <span>保存客户地址、开票资料和常用说明。</span>
       </a>
     {% endif %}
-    {% if can_manage_purchase_followups %}
-      <a class="module-card" href="{{ url_for('admin_purchase_followups') }}">
-        <strong>其他采购</strong>
-        <span>跟进其他物品采购事项和采购状态，<span class="purchase-pending-highlight">待填采购时间 {{ stats.purchase_followups_pending_purchase_at }} 条</span>。</span>
+    {% if can_view_purchases %}
+      <a class="module-card" href="{{ url_for('purchase_orders', category='raw-material') }}">
+        <strong>统一采购</strong>
+        <span>管理原材料、纸箱、外协和其他采购，<span class="purchase-pending-highlight">采购草稿 {{ stats.purchase_drafts }} 张</span>。</span>
       </a>
     {% endif %}
     {% if can_manage_carton_purchases %}
-      <a class="module-card" href="{{ url_for('admin_carton_purchases') }}">
-        <strong>纸箱采购管理</strong>
-        <span>按生产订单生成纸箱采购清单，并跟进数量、尺寸、供应商和完成状态。</span>
-      </a>
       <a class="module-card" href="{{ url_for('admin_arrival_records') }}">
-        <strong>到货记录</strong>
+        <strong>到货记录（历史）</strong>
         <span>记录到货日期、物品名称、规格、数量、单价和供应商。</span>
       </a>
     {% endif %}

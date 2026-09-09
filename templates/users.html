@@ -75,6 +75,38 @@
             库存管理
           </label>
           <label class="checkbox-field">
+            <input type="checkbox" name="can_view_purchases">
+            采购查看
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_purchases">
+            采购管理
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_receive_purchases">
+            采购收货
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_view_purchase_inventory">
+            采购库存查看
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_adjust_purchase_inventory">
+            采购库存调整
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_outbound_purchase_inventory">
+            采购库存出库
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_view_purchase_prices">
+            采购价格查看
+          </label>
+          <label class="checkbox-field">
+            <input type="checkbox" name="can_manage_suppliers">
+            客商管理
+          </label>
+          <label class="checkbox-field">
             <input type="checkbox" name="can_manage_production_followups">
             生产跟进点击
           </label>
@@ -166,6 +198,38 @@
                   <label class="checkbox-field">
                     <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_warehouse_inventory" {% if user.can_manage_warehouse_inventory %}checked{% endif %}>
                     库存管理
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_purchases" {% if user.can_view_purchases %}checked{% endif %}>
+                    采购查看
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_purchases" {% if user.can_manage_purchases %}checked{% endif %}>
+                    采购管理
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_receive_purchases" {% if user.can_receive_purchases %}checked{% endif %}>
+                    采购收货
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_purchase_inventory" {% if user.can_view_purchase_inventory %}checked{% endif %}>
+                    采购库存查看
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_adjust_purchase_inventory" {% if user.can_adjust_purchase_inventory %}checked{% endif %}>
+                    采购库存调整
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_outbound_purchase_inventory" {% if user.can_outbound_purchase_inventory %}checked{% endif %}>
+                    采购库存出库
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_view_purchase_prices" {% if user.can_view_purchase_prices %}checked{% endif %}>
+                    采购价格查看
+                  </label>
+                  <label class="checkbox-field">
+                    <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_suppliers" {% if user.can_manage_suppliers %}checked{% endif %}>
+                    客商管理
                   </label>
                   <label class="checkbox-field">
                     <input form="user-form-{{ user.id }}" type="checkbox" name="can_manage_production_followups" {% if user.can_manage_production_followups %}checked{% endif %}>

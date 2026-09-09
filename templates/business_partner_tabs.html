@@ -1,0 +1,11 @@
+<nav class="subnav" aria-label="客商管理">
+  {% if can_manage_customers %}
+    <a class="{% if request.endpoint in ['admin_customers', 'business_partner_customers_alias', 'customer_billing'] %}active-nav-link{% endif %}" href="{{ url_for('admin_customers') }}">客户信息</a>
+  {% endif %}
+  {% if can_manage_suppliers %}
+    <a class="{% if request.endpoint == 'admin_suppliers' %}active-nav-link{% endif %}" href="{{ url_for('admin_suppliers') }}">供应商信息</a>
+  {% endif %}
+  {% if can_manage_common_info %}
+    <a class="{% if request.endpoint in ['admin_common_info', 'business_partner_common_info_alias', 'purchase_delivery_profiles'] %}active-nav-link{% endif %}" href="{{ url_for('admin_common_info') }}">常用信息</a>
+  {% endif %}
+</nav>

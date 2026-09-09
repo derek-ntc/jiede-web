@@ -1,0 +1,8 @@
+.purchase-tabs { display: flex; flex-wrap: wrap; gap: .6rem; margin-bottom: 1rem; }
+.purchase-editor input { min-width: 7rem; }
+.purchase-editor input[type=date] { min-width: 10rem; }
+.purchase-row-actions { display: flex; gap: .3rem; }
+.purchase-row-actions button { white-space: nowrap; }
+.purchase-error { color: #a51d22; padding: 1rem; background: #fff0f0; }
+[data-purchase-form] .form-actions { margin-top: 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+[data-purchase-form] .table-wrap { margin-top: 1rem; }

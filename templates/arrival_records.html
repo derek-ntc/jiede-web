@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}到货记录{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css') }}">{% endblock %}
 {% block content %}
   {% macro money(value) -%}
     {{ "%.2f"|format(value|float) }}
@@ -12,6 +13,7 @@
   {%- endmacro %}
 
 <div class="purchase-followup-page arrival-record-page">
+  {% include 'purchase_tabs.html' %}
   <section class="page-head">
     <div>
       <h1>到货记录</h1>

@@ -107,7 +107,8 @@ class BusinessListLayoutTests(unittest.TestCase):
         checkbox = page.find('input', name='order_id', value=str(self.order))[0]
         self.assertEqual(checkbox['form'], 'shipment-plan-form')
         self.assertTrue(page.find('form', id='shipment-plan-form', method='post'))
-        self.assertTrue(any('formaction' in attrs for attrs in page.find('button')))
+        self.assertTrue(page.find('a', href='/admin/purchases/carton'))
+        self.assertFalse(page.find('button', formaction='/admin/orders/carton-purchases'))
         self.assertTrue(any('due-overdue' in a.get('class', '') for a in page.find('td')))
 
     def test_shipping_history_keeps_export_but_removes_plan_and_create_panels(self):

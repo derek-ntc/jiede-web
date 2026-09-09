@@ -489,7 +489,7 @@ git commit -m "feat: migrate legacy purchase orders"
 - Consumes: all phase-one routes, migrations, exports, and permissions
 - Produces: a reviewed, testable phase-one baseline for phase two
 
-- [ ] **Step 1: Run all Python and JavaScript tests**
+- [x] **Step 1: Run all Python and JavaScript tests**
 
 Run: `python -m unittest discover -s tests -v`
 
@@ -497,17 +497,17 @@ Run: `node --test tests/js/*.test.js`
 
 Expected: all tests PASS.
 
-- [ ] **Step 2: Run database integrity and migration rehearsal on a copied database**
+- [x] **Step 2: Run database integrity and migration rehearsal on a copied database**
 
 Run: `python scripts/report_procurement_migration.py --database /private/tmp/jiede-procurement-rehearsal.db`
 
 Expected: no new foreign-key errors; totals and source coverage match the copied legacy database.
 
-- [ ] **Step 3: Perform local browser acceptance**
+- [x] **Step 3: Perform local browser acceptance**
 
 Verify supplier CRUD, delivery templates, all four order categories, multiple rows, filters, permissions, Excel print settings, PDF pagination, legacy redirects, and unchanged customer pages. Confirm no purchase order changes product inventory.
 
-- [ ] **Step 4: Record verification evidence and commit only if the plan checkbox log changed**
+- [x] **Step 4: Record verification evidence and commit only if the plan checkbox log changed**
 
 ```bash
 git add docs/superpowers/plans/2026-09-09-unified-procurement-phase-1-orders.md

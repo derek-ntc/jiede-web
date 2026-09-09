@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}常用信息管理{% endblock %}
 {% block content %}
+  {% include "business_partner_tabs.html" %}
   <section class="page-head">
     <div>
       <h1>常用信息管理</h1>
@@ -10,6 +11,7 @@
       <strong>{{ common_infos|length }}</strong>
       <span>{% if query or selected_category %}条搜索结果{% else %}条资料{% endif %}</span>
     </div>
+    {% if can_manage_suppliers %}<a class="button secondary" href="{{ url_for('purchase_delivery_profiles') }}">公司收货模板</a>{% endif %}
   </section>
 
   <section class="panel">

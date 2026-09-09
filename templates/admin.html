@@ -41,19 +41,15 @@
         <span>{{ common_info_count }} 条资料，保存客户地址、开票资料和常用说明。</span>
       </a>
     {% endif %}
-    {% if can_manage_purchase_followups %}
-      <a class="module-card" href="{{ url_for('admin_purchase_followups') }}">
-        <strong>其他采购跟进模块</strong>
-        <span>{{ purchase_followup_count }} 条记录，跟进采购物品、数量和采购状态。</span>
+    {% if can_view_purchases %}
+      <a class="module-card" href="{{ url_for('purchase_orders', category='raw-material') }}">
+        <strong>统一采购</strong>
+        <span>{{ purchase_order_count }} 张订单，管理原材料、纸箱、外协和其他采购。</span>
       </a>
     {% endif %}
     {% if can_manage_carton_purchases %}
-      <a class="module-card" href="{{ url_for('admin_carton_purchases') }}">
-        <strong>纸箱采购管理模块</strong>
-        <span>{{ carton_purchase_count }} 条记录，管理纸箱采购清单、尺寸、供应商和完成状态。</span>
-      </a>
       <a class="module-card" href="{{ url_for('admin_arrival_records') }}">
-        <strong>到货记录模块</strong>
+        <strong>到货记录（历史）</strong>
         <span>{{ arrival_record_count }} 条记录，记录到货物品、规格、数量、单价和供应商。</span>
       </a>
     {% endif %}

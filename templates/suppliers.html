@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}供应商信息管理{% endblock %}
+{% block content %}
+  {% include "business_partner_tabs.html" %}
+  <section class="page-head">
+    <div>
+      <h1>供应商信息管理</h1>
+      <p>维护统一供应商档案。停用供应商保留历史采购记录，不能用于后续采购。</p>
+    </div>
+    <div class="head-stat"><strong>{{ suppliers|length }}</strong><span>{% if query %}条搜索结果{% else %}个供应商{% endif %}</span></div>
+    <a class="button secondary" href="{{ url_for('purchase_delivery_profiles') }}">公司收货模板</a>
+  </section>
+
+  <section class="panel">
+    <h2>新增供应商</h2>
+    <form method="post" action="{{ url_for('admin_suppliers') }}" class="grid-form">
+      <label>供应商编码<input type="text" name="code" placeholder="留空自动生成 SUP-00001"></label>
+      <label>供应商名称<input type="text" name="name" required></label>
+      <label>联系人<input type="text" name="contact"></label>
+      <label>电话<input type="text" name="phone"></label>
+      <label>邮箱<input type="text" name="email"></label>
+      <label class="wide">地址<input type="text" name="address"></label>
+      <label class="wide">备注<textarea name="remark" rows="3"></textarea></label>
+      <div class="wide form-actions"><button type="submit">新增供应商</button></div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>供应商列表</h2>
+      <form class="search compact-search" method="get">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索编码、名称、联系人、电话、邮箱、地址或备注">
+        <button type="submit">搜索</button>
+        {% if query %}<a class="button secondary" href="{{ url_for('admin_suppliers') }}">清除</a>{% endif %}
+      </form>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>状态</th><th>编码</th><th>名称</th><th>联系人</th><th>电话</th><th>邮箱</th><th>地址</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead>
+      <tbody>
+        {% for supplier in suppliers %}
+          <tr>
+            <td data-label="状态">{{ '启用' if supplier.active else '已停用' }}</td>
+            <td data-label="编码"><input form="supplier-form-{{ supplier.id }}" name="code" value="{{ supplier.code }}" required></td>
+            <td data-label="名称"><input form="supplier-form-{{ supplier.id }}" name="name" value="{{ supplier.name }}" required></td>
+            <td data-label="联系人"><input form="supplier-form-{{ supplier.id }}" name="contact" value="{{ supplier.contact }}"></td>
+            <td data-label="电话"><input form="supplier-form-{{ supplier.id }}" name="phone" value="{{ supplier.phone }}"></td>
+            <td data-label="邮箱"><input form="supplier-form-{{ supplier.id }}" name="email" value="{{ supplier.email }}"></td>
+            <td data-label="地址"><input form="supplier-form-{{ supplier.id }}" name="address" value="{{ supplier.address }}"></td>
+            <td data-label="备注"><input form="supplier-form-{{ supplier.id }}" name="remark" value="{{ supplier.remark }}"></td>
+            <td data-label="更新时间">{{ supplier.updated_at | datetime }}</td>
+            <td class="actions" data-label="操作"><div class="action-buttons">
+              {% if supplier.system_kind == 'legacy_unknown' %}
+              <span>历史系统档案（只读）</span>
+              {% else %}
+              <form id="supplier-form-{{ supplier.id }}" method="post" action="{{ url_for('edit_supplier', supplier_id=supplier.id) }}"></form>
+              <button form="supplier-form-{{ supplier.id }}" type="submit">保存</button>
+              {% if supplier.active %}
+                <form method="post" action="{{ url_for('delete_supplier', supplier_id=supplier.id) }}" onsubmit="return confirm('确定删除或停用这个供应商吗？');"><button class="danger" type="submit">删除/停用</button></form>
+              {% else %}
+                <form method="post" action="{{ url_for('reactivate_supplier', supplier_id=supplier.id) }}"><button type="submit">恢复启用</button></form>
+              {% endif %}
+              {% endif %}
+            </div></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="10" class="empty">暂无供应商信息</td></tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+{% endblock %}

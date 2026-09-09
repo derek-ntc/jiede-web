@@ -83,7 +83,7 @@
             <input type="date" name="planned_ship_at" value="{{ today }}">
           </label>
           <button type="submit">生成计划发货清单</button>
-          <button type="submit" class="secondary" formaction="{{ url_for('create_carton_purchases_from_orders') }}">生成纸箱采购清单</button>
+          {% if can_view_purchases %}<a class="button secondary" href="{{ url_for('purchase_orders', category='carton') }}">纸箱采购</a>{% endif %}
         </div>
       </form>
     {% endif %}

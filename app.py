@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from email.message import EmailMessage
 from io import BytesIO
 from textwrap import wrap
-from datetime import datetime
+from datetime import datetime, timezone
 from datetime import timedelta
 from functools import wraps
 from itertools import zip_longest
@@ -56,6 +56,7 @@ if not getattr(PillowPackage, "__version__", ""):
 PillowImageFile.LOAD_TRUNCATED_IMAGES = False
 
 from dotenv import load_dotenv
+from runtime_config import DEFAULT_WRITE_LOCK_PATH, resolve_write_lock_path
 from flask import (
     Flask,
     abort,
@@ -112,6 +113,23 @@ from pricing import (
     normalize_currency,
     parse_money_minor,
 )
+from procurement import (
+    CATEGORY_VISIBLE_FIELDS,
+    PURCHASE_CATEGORY_LABELS,
+    PURCHASE_FIELD_LABELS,
+    PURCHASE_STATUS_LABELS,
+    cancel_purchase_order,
+    create_purchase_order,
+    ensure_procurement_tables,
+    fetch_purchase_orders,
+    load_purchase_order,
+    migrate_legacy_procurement,
+    next_supplier_code,
+    normalize_purchase_order_payload,
+    normalize_supplier_payload,
+    supplier_snapshot,
+    update_purchase_order,
+)
 from reconciliation import (
     TAX_RATE_PPM,
     build_reconciliation_workbook,
@@ -150,6 +168,18 @@ from shipping_workflow import (
     ensure_supplemental_source_type,
     normalize_recipient_fields,
 )
+
+
+PROCUREMENT_PERMISSION_COLUMNS = {
+    "can_view_purchases": "purchase_view",
+    "can_manage_purchases": "purchase_manage",
+    "can_receive_purchases": "purchase_receipt",
+    "can_view_purchase_inventory": "purchase_inventory_view",
+    "can_adjust_purchase_inventory": "purchase_inventory_adjust",
+    "can_outbound_purchase_inventory": "purchase_inventory_outbound",
+    "can_view_purchase_prices": "purchase_price_view",
+    "can_manage_suppliers": "supplier_manage",
+}
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -192,6 +222,7 @@ DISABLED_ENDPOINT_PREFIXES = (
 )
 
 
+_configured_write_lock_path = resolve_write_lock_path(BASE_DIR)
 load_dotenv(BASE_DIR / ".env", override=True)
 
 
@@ -223,10 +254,7 @@ class FactoryRequest(FlaskRequest):
 app = Flask(__name__)
 app.request_class = FactoryRequest
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-env")
-DEFAULT_WRITE_LOCK_PATH = "/tmp/jiede-web-write.lock"
-app.config["WRITE_LOCK_PATH"] = os.getenv(
-    "JIEDE_WRITE_LOCK_PATH", DEFAULT_WRITE_LOCK_PATH
-)
+app.config["WRITE_LOCK_PATH"] = str(_configured_write_lock_path)
 _write_lock_state = threading.local()
 _HTTP_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
@@ -444,6 +472,14 @@ def upload_limits():
         "can_manage_shipped": user_has_permission("shipped_manage"),
         "can_view_prices": user_can_view_prices(),
         "can_manage_finance": user_has_permission("finance_manage"),
+        "can_view_purchases": user_has_permission("purchase_view"),
+        "can_manage_purchases": user_has_permission("purchase_manage"),
+        "can_receive_purchases": user_has_permission("purchase_receipt"),
+        "can_view_purchase_inventory": user_has_permission("purchase_inventory_view"),
+        "can_adjust_purchase_inventory": user_has_permission("purchase_inventory_adjust"),
+        "can_outbound_purchase_inventory": user_has_permission("purchase_inventory_outbound"),
+        "can_view_purchase_prices": user_can_view_purchase_prices(),
+        "can_manage_suppliers": user_has_permission("supplier_manage"),
         "can_access_admin_modules": user_can_access_admin_modules(),
         "shipment_signature_url": shipment_signature_url,
         "shipment_photo_upload_url": shipment_photo_upload_url,
@@ -574,6 +610,7 @@ def init_db():
         ensure_user_table(conn)
         ensure_customer_table(conn)
         ensure_common_info_table(conn)
+        ensure_procurement_tables(conn)
         ensure_purchase_followup_table(conn)
         ensure_powder_coating_tables(conn)
         ensure_carton_purchase_table(conn)
@@ -587,6 +624,8 @@ def init_db():
         ensure_production_process_tables(conn)
         ensure_shipping_workflow_tables(conn)
         ensure_indexes(conn)
+        # All legacy sources must exist before the atomic, idempotent backfill.
+        migrate_legacy_procurement(conn, datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 def ensure_columns(conn):
@@ -1210,10 +1249,32 @@ def ensure_user_table(conn):
         "can_edit_products": "ALTER TABLE users ADD COLUMN can_edit_products INTEGER NOT NULL DEFAULT 1",
         "can_view_prices": "ALTER TABLE users ADD COLUMN can_view_prices INTEGER NOT NULL DEFAULT 0",
         "can_manage_finance": "ALTER TABLE users ADD COLUMN can_manage_finance INTEGER NOT NULL DEFAULT 0",
+        "can_view_purchases": "ALTER TABLE users ADD COLUMN can_view_purchases INTEGER NOT NULL DEFAULT 0",
+        "can_manage_purchases": "ALTER TABLE users ADD COLUMN can_manage_purchases INTEGER NOT NULL DEFAULT 0",
+        "can_receive_purchases": "ALTER TABLE users ADD COLUMN can_receive_purchases INTEGER NOT NULL DEFAULT 0",
+        "can_view_purchase_inventory": "ALTER TABLE users ADD COLUMN can_view_purchase_inventory INTEGER NOT NULL DEFAULT 0",
+        "can_adjust_purchase_inventory": "ALTER TABLE users ADD COLUMN can_adjust_purchase_inventory INTEGER NOT NULL DEFAULT 0",
+        "can_outbound_purchase_inventory": "ALTER TABLE users ADD COLUMN can_outbound_purchase_inventory INTEGER NOT NULL DEFAULT 0",
+        "can_view_purchase_prices": "ALTER TABLE users ADD COLUMN can_view_purchase_prices INTEGER NOT NULL DEFAULT 0",
+        "can_manage_suppliers": "ALTER TABLE users ADD COLUMN can_manage_suppliers INTEGER NOT NULL DEFAULT 0",
+    }
+    procurement_legacy_permissions = {
+        "can_view_purchases": "can_manage_purchase_followups OR can_manage_carton_purchases OR can_manage_powder_coating",
+        "can_manage_purchases": "can_manage_purchase_followups OR can_manage_carton_purchases OR can_manage_powder_coating",
+        "can_receive_purchases": "can_manage_carton_purchases OR can_manage_warehouse_inventory",
+        "can_view_purchase_inventory": "can_manage_warehouse_inventory",
+        "can_adjust_purchase_inventory": "can_manage_warehouse_inventory",
+        "can_outbound_purchase_inventory": "can_manage_warehouse_inventory",
+        "can_view_purchase_prices": "can_view_prices OR can_manage_finance",
+        "can_manage_suppliers": "can_manage_purchase_followups OR can_manage_carton_purchases OR can_manage_powder_coating",
     }
     for column, statement in migrations.items():
         if column not in existing:
             conn.execute(statement)
+            if column in procurement_legacy_permissions:
+                conn.execute(
+                    f"UPDATE users SET {column} = CASE WHEN {procurement_legacy_permissions[column]} THEN 1 ELSE 0 END"
+                )
 
     now = datetime.utcnow().isoformat(timespec="seconds")
     legacy_username, legacy_password = admin_credentials()
@@ -1758,9 +1819,16 @@ def seed_user(conn, username, password, role, now):
             can_manage_products, can_manage_orders,
             can_manage_customers, can_manage_common_info, can_manage_purchase_followups,
             can_create_products, can_edit_products,
+            can_view_purchases, can_manage_purchases, can_receive_purchases,
+            can_view_purchase_inventory, can_adjust_purchase_inventory,
+            can_outbound_purchase_inventory, can_view_purchase_prices,
+            can_manage_suppliers,
             created_at, updated_at
         )
-        VALUES (?, ?, ?, 1, 1, 1, 1, 1, 1, 1, 1, ?, ?)
+        VALUES (?, ?, ?, 1,
+                1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1,
+                ?, ?)
         """,
         (username, generate_password_hash(password), role, now, now),
     )
@@ -2068,6 +2136,9 @@ def user_can_access_admin_modules():
     return any([
         user_has_permission("customers"),
         user_has_permission("common_info"),
+        user_has_permission("supplier_manage"),
+        user_has_permission("purchase_view"),
+        user_has_permission("purchase_manage"),
         user_has_permission("purchase_followups"),
         user_has_permission("carton_purchases"),
         user_has_permission("warehouse_inventory"),
@@ -2184,11 +2255,20 @@ def user_has_permission(permission):
         return bool(user["can_view_prices"])
     if permission == "finance_manage":
         return bool(user["can_manage_finance"])
+    if permission == "purchase_view":
+        return bool(user["can_view_purchases"] or user["can_manage_purchases"])
+    for column, permission_key in PROCUREMENT_PERMISSION_COLUMNS.items():
+        if permission == permission_key:
+            return bool(user[column])
     return False
 
 
 def user_can_view_prices():
     return user_has_permission("price_view") or user_has_permission("finance_manage")
+
+
+def user_can_view_purchase_prices():
+    return user_has_permission("purchase_price_view") or user_has_permission("finance_manage")
 
 
 def get_suppliers():
@@ -8832,6 +8912,33 @@ def ensure_database():
         abort(404)
 
 
+@app.before_request
+def legacy_procurement_compatibility():
+    """Freeze historical procurement writers, including indirect order creation.
+
+    Arrival and powder-coating workflows remain on their legacy pages in Phase 1.
+    Use path boundaries so unrelated routes cannot accidentally become read-only.
+    """
+    legacy_roots = (
+        "/admin/purchase-followups", "/admin/carton-purchases",
+        "/admin/carton-products", "/admin/carton-suppliers",
+        "/admin/orders/carton-purchases",
+    )
+    if request.method not in _HTTP_SAFE_METHODS and any(
+        request.path == root or request.path.startswith(root + "/")
+        for root in legacy_roots
+    ):
+        abort(409, description="历史采购已迁移为只读，请使用统一采购。")
+    if request.method in {"GET", "HEAD"}:
+        category = {"admin_purchase_followups": "other", "admin_carton_purchases": "carton"}.get(request.endpoint)
+        if category is not None:
+            # The destination enforces the new permission; do not revive obsolete
+            # legacy grants after an administrator has explicitly revoked access.
+            if not session.get("admin_logged_in"):
+                return redirect(url_for("admin_login"))
+            return redirect(url_for("purchase_orders", category=category))
+
+
 @app.route("/")
 def index():
     return redirect(url_for("admin_index"))
@@ -9275,6 +9382,8 @@ def dashboard():
         )
         stats = {
             "products": conn.execute("SELECT COUNT(*) AS c FROM manuals").fetchone()["c"],
+            "purchase_orders": conn.execute("SELECT COUNT(*) FROM purchase_orders").fetchone()[0],
+            "purchase_drafts": conn.execute("SELECT COUNT(*) FROM purchase_orders WHERE status='draft'").fetchone()[0],
             "customers": conn.execute("SELECT COUNT(*) AS c FROM customers").fetchone()["c"],
             "common_infos": conn.execute("SELECT COUNT(*) AS c FROM common_infos").fetchone()["c"],
             "purchase_followups": conn.execute("SELECT COUNT(*) AS c FROM purchase_followups").fetchone()["c"],
@@ -10081,6 +10190,14 @@ def admin_users():
         can_edit_products = 1 if role == "admin" or request.form.get("can_edit_products") else 0
         can_view_prices = 1 if role == "admin" or request.form.get("can_view_prices") else 0
         can_manage_finance = 1 if role == "admin" or request.form.get("can_manage_finance") else 0
+        can_view_purchases = 1 if role == "admin" or request.form.get("can_view_purchases") else 0
+        can_manage_purchases = 1 if role == "admin" or request.form.get("can_manage_purchases") else 0
+        can_receive_purchases = 1 if role == "admin" or request.form.get("can_receive_purchases") else 0
+        can_view_purchase_inventory = 1 if role == "admin" or request.form.get("can_view_purchase_inventory") else 0
+        can_adjust_purchase_inventory = 1 if role == "admin" or request.form.get("can_adjust_purchase_inventory") else 0
+        can_outbound_purchase_inventory = 1 if role == "admin" or request.form.get("can_outbound_purchase_inventory") else 0
+        can_view_purchase_prices = 1 if role == "admin" or request.form.get("can_view_purchase_prices") else 0
+        can_manage_suppliers = 1 if role == "admin" or request.form.get("can_manage_suppliers") else 0
 
         if role not in {"admin", "operator"}:
             flash("请选择有效的用户权限", "error")
@@ -10103,9 +10220,13 @@ def admin_users():
                         can_manage_carton_purchases, can_manage_warehouse_inventory,
                         can_manage_production_followups, can_create_products, can_edit_products,
                         can_view_prices, can_manage_finance,
+                        can_view_purchases, can_manage_purchases, can_receive_purchases,
+                        can_view_purchase_inventory, can_adjust_purchase_inventory,
+                        can_outbound_purchase_inventory, can_view_purchase_prices,
+                        can_manage_suppliers,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         username,
@@ -10127,6 +10248,14 @@ def admin_users():
                         can_edit_products,
                         can_view_prices,
                         can_manage_finance,
+                        can_view_purchases,
+                        can_manage_purchases,
+                        can_receive_purchases,
+                        can_view_purchase_inventory,
+                        can_adjust_purchase_inventory,
+                        can_outbound_purchase_inventory,
+                        can_view_purchase_prices,
+                        can_manage_suppliers,
                         now,
                         now,
                     ),
@@ -10170,6 +10299,14 @@ def edit_user(user_id):
     can_edit_products = 1 if role == "admin" or request.form.get("can_edit_products") else 0
     can_view_prices = 1 if role == "admin" or request.form.get("can_view_prices") else 0
     can_manage_finance = 1 if role == "admin" or request.form.get("can_manage_finance") else 0
+    can_view_purchases = 1 if role == "admin" or request.form.get("can_view_purchases") else 0
+    can_manage_purchases = 1 if role == "admin" or request.form.get("can_manage_purchases") else 0
+    can_receive_purchases = 1 if role == "admin" or request.form.get("can_receive_purchases") else 0
+    can_view_purchase_inventory = 1 if role == "admin" or request.form.get("can_view_purchase_inventory") else 0
+    can_adjust_purchase_inventory = 1 if role == "admin" or request.form.get("can_adjust_purchase_inventory") else 0
+    can_outbound_purchase_inventory = 1 if role == "admin" or request.form.get("can_outbound_purchase_inventory") else 0
+    can_view_purchase_prices = 1 if role == "admin" or request.form.get("can_view_purchase_prices") else 0
+    can_manage_suppliers = 1 if role == "admin" or request.form.get("can_manage_suppliers") else 0
 
     if role not in {"admin", "operator"}:
         flash("请选择有效的用户权限", "error")
@@ -10201,6 +10338,10 @@ def edit_user(user_id):
                     can_manage_carton_purchases = ?, can_manage_warehouse_inventory = ?,
                     can_manage_production_followups = ?, can_create_products = ?, can_edit_products = ?,
                     can_view_prices = ?, can_manage_finance = ?,
+                    can_view_purchases = ?, can_manage_purchases = ?, can_receive_purchases = ?,
+                    can_view_purchase_inventory = ?, can_adjust_purchase_inventory = ?,
+                    can_outbound_purchase_inventory = ?, can_view_purchase_prices = ?,
+                    can_manage_suppliers = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -10223,6 +10364,14 @@ def edit_user(user_id):
                     can_edit_products,
                     can_view_prices,
                     can_manage_finance,
+                    can_view_purchases,
+                    can_manage_purchases,
+                    can_receive_purchases,
+                    can_view_purchase_inventory,
+                    can_adjust_purchase_inventory,
+                    can_outbound_purchase_inventory,
+                    can_view_purchase_prices,
+                    can_manage_suppliers,
                     now,
                     user_id,
                 ),
@@ -10238,6 +10387,10 @@ def edit_user(user_id):
                     can_manage_carton_purchases = ?, can_manage_warehouse_inventory = ?,
                     can_manage_production_followups = ?, can_create_products = ?, can_edit_products = ?,
                     can_view_prices = ?, can_manage_finance = ?,
+                    can_view_purchases = ?, can_manage_purchases = ?, can_receive_purchases = ?,
+                    can_view_purchase_inventory = ?, can_adjust_purchase_inventory = ?,
+                    can_outbound_purchase_inventory = ?, can_view_purchase_prices = ?,
+                    can_manage_suppliers = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -10259,6 +10412,14 @@ def edit_user(user_id):
                     can_edit_products,
                     can_view_prices,
                     can_manage_finance,
+                    can_view_purchases,
+                    can_manage_purchases,
+                    can_receive_purchases,
+                    can_view_purchase_inventory,
+                    can_adjust_purchase_inventory,
+                    can_outbound_purchase_inventory,
+                    can_view_purchase_prices,
+                    can_manage_suppliers,
                     now,
                     user_id,
                 ),
@@ -10328,6 +10489,317 @@ def delete_user(user_id):
 
     flash("用户已删除", "success")
     return redirect(url_for("admin_users"))
+
+
+def _supplier_duplicate_error(conn, payload, supplier_id=None):
+    excluded = " AND id != ?" if supplier_id is not None else ""
+    code_params = [payload["code"]]
+    name_params = [payload["name"]]
+    if supplier_id is not None:
+        code_params.append(supplier_id)
+        name_params.append(supplier_id)
+    if conn.execute(
+        f"SELECT 1 FROM suppliers WHERE trim(code) = ?{excluded} LIMIT 1", code_params
+    ).fetchone():
+        return "供应商编码已存在"
+    if conn.execute(
+        f"SELECT 1 FROM suppliers WHERE trim(name) = ?{excluded} LIMIT 1", name_params
+    ).fetchone():
+        return "供应商名称已存在"
+    return None
+
+
+def _delivery_profile_payload(form):
+    payload = {
+        field: str(form.get(field, "") or "").strip()
+        for field in ("name", "delivery_address", "recipient", "phone", "default_remark")
+    }
+    if not payload["name"]:
+        raise ValueError("收货模板名称为必填项")
+    if not payload["delivery_address"]:
+        raise ValueError("收货地址为必填项")
+    payload["is_default"] = 1 if form.get("is_default") else 0
+    return payload
+
+
+@app.route("/admin/business-partners")
+@login_required
+def admin_business_partners():
+    if user_has_permission("customers"):
+        return redirect(url_for("admin_customers"))
+    if user_has_permission("supplier_manage"):
+        return redirect(url_for("admin_suppliers"))
+    if user_has_permission("common_info"):
+        return redirect(url_for("admin_common_info"))
+    flash("当前账号没有权限访问客商管理", "error")
+    return redirect(url_for("admin_index"))
+
+
+@app.route("/admin/business-partners/customers")
+@permission_required("customers")
+def business_partner_customers_alias():
+    return redirect(url_for("admin_customers"))
+
+
+@app.route("/admin/business-partners/common-info")
+@permission_required("common_info")
+def business_partner_common_info_alias():
+    return redirect(url_for("admin_common_info"))
+
+
+@app.route("/admin/business-partners/suppliers", methods=["GET", "POST"])
+@permission_required("supplier_manage")
+def admin_suppliers():
+    if request.method == "POST":
+        try:
+            payload = normalize_supplier_payload(request.form)
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            with get_db() as conn:
+                if not payload["code"]:
+                    payload["code"] = next_supplier_code(conn)
+                duplicate_error = _supplier_duplicate_error(conn, payload)
+                if duplicate_error:
+                    raise ValueError(duplicate_error)
+                conn.execute(
+                    """
+                    INSERT INTO suppliers (
+                        code, name, contact, phone, email, address, remark,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["code"], payload["name"], payload["contact"],
+                        payload["phone"], payload["email"], payload["address"],
+                        payload["remark"], now, now,
+                    ),
+                )
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(url_for("admin_suppliers"))
+        except sqlite3.IntegrityError:
+            flash("供应商编码或名称已存在", "error")
+            return redirect(url_for("admin_suppliers"))
+        flash("供应商信息已新增", "success")
+        return redirect(url_for("admin_suppliers"))
+
+    query = request.args.get("q", "").strip()
+    sql = "SELECT * FROM suppliers"
+    params = []
+    if query:
+        like = f"%{query}%"
+        sql += " WHERE code LIKE ? OR name LIKE ? OR contact LIKE ? OR phone LIKE ? OR email LIKE ? OR address LIKE ? OR remark LIKE ?"
+        params = [like] * 7
+    sql += " ORDER BY active DESC, name COLLATE NOCASE ASC, id DESC"
+    with get_db() as conn:
+        suppliers = conn.execute(sql, params).fetchall()
+    return render_template("suppliers.html", suppliers=suppliers, query=query)
+
+
+@app.route("/admin/business-partners/suppliers/<int:supplier_id>/edit", methods=["POST"])
+@permission_required("supplier_manage")
+def edit_supplier(supplier_id):
+    try:
+        payload = normalize_supplier_payload(request.form)
+        if not payload["code"]:
+            raise ValueError("供应商编码为必填项")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with get_db() as conn:
+            supplier = conn.execute("SELECT id,system_kind FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+            if supplier is None:
+                abort(404)
+            if supplier["system_kind"] == "legacy_unknown":
+                abort(409, description="历史系统供应商为只读档案。")
+            duplicate_error = _supplier_duplicate_error(conn, payload, supplier_id)
+            if duplicate_error:
+                raise ValueError(duplicate_error)
+            conn.execute(
+                """
+                UPDATE suppliers
+                SET code = ?, name = ?, contact = ?, phone = ?, email = ?, address = ?,
+                    remark = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload["code"], payload["name"], payload["contact"],
+                    payload["phone"], payload["email"], payload["address"],
+                    payload["remark"], now, supplier_id,
+                ),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("admin_suppliers"))
+    except sqlite3.IntegrityError:
+        flash("供应商编码或名称已存在", "error")
+        return redirect(url_for("admin_suppliers"))
+    flash("供应商信息已更新", "success")
+    return redirect(url_for("admin_suppliers"))
+
+
+@app.route("/admin/business-partners/suppliers/<int:supplier_id>/delete", methods=["POST"])
+@permission_required("supplier_manage")
+def delete_supplier(supplier_id):
+    with get_db() as conn:
+        supplier = conn.execute("SELECT id,system_kind FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+        if supplier is None:
+            abort(404)
+        if supplier["system_kind"] == "legacy_unknown":
+            abort(409, description="历史系统供应商为只读档案。")
+        has_historical_reference = conn.execute(
+            """
+            SELECT 1 FROM purchase_orders WHERE supplier_id = ?
+            UNION ALL
+            SELECT 1 FROM supplier_legacy_links WHERE supplier_id = ?
+            LIMIT 1
+            """,
+            (supplier_id, supplier_id),
+        ).fetchone()
+        if has_historical_reference:
+            conn.execute(
+                "UPDATE suppliers SET active = 0, updated_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(timespec="seconds"), supplier_id),
+            )
+            flash("该供应商已有历史记录，已停用，可随时恢复", "success")
+        else:
+            conn.execute("DELETE FROM suppliers WHERE id = ?", (supplier_id,))
+            flash("供应商信息已删除", "success")
+    return redirect(url_for("admin_suppliers"))
+
+
+@app.route("/admin/business-partners/suppliers/<int:supplier_id>/reactivate", methods=["POST"])
+@permission_required("supplier_manage")
+def reactivate_supplier(supplier_id):
+    with get_db() as conn:
+        supplier = conn.execute("SELECT system_kind FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+        if supplier is not None and supplier["system_kind"] == "legacy_unknown":
+            abort(409, description="历史系统供应商不能恢复启用。")
+        updated = conn.execute(
+            "UPDATE suppliers SET active = 1, updated_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(timespec="seconds"), supplier_id),
+        )
+        if updated.rowcount == 0:
+            abort(404)
+    flash("供应商已恢复启用", "success")
+    return redirect(url_for("admin_suppliers"))
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles", methods=["GET", "POST"])
+@permission_required("supplier_manage")
+def purchase_delivery_profiles():
+    if request.method == "POST":
+        try:
+            payload = _delivery_profile_payload(request.form)
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            with get_db() as conn:
+                if payload["is_default"]:
+                    conn.execute(
+                        "UPDATE purchase_delivery_profiles SET is_default = 0 WHERE active = 1 AND is_default = 1"
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO purchase_delivery_profiles (
+                        name, delivery_address, recipient, phone, default_remark,
+                        is_default, active, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        payload["name"], payload["delivery_address"], payload["recipient"],
+                        payload["phone"], payload["default_remark"], payload["is_default"], now, now,
+                    ),
+                )
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(url_for("purchase_delivery_profiles"))
+        except sqlite3.IntegrityError:
+            flash("收货模板保存失败，请重试", "error")
+            return redirect(url_for("purchase_delivery_profiles"))
+        flash("收货模板已新增", "success")
+        return redirect(url_for("purchase_delivery_profiles"))
+
+    with get_db() as conn:
+        profiles = conn.execute(
+            "SELECT * FROM purchase_delivery_profiles ORDER BY active DESC, is_default DESC, name COLLATE NOCASE ASC, id DESC"
+        ).fetchall()
+    return render_template("purchase_delivery_profiles.html", profiles=profiles)
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/edit", methods=["POST"])
+@permission_required("supplier_manage")
+def edit_purchase_delivery_profile(profile_id):
+    try:
+        payload = _delivery_profile_payload(request.form)
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        inactive_default_blocked = False
+        with get_db() as conn:
+            profile = conn.execute(
+                "SELECT active FROM purchase_delivery_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if profile is None:
+                abort(404)
+            if not profile["active"]:
+                inactive_default_blocked = bool(payload["is_default"])
+                payload["is_default"] = 0
+            elif payload["is_default"]:
+                conn.execute(
+                    "UPDATE purchase_delivery_profiles SET is_default = 0 WHERE active = 1 AND is_default = 1"
+                )
+            conn.execute(
+                """
+                UPDATE purchase_delivery_profiles
+                SET name = ?, delivery_address = ?, recipient = ?, phone = ?,
+                    default_remark = ?, is_default = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload["name"], payload["delivery_address"], payload["recipient"],
+                    payload["phone"], payload["default_remark"], payload["is_default"], now, profile_id,
+                ),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("purchase_delivery_profiles"))
+    except sqlite3.IntegrityError:
+        flash("收货模板保存失败，请重试", "error")
+        return redirect(url_for("purchase_delivery_profiles"))
+    if inactive_default_blocked:
+        flash("停用的收货模板不能设为默认", "error")
+    flash("收货模板已更新", "success")
+    return redirect(url_for("purchase_delivery_profiles"))
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/delete", methods=["POST"])
+@permission_required("supplier_manage")
+def deactivate_purchase_delivery_profile(profile_id):
+    with get_db() as conn:
+        updated = conn.execute(
+            """
+            UPDATE purchase_delivery_profiles
+            SET active = 0, is_default = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (datetime.utcnow().isoformat(timespec="seconds"), profile_id),
+        )
+        if updated.rowcount == 0:
+            abort(404)
+    flash("收货模板已停用", "success")
+    return redirect(url_for("purchase_delivery_profiles"))
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/reactivate", methods=["POST"])
+@permission_required("supplier_manage")
+def reactivate_purchase_delivery_profile(profile_id):
+    try:
+        with get_db() as conn:
+            updated = conn.execute(
+                "UPDATE purchase_delivery_profiles SET active = 1, is_default = 0, updated_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(timespec="seconds"), profile_id),
+            )
+            if updated.rowcount == 0:
+                abort(404)
+    except sqlite3.IntegrityError:
+        flash("收货模板恢复失败，请重试", "error")
+        return redirect(url_for("purchase_delivery_profiles"))
+    flash("收货模板已恢复启用", "success")
+    return redirect(url_for("purchase_delivery_profiles"))
 
 
 @app.route("/admin/customers", methods=["GET", "POST"])
@@ -11311,6 +11783,199 @@ def delete_common_info(info_id):
 
     flash("常用信息已删除", "success")
     return redirect(url_for("admin_common_info"))
+
+
+def purchase_order_filters_from_request() -> dict[str, object]:
+    return {key: request.args.get(key, "").strip() for key in (
+        "supplier_id", "order_no", "q", "purchased_from", "purchased_to", "expected_from", "expected_to", "status")}
+
+
+def purchase_category_from_slug(slug):
+    categories = {"raw-material": "raw_material", "carton": "carton", "outsourcing": "outsourcing", "other": "other"}
+    if slug not in categories:
+        abort(404)
+    return categories[slug]
+
+
+def purchase_page_context(category):
+    fields = list(CATEGORY_VISIBLE_FIELDS[category]) + ["quantity", "unit", "expected_at", "remark"]
+    if not user_can_view_purchase_prices():
+        fields = [field for field in fields if field != "unit_price"]
+    labels = dict(PURCHASE_FIELD_LABELS)
+    if category == "carton":
+        labels["dimension_text"] = "尺寸说明/历史尺寸"
+    return dict(category=category, category_slug=category.replace("_", "-"), category_labels=PURCHASE_CATEGORY_LABELS,
+                status_labels=PURCHASE_STATUS_LABELS, field_labels=labels, fields=fields)
+
+
+def purchase_price_projection(order, items):
+    header = dict(order)
+    rows = [dict(row) for row in items]
+    if user_can_view_purchase_prices():
+        total = 0
+        missing = False
+        for row in rows:
+            amount = line_total_minor(row["unit_price_minor"], row["ordered_quantity"])
+            row["unit_price"] = format_money_minor(row["unit_price_minor"], "CNY")
+            row["line_total"] = format_money_minor(amount, "CNY")
+            missing = missing or amount is None
+            total += amount or 0
+        header["order_total"] = "未完整录价" if missing else format_money_minor(total, "CNY")
+    else:
+        for row in rows:
+            row.pop("unit_price_minor", None)
+            row.pop("line_total_minor", None)
+    for row in rows:
+        row["quantity"] = row["ordered_quantity"]
+    return header, rows
+
+
+def purchase_order_or_404(conn, order_id, category=None):
+    try:
+        order, items = load_purchase_order(conn, order_id)
+    except (LookupError, ValueError):
+        abort(404)
+    if category is not None and purchase_category_from_slug(category) != order["category"]:
+        abort(404)
+    return order, items
+
+
+@app.route("/admin/purchases/<category>")
+@permission_required("purchase_view")
+def purchase_orders(category):
+    category = purchase_category_from_slug(category)
+    filters = purchase_order_filters_from_request()
+    with get_db() as conn:
+        orders = []
+        for order in fetch_purchase_orders(conn, category, filters):
+            _, items = load_purchase_order(conn, order["id"])
+            orders.append(purchase_price_projection(order, items)[0])
+        suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
+    return render_template("purchase_orders.html", orders=orders, filters=filters, suppliers=suppliers, **purchase_page_context(category))
+
+
+def purchase_form_response(conn, category, order=None, items=None, error=None, submitted=None):
+    suppliers = conn.execute("SELECT id,name FROM suppliers WHERE active=1 ORDER BY name").fetchall()
+    profiles = conn.execute("SELECT * FROM purchase_delivery_profiles WHERE active=1 ORDER BY is_default DESC,id").fetchall()
+    if order is None:
+        order = dict(status="draft", purchased_at=datetime.now().date().isoformat())
+        default = next((profile for profile in profiles if profile["is_default"]), None)
+        if default:
+            order.update(delivery_profile_id=default["id"], delivery_address=default["delivery_address"], recipient=default["recipient"], recipient_phone=default["phone"], remark=default["default_remark"])
+        items = [{}]
+    else:
+        order, items = purchase_price_projection(order, items)
+    if submitted is not None:
+        saved_items = {str(item["id"]): item for item in items if item.get("id")}
+        for field in ("supplier_id", "delivery_profile_id", "purchased_at", "delivery_address", "recipient", "recipient_phone", "remark"):
+            if field in submitted:
+                order[field] = submitted[field]
+        visible = set(purchase_page_context(category)["fields"]) | {"id"}
+        indexed = {}
+        for key, value in submitted.items():
+            match = re.fullmatch(r"items\[(\d{1,4})\]\[([a-z_]+)\]", key)
+            if match and match[2] in visible:
+                indexed.setdefault(int(match[1]), {})[match[2]] = value
+        items = [indexed[index] for index in sorted(indexed)][:500] or [{}]
+        for item in items:
+            saved = saved_items.get(item.get("id"), {})
+            # Provenance is supplied only by the database, never by posted fields.
+            item.update({field: saved.get(field) for field in ("legacy_source", "legacy_id")})
+        submitted_ids = {item.get("id") for item in items}
+        items.extend(item for identifier, item in saved_items.items() if identifier not in submitted_ids
+                     and (item.get("legacy_source") is not None or item.get("legacy_id") is not None))
+    return render_template("purchase_order_form.html", order=order, items=items, suppliers=suppliers, profiles=profiles, error=error, **purchase_page_context(category)), 400 if error else 200
+
+
+@app.route("/admin/purchases/<category>/new", methods=["GET", "POST"])
+@permission_required("purchase_manage")
+def new_purchase_order(category):
+    category = purchase_category_from_slug(category)
+    with get_db() as conn:
+        if request.method == "POST":
+            raw = request.form.to_dict()
+            raw["category"] = category
+            try:
+                payload = normalize_purchase_order_payload(raw, can_view_prices=user_can_view_purchase_prices())
+                order_id = create_purchase_order(conn, payload, current_admin_username(), datetime.utcnow().isoformat(timespec="seconds"))
+            except ValueError as error:
+                return purchase_form_response(conn, category, error=str(error), submitted=raw)
+            return redirect(url_for("purchase_order_detail", order_id=order_id))
+        return purchase_form_response(conn, category)
+
+
+@app.route("/admin/purchases/<category>/<int:order_id>")
+@app.route("/admin/purchases/orders/<int:order_id>")
+@permission_required("purchase_view")
+def purchase_order_detail(order_id, category=None):
+    with get_db() as conn:
+        order, items = purchase_order_or_404(conn, order_id, category)
+    order, items = purchase_price_projection(order, items)
+    return render_template("purchase_order_detail.html", order=order, items=items, **purchase_page_context(order["category"]))
+
+
+@app.after_request
+def prevent_purchase_export_caching(response):
+    # Also cover routing-level 404s (invalid IDs), cancelled orders, and redirects.
+    if re.fullmatch(r"/admin/purchases/orders/[^/]+/export\.[^/]+", request.path):
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.route("/admin/purchases/orders/<int:order_id>/export.<export_format>")
+@permission_required("purchase_view")
+def export_purchase_order(order_id, export_format):
+    from procurement_documents import build_purchase_order_pdf, build_purchase_order_workbook
+
+    if export_format not in {"xlsx", "pdf"}:
+        abort(404)
+    with get_db() as conn:
+        order, items = purchase_order_or_404(conn, order_id)
+        if order["status"] == "cancelled":
+            abort(409, description="已取消的采购订单不能导出")
+        order = dict(order)
+        profile = conn.execute("SELECT * FROM reconciliation_company_profile WHERE id=1").fetchone()
+        order["company_profile"] = dict(profile) if profile else {}
+    builder = build_purchase_order_workbook if export_format == "xlsx" else build_purchase_order_pdf
+    stream = builder(order, items, include_prices=user_can_view_purchase_prices())
+    response = send_file(stream,
+                        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if export_format == "xlsx" else "application/pdf",
+                        as_attachment=export_format == "xlsx" or request.args.get("download") == "1",
+                        download_name=f"{order['order_no']}-purchase-order.{export_format}")
+    return response
+
+
+@app.route("/admin/purchases/<category>/<int:order_id>/edit", methods=["GET", "POST"])
+@app.route("/admin/purchases/orders/<int:order_id>/edit", methods=["GET", "POST"])
+@permission_required("purchase_manage")
+def edit_purchase_order(order_id, category=None):
+    with get_db() as conn:
+        order, items = purchase_order_or_404(conn, order_id, category)
+        if order["status"] in {"cancelled", "received"}:
+            abort(400, description="已到齐或已取消的采购订单不能修改")
+        if request.method == "POST":
+            raw = request.form.to_dict()
+            raw["category"] = order["category"]
+            try:
+                payload = normalize_purchase_order_payload(raw, can_view_prices=user_can_view_purchase_prices())
+                update_purchase_order(conn, order_id, payload, current_admin_username(), datetime.utcnow().isoformat(timespec="seconds"))
+            except ValueError as error:
+                return purchase_form_response(conn, order["category"], order, items, str(error), submitted=raw)
+            return redirect(url_for("purchase_order_detail", order_id=order_id))
+        return purchase_form_response(conn, order["category"], order, items)
+
+
+@app.route("/admin/purchases/<category>/<int:order_id>/cancel", methods=["POST"])
+@app.route("/admin/purchases/orders/<int:order_id>/cancel", methods=["POST"])
+@permission_required("purchase_manage")
+def cancel_purchase_order_route(order_id, category=None):
+    with get_db() as conn:
+        purchase_order_or_404(conn, order_id, category)
+        try:
+            cancel_purchase_order(conn, order_id, current_admin_username(), datetime.utcnow().isoformat(timespec="seconds"))
+        except ValueError as error:
+            abort(400, description=str(error))
+    return redirect(url_for("purchase_order_detail", order_id=order_id))
 
 
 @app.route("/admin/purchase-followups", methods=["GET", "POST"])
@@ -12858,7 +13523,7 @@ def carton_purchase_filter_text(filters):
     return "；".join(parts) if parts else "全部记录"
 
 
-def build_carton_purchase_statement_pdf(records, summary, filters):
+def build_carton_purchase_statement_pdf(records, summary, filters, *, include_prices=True):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -12897,8 +13562,13 @@ def build_carton_purchase_statement_pdf(records, summary, filters):
     story = [Paragraph("纸箱采购对账单", title_style)]
     meta_data = [
         [Paragraph("筛选条件", info_style), Paragraph(carton_purchase_filter_text(filters), info_style), Paragraph("制单时间", info_style), Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), info_style)],
-        [Paragraph("记录数", info_style), Paragraph(str(summary["record_count"] or 0), info_style), Paragraph("合计金额", info_style), Paragraph(f"{float(summary['total_amount'] or 0):.2f}", info_style)],
+        [Paragraph("记录数", info_style), Paragraph(str(summary["record_count"] or 0), info_style), "", ""],
     ]
+    if include_prices:
+        meta_data[1][2:] = [
+            Paragraph("合计金额", info_style),
+            Paragraph(f"{float(summary['total_amount'] or 0):.2f}", info_style),
+        ]
     meta_table = Table(meta_data, colWidths=[22 * mm, 138 * mm, 22 * mm, 84 * mm])
     meta_table.setStyle(
         TableStyle(
@@ -12918,55 +13588,63 @@ def build_carton_purchase_statement_pdf(records, summary, filters):
     )
     story.extend([meta_table, Spacer(1, 4 * mm)])
 
-    data = [["序号", "下单时间", "送来时间", "供应商", "印刷唛头", "纸板类型", "箱子尺寸CM", "数量", "单价", "金额", "备注"]]
+    data = [["序号", "下单时间", "送来时间", "供应商", "印刷唛头", "纸板类型", "箱子尺寸CM", "数量"]]
+    if include_prices:
+        data[0].extend(["单价", "金额"])
+    data[0].append("备注")
     for index, item in enumerate(records, start=1):
         quantity = int(item["quantity"] or 0)
         unit_price = float(item["unit_price"] or 0)
-        data.append(
-            [
-                str(index),
-                item["ordered_at"] or "",
-                item["received_at"] or "",
-                Paragraph(item["supplier_name"] or "", cell_style),
-                Paragraph(item["print_mark"] or "", cell_style),
-                Paragraph(item["board_type"] or "", cell_style),
-                Paragraph(item["carton_size"] or "", cell_style),
-                str(quantity),
-                f"{unit_price:.2f}",
-                f"{quantity * unit_price:.2f}",
-                Paragraph(item["remark"] or "", cell_style),
-            ]
-        )
-    data.append(["", "", "", "", "合计", "", "", str(summary["total_quantity"] or 0), "", f"{float(summary['total_amount'] or 0):.2f}", ""])
+        row = [
+            str(index),
+            item["ordered_at"] or "",
+            item["received_at"] or "",
+            Paragraph(item["supplier_name"] or "", cell_style),
+            Paragraph(item["print_mark"] or "", cell_style),
+            Paragraph(item["board_type"] or "", cell_style),
+            Paragraph(item["carton_size"] or "", cell_style),
+            str(quantity),
+        ]
+        if include_prices:
+            row.extend([f"{unit_price:.2f}", f"{quantity * unit_price:.2f}"])
+        row.append(Paragraph(item["remark"] or "", cell_style))
+        data.append(row)
+    if include_prices:
+        data.append(["", "", "", "", "合计", "", "", str(summary["total_quantity"] or 0), "", f"{float(summary['total_amount'] or 0):.2f}", ""])
 
-    table = Table(data, colWidths=[9 * mm, 19 * mm, 19 * mm, 24 * mm, 42 * mm, 22 * mm, 28 * mm, 13 * mm, 15 * mm, 18 * mm, 57 * mm], repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
+    col_widths = [9 * mm, 19 * mm, 19 * mm, 24 * mm, 42 * mm, 22 * mm, 28 * mm, 13 * mm]
+    if include_prices:
+        col_widths.extend([15 * mm, 18 * mm, 57 * mm])
+    else:
+        col_widths.append(90 * mm)
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table_styles = [
                 ("FONTNAME", (0, 0), (-1, -1), font_name),
                 ("FONTSIZE", (0, 0), (-1, -1), 7.5),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#155E63")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")),
-                ("FONTNAME", (0, -1), (-1, -1), font_name),
                 ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#8AA0A8")),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("ALIGN", (7, 1), (9, -1), "RIGHT"),
+                ("ALIGN", (7, 1), ((9 if include_prices else 7), -1), "RIGHT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 3),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 3),
                 ("TOPPADDING", (0, 0), (-1, -1), 3),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
+    ]
+    if include_prices:
+        table_styles.extend([
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")),
+            ("FONTNAME", (0, -1), (-1, -1), font_name),
+        ])
+    table.setStyle(TableStyle(table_styles))
     story.append(table)
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 
-def build_carton_purchase_order_pdf(records):
+def build_carton_purchase_order_pdf(records, *, include_prices=True):
     if hasattr(records, "keys"):
         records = [records]
     records = list(records)
@@ -13065,9 +13743,10 @@ def build_carton_purchase_order_pdf(records):
     )
     story.extend([meta_table, Spacer(1, 6 * mm)])
 
-    details = [
-        ["麦头", "纸板类型", "尺寸mm", "纸箱数量", "单价", "总价", "备注"],
-    ]
+    details = [["麦头", "纸板类型", "尺寸mm", "纸箱数量"]]
+    if include_prices:
+        details[0].extend(["单价", "总价"])
+    details[0].append("备注")
     total_quantity = 0
     total_amount = 0
     for record in records:
@@ -13077,41 +13756,44 @@ def build_carton_purchase_order_pdf(records):
         total_quantity += quantity
         total_amount += total_price
         carton_size = (record["carton_size"] or "").replace("×", "x")
-        details.append(
-            [
-                pdf_single_line_paragraph(
-                    record["print_mark"],
-                    mark_cjk_style if any(ord(char) > 127 for char in str(record["print_mark"] or "")) else mark_style,
-                ),
-                pdf_wrapped_paragraph(record["board_type"], cell_style, chunk_size=6),
-                pdf_single_line_paragraph(carton_size, size_style),
-                str(quantity),
-                f"{unit_price:.2f}",
-                f"{total_price:.2f}",
-                pdf_wrapped_paragraph(record["remark"], cell_style, chunk_size=12),
-            ]
-        )
-    details.append(["", "", "合计", str(total_quantity), "", f"{total_amount:.2f}", ""])
-    detail_table = Table(details, colWidths=[68 * mm, 14 * mm, 38 * mm, 18 * mm, 16 * mm, 18 * mm, 58 * mm], repeatRows=1, hAlign="LEFT")
-    detail_table.setStyle(
-        TableStyle(
-            [
+        row = [
+            pdf_single_line_paragraph(
+                record["print_mark"],
+                mark_cjk_style if any(ord(char) > 127 for char in str(record["print_mark"] or "")) else mark_style,
+            ),
+            pdf_wrapped_paragraph(record["board_type"], cell_style, chunk_size=6),
+            pdf_single_line_paragraph(carton_size, size_style),
+            str(quantity),
+        ]
+        if include_prices:
+            row.extend([f"{unit_price:.2f}", f"{total_price:.2f}"])
+        row.append(pdf_wrapped_paragraph(record["remark"], cell_style, chunk_size=12))
+        details.append(row)
+    if include_prices:
+        details.append(["", "", "合计", str(total_quantity), "", f"{total_amount:.2f}", ""])
+    col_widths = [68 * mm, 14 * mm, 38 * mm, 18 * mm]
+    if include_prices:
+        col_widths.extend([16 * mm, 18 * mm, 58 * mm])
+    else:
+        col_widths.append(92 * mm)
+    detail_table = Table(details, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
+    detail_styles = [
                 ("FONTNAME", (0, 0), (-1, -1), font_name),
                 ("FONTSIZE", (0, 0), (-1, -1), 8.5),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#155E63")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")),
                 ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#6B7C87")),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
-                ("ALIGN", (3, 1), (5, -1), "RIGHT"),
+                ("ALIGN", (3, 1), ((5 if include_prices else 3), -1), "RIGHT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 4),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
+    ]
+    if include_prices:
+        detail_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")))
+    detail_table.setStyle(TableStyle(detail_styles))
     story.extend([detail_table, Spacer(1, 16 * mm)])
 
     sign_table = Table(
@@ -13278,7 +13960,12 @@ def carton_purchase_statement_pdf():
         records = fetch_carton_purchase_records(conn, filters)
         summary = fetch_carton_purchase_summary(conn, filters)
 
-    buffer = build_carton_purchase_statement_pdf(records, summary, filters)
+    buffer = build_carton_purchase_statement_pdf(
+        records,
+        summary,
+        filters,
+        include_prices=user_can_view_purchase_prices(),
+    )
     as_attachment = request.args.get("download") == "1"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return send_file(
@@ -13579,7 +14266,10 @@ def carton_purchase_order_pdf(record_id):
         ).fetchone()
     if record is None:
         abort(404)
-    buffer = build_carton_purchase_order_pdf(record)
+    buffer = build_carton_purchase_order_pdf(
+        record,
+        include_prices=user_can_view_purchase_prices(),
+    )
     as_attachment = request.args.get("download") == "1"
     return send_file(
         buffer,
@@ -14842,6 +15532,7 @@ def admin_index():
         purchase_followup_count = conn.execute(
             "SELECT COUNT(*) AS c FROM purchase_followups"
         ).fetchone()["c"]
+        purchase_order_count = conn.execute("SELECT COUNT(*) FROM purchase_orders").fetchone()[0]
         powder_coating_count = conn.execute(
             "SELECT COUNT(*) AS c FROM powder_coating_records"
         ).fetchone()["c"]
@@ -14871,6 +15562,7 @@ def admin_index():
         customer_count=customer_count,
         common_info_count=common_info_count,
         purchase_followup_count=purchase_followup_count,
+        purchase_order_count=purchase_order_count,
         powder_coating_count=powder_coating_count,
         carton_purchase_count=carton_purchase_count,
         arrival_record_count=arrival_record_count,
