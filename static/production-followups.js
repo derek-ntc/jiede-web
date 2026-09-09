@@ -1,4 +1,14 @@
 (() => {
+  document.querySelectorAll("[data-production-process-confirm]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      if (!window.confirm(form.dataset.productionProcessConfirm)) {
+        event.preventDefault();
+      }
+    });
+  });
+})();
+
+(() => {
   const search = document.querySelector("input[data-auto-submit-search]");
   if (search) {
     const form = search.form;

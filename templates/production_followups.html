@@ -167,7 +167,7 @@
                         <div class="production-process-actions">
                           {% if step.completed_at %}
                             {% if step.can_revert %}
-                              <form method="post" action="{{ url_for('revert_production_followup_process', followup_id=row.id, step_id=step.id) }}" onsubmit="return confirm('确定撤回{{ step.name }}吗？');">
+                              <form method="post" action="{{ url_for('revert_production_followup_process', followup_id=row.id, step_id=step.id) }}" data-production-process-confirm="确定撤回{{ step.name }}吗？">
                                 <input type="hidden" name="filter_q" value="{{ query }}">
                                 <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                                 <button class="secondary compact-button" type="submit">撤回</button>
@@ -206,7 +206,7 @@
                             {% else %}
                               <button class="secondary compact-button" type="button" disabled aria-label="不可下移{{ step.name }}">↓</button>
                             {% endif %}
-                            <form method="post" action="{{ url_for('delete_production_followup_process', followup_id=row.id, step_id=step.id) }}" onsubmit="return confirm('确定删除{{ step.name }}吗？');">
+                            <form method="post" action="{{ url_for('delete_production_followup_process', followup_id=row.id, step_id=step.id) }}" data-production-process-confirm="确定删除{{ step.name }}吗？">
                               <input type="hidden" name="filter_q" value="{{ query }}">
                               <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                               <button class="danger compact-button" type="submit">删除</button>

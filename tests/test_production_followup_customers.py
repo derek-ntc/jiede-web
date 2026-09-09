@@ -1,12 +1,25 @@
+import json
 import re
 import subprocess
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import app
 import production_processes
+
+
+class _ProcessConfirmationParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.forms = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "form" and "data-production-process-confirm" in attributes:
+            self.forms.append(attributes)
 
 
 class ProductionFollowupCustomerTests(unittest.TestCase):
@@ -209,6 +222,109 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertNotIn("待激光", html)
         self.assertNotIn("待折弯", html)
 
+    def test_process_confirmations_treat_rendered_process_names_as_data(self):
+        expression_name = "'&&(globalThis.processOwned=true)&&'"
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["O'Brien", expression_name],
+                now="2026-09-09T09:00:00",
+            )
+            steps = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+            production_processes.complete_followup_process_step(
+                conn,
+                1,
+                steps[0]["id"],
+                "manager",
+                completed_at="2026-09-09T09:10:00+08:00",
+            )
+
+        html = self.client.get(
+            "/admin/production-followups",
+            query_string={"customer": "客户A", "q": "P1"},
+        ).get_data(as_text=True)
+        parser = _ProcessConfirmationParser()
+        parser.feed(html)
+
+        self.assertEqual(
+            [form["data-production-process-confirm"] for form in parser.forms],
+            [f"确定撤回O'Brien吗？", f"确定删除{expression_name}吗？"],
+        )
+        self.assertTrue(all("onsubmit" not in form for form in parser.forms))
+        self.assertIn("O&#39;Brien", html)
+        self.assertIn(
+            "&#39;&amp;&amp;(globalThis.processOwned=true)&amp;&amp;&#39;",
+            html,
+        )
+
+        script = r'''
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const vm = require('node:vm');
+
+        class Form {
+          constructor(message) {
+            this.dataset = {productionProcessConfirm: message};
+            this.listeners = {};
+          }
+          addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+          emit(type) {
+            let prevented = false;
+            const event = {preventDefault() { prevented = true; }};
+            for (const fn of this.listeners[type] || []) fn(event);
+            return prevented;
+          }
+        }
+
+        const messages = JSON.parse(process.argv[1]);
+        const forms = messages.map(message => new Form(message));
+        const confirmations = [];
+        const decisions = [false, true];
+        global.window = {
+          clearTimeout() {},
+          setTimeout() {},
+          confirm(message) {
+            confirmations.push(message);
+            return decisions.shift();
+          },
+        };
+        global.document = {
+          querySelector() { return null; },
+          querySelectorAll(selector) {
+            return selector === '[data-production-process-confirm]' ? forms : [];
+          },
+        };
+        globalThis.processOwned = false;
+
+        vm.runInThisContext(fs.readFileSync('static/production-followups.js', 'utf8'));
+
+        assert.equal(forms[0].emit('submit'), true, 'cancel prevents the submission');
+        assert.equal(forms[1].emit('submit'), false, 'confirm allows the submission');
+        assert.deepEqual(confirmations, messages);
+        assert.equal(globalThis.processOwned, false, 'process names are never evaluated');
+        '''
+        result = subprocess.run(
+            [
+                "node",
+                "-e",
+                script,
+                json.dumps(
+                    [form["data-production-process-confirm"] for form in parser.forms],
+                    ensure_ascii=False,
+                ),
+            ],
+            cwd=Path(app.__file__).parent,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_production_list_backfills_and_renders_a_legacy_followup_card(self):
         app.DATABASE_READY = True
         response = self.client.get(
@@ -302,6 +418,82 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+    def test_process_action_routes_deny_users_without_followup_management_permission(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["下料", "检验"],
+                now="2026-09-09T09:00:00",
+            )
+            steps = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+            before = production_processes.load_followup_process_card(conn, 1)
+
+        self._login("viewer")
+        requests = [
+            ("/admin/production-followups/1/processes", {"name": "包装"}),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/delete',
+                {},
+            ),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/move',
+                {"direction": "down"},
+            ),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/complete',
+                {},
+            ),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/revert',
+                {},
+            ),
+        ]
+        for path, data in requests:
+            with self.subTest(path=path):
+                response = self.client.post(path, data=data)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(urlsplit(response.headers["Location"]).path, "/admin")
+
+        with app.get_db() as conn:
+            after = production_processes.load_followup_process_card(conn, 1)
+        self.assertEqual(after, before)
+
+    def test_empty_process_snapshot_renders_on_list_and_both_print_copies(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                [],
+                now="2026-09-09T09:00:00",
+            )
+            production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+
+        list_response = self.client.get(
+            "/admin/production-followups",
+            query_string={"customer": "客户A", "q": "P1"},
+        )
+        list_html = list_response.get_data(as_text=True)
+        print_response = self.client.get("/admin/production-followups/1/process-card")
+        print_html = print_response.get_data(as_text=True)
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertIn("暂无生产工艺", list_html)
+        self.assertIn('/admin/production-followups/1/processes', list_html)
+        self.assertEqual(print_response.status_code, 200)
+        self.assertEqual(print_html.count('<article class="process-card">'), 2)
+        self.assertEqual(print_html.count("无生产工艺"), 2)
 
     def test_printable_process_card_renders_two_copies_of_every_snapshot_step(self):
         with app.get_db() as conn:
