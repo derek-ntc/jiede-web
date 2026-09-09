@@ -46,7 +46,7 @@
 
     <div class="hint-box product-import-help">
       <strong>读取规则</strong>
-      <p>单件产品不需要组装件标题和每套数量；组装区块必须填写每套数量。旧模板中的“规格型号”仍按原约定作为产品图号读取，物料编码作为 SKU；不会写入产品属性“规格型号”。</p>
+      <p>单件产品不需要组装件标题和每套数量；组装区块必须填写每套数量。“规格型号”同时用于产品图号匹配并写入产品列表的规格型号，物料编码作为 SKU。</p>
     </div>
   </section>
 
@@ -68,6 +68,7 @@
           <thead>
             <tr>
               <th>产品图号</th>
+              <th>规格型号</th>
               <th>物料编码</th>
               <th>产品名称</th>
               <th>单位</th>
@@ -79,6 +80,7 @@
             {% for product in plan.products %}
               <tr>
                 <td>{{ product.drawing_no }}</td>
+                <td>{{ product.specification or '-' }}</td>
                 <td>{{ product.sku or '-' }}</td>
                 <td>{{ product.product_name }}</td>
                 <td>{{ product.unit or '-' }}</td>

@@ -250,6 +250,61 @@ body.page-products_index {
   font-variant-numeric: tabular-nums;
 }
 
+.product-delete-dialog {
+  width: min(760px, calc(100% - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  color: #26333d;
+  box-shadow: 0 20px 55px rgb(26 37 46 / 28%);
+}
+
+.product-delete-dialog::backdrop {
+  background: rgb(20 28 34 / 55%);
+}
+
+.product-delete-dialog-panel {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.product-delete-dialog-panel header,
+.product-delete-dialog-panel footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.product-delete-dialog-panel h2,
+.product-delete-dialog-panel p {
+  margin: 0;
+}
+
+.product-delete-dialog-panel p {
+  margin-top: 6px;
+  color: #5c6872;
+}
+
+.product-delete-dialog-panel footer {
+  justify-content: flex-end;
+}
+
+.product-delete-list {
+  max-height: min(420px, 52dvh);
+  margin: 0;
+  padding: 0 0 0 28px;
+  overflow: auto;
+}
+
+.product-delete-list li {
+  padding: 9px 8px;
+  border-bottom: 1px solid #e1e5e8;
+  line-height: 1.5;
+}
+
 .product-page .product-table-wrap {
   min-width: 0;
   max-height: max(280px, calc(100dvh - 370px));

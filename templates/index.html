@@ -86,7 +86,34 @@
         <input type="hidden" name="return_sort" value="{{ sort }}">
         <input type="hidden" name="return_direction" value="{{ direction }}">
         <button type="submit" data-product-assembly-submit disabled>批量设置组装属性</button>
+        <button class="danger" type="button" data-product-delete-open disabled>批量删除</button>
       </form>
+      <dialog class="product-delete-dialog" data-product-delete-dialog aria-labelledby="product-delete-title">
+        <form
+          method="post"
+          action="{{ url_for('batch_delete_manuals', q=query, supplier=selected_supplier, customer=selected_customer, sort=sort, direction=direction) }}"
+          class="product-delete-dialog-panel"
+        >
+          <header>
+            <div>
+              <h2 id="product-delete-title">确认批量删除产品</h2>
+              <p>已选择 <strong data-product-delete-count>0</strong> 个产品。以下产品及其材料、组装关系和上传文件将被删除。</p>
+            </div>
+            <button type="button" class="button secondary" data-product-delete-close aria-label="关闭批量删除确认框">关闭</button>
+          </header>
+          <ol class="product-delete-list" data-product-delete-list></ol>
+          <div data-product-delete-inputs></div>
+          <input type="hidden" name="return_q" value="{{ query }}">
+          <input type="hidden" name="return_supplier" value="{{ selected_supplier }}">
+          <input type="hidden" name="return_customer" value="{{ selected_customer }}">
+          <input type="hidden" name="return_sort" value="{{ sort }}">
+          <input type="hidden" name="return_direction" value="{{ direction }}">
+          <footer>
+            <button type="button" class="secondary" data-product-delete-close>取消</button>
+            <button type="submit" class="danger">确认删除</button>
+          </footer>
+        </form>
+      </dialog>
     {% endif %}
 
     <div class="table-wrap product-table-wrap">
@@ -132,7 +159,7 @@
           <tr>
             {% if can_edit_products %}
               <td class="shipment-select-cell" data-label="选择">
-                <input type="checkbox" name="manual_id" value="{{ manual.id }}" form="product-assembly-batch-form" data-product-row-select aria-label="选择产品 {{ manual.drawing_no or manual.product_name }} {{ manual.product_name }}">
+                <input type="checkbox" name="manual_id" value="{{ manual.id }}" form="product-assembly-batch-form" data-product-row-select data-product-drawing-no="{{ manual.drawing_no }}" data-product-name="{{ manual.product_name }}" data-product-customer="{{ manual.customer }}" data-product-specification="{{ manual.supplier }}" aria-label="选择产品 {{ manual.drawing_no or manual.product_name }} {{ manual.product_name }}">
               </td>
             {% endif %}
             <td data-label="产品图号"><a class="product-drawing-link product-cell-text" href="{{ url_for('manual_detail', manual_id=manual.id) }}" title="{{ manual.drawing_no or '-' }}">{{ manual.drawing_no or "-" }}</a></td>
@@ -195,7 +222,12 @@
                   <form method="post" action="{{ url_for('copy_manual', manual_id=manual.id) }}">
                     <button class="secondary" type="submit">复制</button>
                   </form>
-                  <form method="post" action="{{ url_for('delete_manual', manual_id=manual.id) }}" onsubmit="return confirm('确定删除这条产品资料吗？');">
+                  <form method="post" action="{{ url_for('delete_manual', manual_id=manual.id, q=query, supplier=selected_supplier, customer=selected_customer, sort=sort, direction=direction) }}" onsubmit="return confirm('确定删除这条产品资料吗？');">
+                    <input type="hidden" name="return_q" value="{{ query }}">
+                    <input type="hidden" name="return_supplier" value="{{ selected_supplier }}">
+                    <input type="hidden" name="return_customer" value="{{ selected_customer }}">
+                    <input type="hidden" name="return_sort" value="{{ sort }}">
+                    <input type="hidden" name="return_direction" value="{{ direction }}">
                     <button class="danger" type="submit">删除</button>
                   </form>
                 {% endif %}

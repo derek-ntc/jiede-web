@@ -3734,6 +3734,9 @@ def build_product_bom_import_plan(conn, customer, rows):
             "drawing_no": drawing_no,
             "sku": str(row.get("sku") or "").strip(),
             "product_name": str(row.get("product_name") or "").strip(),
+            "specification": str(
+                row.get("specification", drawing_no) or ""
+            ).strip(),
             "unit": str(row.get("unit") or "").strip(),
             "source_rows": [int(row.get("row_number") or 0)],
         }
@@ -3877,12 +3880,12 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
             manual_id = conn.execute(
                 """
                 INSERT INTO manuals (
-                    drawing_no, product_name, customer, sku, unit,
+                    drawing_no, product_name, customer, sku, unit, supplier,
                     model, category, version, remark,
                     filename, original_filename, file_type,
                     created_by, updated_by, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, '', '', ?, '', '', '', 'file', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, '', '', ?, '', '', '', 'file', ?, ?, ?, ?)
                 """,
                 (
                     product["drawing_no"],
@@ -3890,6 +3893,7 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
                     plan["customer"],
                     product["sku"],
                     product["unit"],
+                    product["specification"],
                     now,
                     current_user,
                     current_user,
@@ -3902,7 +3906,7 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
             conn.execute(
                 """
                 UPDATE manuals
-                SET product_name = ?, sku = ?, unit = ?,
+                SET product_name = ?, sku = ?, unit = ?, supplier = ?,
                     updated_by = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -3910,6 +3914,7 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
                     product["product_name"],
                     product["sku"],
                     product["unit"],
+                    product["specification"],
                     current_user,
                     now,
                     manual_id,
@@ -18046,44 +18051,207 @@ def copy_manual(manual_id):
     return redirect(url_for("edit_manual", manual_id=copied_manual_id))
 
 
+def product_list_return_args(form):
+    return {
+        "q": (form.get("return_q") or request.args.get("q", "")).strip(),
+        "supplier": (
+            form.get("return_supplier") or request.args.get("supplier", "")
+        ).strip(),
+        "customer": (
+            form.get("return_customer") or request.args.get("customer", "")
+        ).strip(),
+        "sort": (
+            form.get("return_sort") or request.args.get("sort", "")
+        ).strip(),
+        "direction": (
+            form.get("return_direction") or request.args.get("direction", "")
+        ).strip(),
+    }
+
+
+def normalize_manual_delete_ids(raw_manual_ids):
+    manual_ids = []
+    try:
+        for value in raw_manual_ids:
+            manual_id = int(str(value).strip())
+            if manual_id <= 0:
+                raise ValueError
+            manual_ids.append(manual_id)
+    except (TypeError, ValueError) as error:
+        raise ValueError("请选择有效的产品") from error
+    manual_ids = list(dict.fromkeys(manual_ids))
+    if not manual_ids:
+        raise ValueError("请先勾选要删除的产品")
+    return manual_ids
+
+
+def load_deletable_manuals(conn, manual_ids):
+    placeholders = ",".join("?" for _ in manual_ids)
+    rows = conn.execute(
+        f"""
+        SELECT id, drawing_no, product_name, customer, supplier, filename
+        FROM manuals
+        WHERE id IN ({placeholders})
+        """,
+        manual_ids,
+    ).fetchall()
+    rows_by_id = {int(row["id"]): row for row in rows}
+    if len(rows_by_id) != len(manual_ids):
+        raise ValueError("选择中包含不存在的产品")
+    try:
+        for manual_id in manual_ids:
+            refs = finance_source_refs_for_manual(conn, manual_id)
+            assert_finance_sources_mutable(conn, refs)
+            assert_reconciliation_sources_mutable(conn, refs)
+    except ValueError as error:
+        raise ValueError(
+            "该产品或订单包含已进入财务的发货记录，不能删除"
+        ) from error
+    return [rows_by_id[manual_id] for manual_id in manual_ids]
+
+
+def manual_delete_filenames(conn, manuals):
+    manual_ids = [int(manual["id"]) for manual in manuals]
+    placeholders = ",".join("?" for _ in manual_ids)
+    file_rows = conn.execute(
+        f"""
+        SELECT manual_id, filename
+        FROM manual_files
+        WHERE manual_id IN ({placeholders})
+        ORDER BY id
+        """,
+        manual_ids,
+    ).fetchall()
+    filenames_by_manual = {}
+    for row in file_rows:
+        filenames_by_manual.setdefault(int(row["manual_id"]), []).append(
+            str(row["filename"] or "")
+        )
+    filenames = []
+    for manual in manuals:
+        manual_id = int(manual["id"])
+        manual_filenames = filenames_by_manual.get(manual_id, [])
+        if not manual_filenames and manual["filename"]:
+            manual_filenames = [str(manual["filename"])]
+        filenames.extend(manual_filenames)
+    return list(dict.fromkeys(filename for filename in filenames if filename))
+
+
+def quarantine_manual_uploads(filenames):
+    quarantine_dir = MANUALS_DIR / ".delete-quarantine" / uuid.uuid4().hex
+    moved_files = []
+    try:
+        for filename in filenames:
+            source = MANUALS_DIR / filename
+            if not source.exists():
+                continue
+            destination = quarantine_dir / filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            moved_files.append((source, destination))
+    except Exception:
+        restore_quarantined_manual_uploads(moved_files, quarantine_dir)
+        raise
+    return quarantine_dir, moved_files
+
+
+def restore_quarantined_manual_uploads(moved_files, quarantine_dir):
+    restore_error = None
+    for source, destination in reversed(moved_files):
+        try:
+            if destination.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                destination.replace(source)
+        except OSError as error:
+            restore_error = restore_error or error
+            app.logger.exception("恢复产品删除隔离文件失败：%s", source.name)
+    try:
+        if quarantine_dir.exists():
+            shutil.rmtree(quarantine_dir)
+    except OSError as error:
+        restore_error = restore_error or error
+        app.logger.exception("清理产品删除隔离目录失败：%s", quarantine_dir)
+    if restore_error is not None:
+        raise restore_error
+
+
+def delete_manuals(raw_manual_ids):
+    manual_ids = normalize_manual_delete_ids(raw_manual_ids)
+    quarantine_dir = MANUALS_DIR / ".delete-quarantine" / uuid.uuid4().hex
+    moved_files = []
+    try:
+        with application_write_lock():
+            with get_db() as conn:
+                manuals = load_deletable_manuals(conn, manual_ids)
+                filenames = manual_delete_filenames(conn, manuals)
+                quarantine_dir, moved_files = quarantine_manual_uploads(filenames)
+
+                conn.execute("BEGIN IMMEDIATE")
+                load_deletable_manuals(conn, manual_ids)
+                placeholders = ",".join("?" for _ in manual_ids)
+                conn.execute(
+                    f"DELETE FROM product_materials WHERE manual_id IN ({placeholders})",
+                    manual_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM product_assembly_components WHERE manual_id IN ({placeholders})",
+                    manual_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM manual_files WHERE manual_id IN ({placeholders})",
+                    manual_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM manuals WHERE id IN ({placeholders})",
+                    manual_ids,
+                )
+    except Exception:
+        try:
+            restore_quarantined_manual_uploads(moved_files, quarantine_dir)
+        except OSError:
+            app.logger.exception("产品批量删除失败，且隔离文件未能完整恢复")
+        raise
+
+    try:
+        if quarantine_dir.exists():
+            shutil.rmtree(quarantine_dir)
+    except OSError:
+        app.logger.exception("产品已删除，但清理隔离文件失败：%s", quarantine_dir)
+    return len(manual_ids)
+
+
+@app.route("/admin/products/delete-batch", methods=["POST"])
+@permission_required("product_edit")
+def batch_delete_manuals():
+    redirect_args = product_list_return_args(request.form)
+    try:
+        deleted_count = delete_manuals(request.form.getlist("manual_id"))
+    except ValueError as error:
+        flash(f"整批未删除：{error}", "error")
+    except (OSError, sqlite3.DatabaseError):
+        app.logger.exception("产品批量删除失败，数据库已回滚")
+        flash("产品删除失败，整批未删除", "error")
+    else:
+        flash(f"已删除 {deleted_count} 个产品", "success")
+    return redirect(url_for("products_index", **redirect_args))
+
+
 @app.route("/admin/<int:manual_id>/delete", methods=["POST"])
 @permission_required("product_edit")
 def delete_manual(manual_id):
-    with get_db() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        manual = fetch_manual_by_id(conn, manual_id)
-        if manual is None:
+    redirect_args = product_list_return_args(request.form)
+    try:
+        delete_manuals([manual_id])
+    except ValueError as error:
+        if str(error) == "选择中包含不存在的产品":
             abort(404)
-        try:
-            assert_finance_sources_mutable(
-                conn,
-                finance_source_refs_for_manual(conn, manual_id),
-            )
-            assert_reconciliation_sources_mutable(
-                conn,
-                finance_source_refs_for_manual(conn, manual_id),
-            )
-        except ValueError:
-            flash(
-                "该产品或订单包含已进入财务的发货记录，不能删除",
-                "error",
-            )
-            return redirect(url_for("admin_index"))
-        files = get_manual_files(conn, manual_id)
-        if not files and manual["filename"]:
-            files = [manual]
-        conn.execute("DELETE FROM product_materials WHERE manual_id = ?", (manual_id,))
-        conn.execute(
-            "DELETE FROM product_assembly_components WHERE manual_id = ?",
-            (manual_id,),
-        )
-        conn.execute("DELETE FROM manual_files WHERE manual_id = ?", (manual_id,))
-        conn.execute("DELETE FROM manuals WHERE id = ?", (manual_id,))
-
-    for manual_file in files:
-        delete_upload_file(manual_file["filename"])
-    flash("产品资料已删除", "success")
-    return redirect(url_for("admin_index"))
+        flash(str(error), "error")
+    except (OSError, sqlite3.DatabaseError):
+        app.logger.exception("产品删除失败，数据库已回滚")
+        flash("产品资料删除失败，未删除任何数据", "error")
+    else:
+        flash("产品资料已删除", "success")
+    return redirect(url_for("products_index", **redirect_args))
 
 
 if __name__ == "__main__":

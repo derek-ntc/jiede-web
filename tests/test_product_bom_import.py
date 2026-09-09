@@ -378,6 +378,17 @@ class ProductBomPlanTests(ProductBomDatabaseTestCase):
         self.assertEqual(plan["assembly_count"], 0)
         self.assertEqual(plan["relationships"], [])
 
+    def test_plan_exposes_excel_specification_for_preview(self):
+        rows = [
+            bom_row(2, "", "MAT-SINGLE", "单件面板", "PART-SINGLE", "PCS", None)
+        ]
+
+        with app.get_db() as conn:
+            plan = app.build_product_bom_import_plan(conn, CUSTOMER, rows)
+
+        self.assertEqual(plan["errors"], [])
+        self.assertEqual(plan["products"][0]["specification"], "PART-SINGLE")
+
     def test_plan_rejects_conflicting_shared_product_basics(self):
         rows = [
             bom_row(3, "DZ-30", "MAT-1", "后盖", "PART-1", "PCS", 1),
@@ -524,7 +535,7 @@ class ProductBomApplyTests(ProductBomDatabaseTestCase):
             )
             products = conn.execute(
                 """
-                SELECT drawing_no, product_name, customer, sku, unit,
+                SELECT drawing_no, product_name, customer, sku, unit, supplier,
                        filename, unit_price_minor
                 FROM manuals
                 """
@@ -540,7 +551,7 @@ class ProductBomApplyTests(ProductBomDatabaseTestCase):
         self.assertEqual(result["new_product_count"], 1)
         self.assertEqual(
             [tuple(row) for row in products],
-            [("PART-1", "后盖", CUSTOMER, "MAT-1", "PCS", "", None)],
+            [("PART-1", "后盖", CUSTOMER, "MAT-1", "PCS", "PART-1", "", None)],
         )
         self.assertEqual(
             [tuple(row) for row in relationships],
@@ -552,13 +563,13 @@ class ProductBomApplyTests(ProductBomDatabaseTestCase):
             existing_id = conn.execute(
                 """
                 INSERT INTO manuals (
-                    drawing_no, product_name, customer, sku, unit,
+                    drawing_no, product_name, customer, sku, unit, supplier,
                     model, category, version, remark,
                     filename, original_filename, unit_price_minor, currency,
                     created_at, updated_at
                 )
                 VALUES (
-                    'PART-1', '旧名称', ?, 'OLD-MAT', 'EA',
+                    'PART-1', '旧名称', ?, 'OLD-MAT', 'EA', '旧规格',
                     '', '', '', '保留备注',
                     'drawing.pdf', '原图纸.pdf', 1234, 'CNY', ?, ?
                 )
@@ -598,6 +609,7 @@ class ProductBomApplyTests(ProductBomDatabaseTestCase):
         self.assertEqual(product["product_name"], "新名称")
         self.assertEqual(product["sku"], "MAT-NEW")
         self.assertEqual(product["unit"], "PCS")
+        self.assertEqual(product["supplier"], "PART-1")
         self.assertEqual(product["filename"], "drawing.pdf")
         self.assertEqual(product["original_filename"], "原图纸.pdf")
         self.assertEqual(product["unit_price_minor"], 1234)
@@ -606,6 +618,79 @@ class ProductBomApplyTests(ProductBomDatabaseTestCase):
             [tuple(row) for row in relationships],
             [("OLD-ASM", 7), ("DZ-30", 2)],
         )
+
+    def test_apply_explicit_blank_specification_clears_only_the_imported_field(self):
+        with app.get_db() as conn:
+            existing_id = conn.execute(
+                """
+                INSERT INTO manuals (
+                    drawing_no, product_name, customer, sku, unit, supplier,
+                    model, category, version, remark,
+                    filename, original_filename, unit_price_minor, currency,
+                    created_at, updated_at
+                )
+                VALUES (
+                    'PART-1', '旧名称', ?, 'OLD-MAT', 'EA', '旧规格',
+                    '', '', '', '保留备注',
+                    'drawing.pdf', '原图纸.pdf', 1234, 'CNY', ?, ?
+                )
+                """,
+                (CUSTOMER, NOW, NOW),
+            ).lastrowid
+            conn.execute(
+                """
+                INSERT INTO manual_files (
+                    manual_id, filename, original_filename, file_type, created_at
+                ) VALUES (?, 'attachment.pdf', '附件.pdf', 'file', ?)
+                """,
+                (existing_id, NOW),
+            )
+            conn.execute(
+                """
+                INSERT INTO product_materials (
+                    manual_id, material, thickness, surface_type, supplier,
+                    sort_order, created_at, updated_at
+                ) VALUES (?, '铝板', '2mm', '喷涂', '材料供应商', 0, ?, ?)
+                """,
+                (existing_id, NOW, NOW),
+            )
+            conn.execute(
+                """
+                INSERT INTO product_assembly_components (
+                    manual_id, assembly_drawing_no, quantity_per_set,
+                    sort_order, created_at, updated_at
+                ) VALUES (?, 'OLD-ASM', 7, 0, ?, ?)
+                """,
+                (existing_id, NOW, NOW),
+            )
+            row = bom_row(3, "", "MAT-NEW", "新名称", "PART-1", "PCS", None)
+            row["specification"] = ""
+
+            app.apply_product_bom_import(
+                conn, CUSTOMER, [row], "admin", "2026-09-07T13:00:00"
+            )
+            product = conn.execute(
+                "SELECT * FROM manuals WHERE id = ?", (existing_id,)
+            ).fetchone()
+            file_count = conn.execute(
+                "SELECT COUNT(*) FROM manual_files WHERE manual_id = ?", (existing_id,)
+            ).fetchone()[0]
+            material_count = conn.execute(
+                "SELECT COUNT(*) FROM product_materials WHERE manual_id = ?", (existing_id,)
+            ).fetchone()[0]
+            relationship_count = conn.execute(
+                "SELECT COUNT(*) FROM product_assembly_components WHERE manual_id = ?",
+                (existing_id,),
+            ).fetchone()[0]
+
+        self.assertEqual(product["supplier"], "")
+        self.assertEqual(product["filename"], "drawing.pdf")
+        self.assertEqual(product["original_filename"], "原图纸.pdf")
+        self.assertEqual(product["unit_price_minor"], 1234)
+        self.assertEqual(product["remark"], "保留备注")
+        self.assertEqual(file_count, 1)
+        self.assertEqual(material_count, 1)
+        self.assertEqual(relationship_count, 1)
 
 
 class ProductBomRouteTests(ProductBomDatabaseTestCase):
