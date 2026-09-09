@@ -4568,30 +4568,45 @@ def assembly_shipment_preview_warnings(items):
     for item in items:
         no_order_quantity = int(item.get("no_order_quantity") or 0)
         if no_order_quantity:
+            if item.get("preserves_existing_state"):
+                message = (
+                    f"配件 {item['drawing_no']}：保留原无订单直接发货 "
+                    f"{no_order_quantity} 个，本次不重新分配"
+                )
+            else:
+                message = (
+                    f"配件 {item['drawing_no']}：{no_order_quantity} 个没有可匹配订单，"
+                    "将作为直接发货保存"
+                )
             warnings.append(
                 {
                     "code": "no_order",
                     "manual_id": int(item["manual_id"]),
                     "drawing_no": item["drawing_no"],
                     "quantity": no_order_quantity,
-                    "message": (
-                        f"配件 {item['drawing_no']}：{no_order_quantity} 个没有可匹配订单，"
-                        "将作为直接发货保存"
-                    ),
+                    "message": message,
                 }
             )
         shortage = int(item.get("inventory_shortage_quantity") or 0)
         if shortage:
+            if item.get("preserves_existing_state"):
+                message = (
+                    f"配件 {item['drawing_no']}：保留原扣库 "
+                    f"{int(item.get('inventory_deducted_quantity') or 0)} 个、"
+                    f"缺货 {shortage} 个，本次不再扣库存"
+                )
+            else:
+                message = (
+                    f"配件 {item['drawing_no']}：库存不足 {shortage} 个，"
+                    "确认后库存将扣到 0"
+                )
             warnings.append(
                 {
                     "code": "inventory_shortage",
                     "manual_id": int(item["manual_id"]),
                     "drawing_no": item["drawing_no"],
                     "quantity": shortage,
-                    "message": (
-                        f"配件 {item['drawing_no']}：库存不足 {shortage} 个，"
-                        "确认后库存将扣到 0"
-                    ),
+                    "message": message,
                 }
             )
     return warnings

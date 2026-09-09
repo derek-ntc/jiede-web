@@ -3044,6 +3044,13 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
         self.assertIn(
             "inventory_shortage", {warning["code"] for warning in preview["warnings"]}
         )
+        warning_message = next(
+            warning["message"]
+            for warning in preview["warnings"]
+            if warning["code"] == "inventory_shortage"
+        )
+        self.assertIn("本次不再扣库存", warning_message)
+        self.assertNotIn("确认后库存将扣到 0", warning_message)
 
         response = self.post_edit(
             batch_id,
