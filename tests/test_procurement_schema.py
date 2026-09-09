@@ -165,6 +165,112 @@ class ProcurementSchemaTests(unittest.TestCase):
         """A fractional minor-unit total would corrupt order totals."""
         self.assert_fractional_item_value_is_rejected(line_total_minor=1.5)
 
+    def test_upgrade_rebuilds_old_item_table_with_strict_integer_storage(self):
+        """An e75f454 database must reject fractional values after its item table is upgraded."""
+        procurement.ensure_procurement_tables(self.conn)
+        supplier_id = self.add_supplier()
+        self.add_order("PO-20260909-0001", supplier_id)
+        order_id = self.conn.execute("SELECT id FROM purchase_orders").fetchone()[0]
+        self.conn.execute("DROP TABLE purchase_order_items")
+        self.conn.execute(
+            """
+            CREATE TABLE purchase_order_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL,
+                item_name TEXT NOT NULL,
+                drawing_no TEXT NOT NULL,
+                material TEXT NOT NULL,
+                dimension_text TEXT NOT NULL,
+                surface TEXT NOT NULL,
+                spec TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                length REAL,
+                width REAL,
+                height REAL,
+                thickness REAL,
+                expected_at TEXT NOT NULL,
+                remark TEXT NOT NULL,
+                ordered_quantity INTEGER NOT NULL CHECK (ordered_quantity > 0),
+                unit_price_minor INTEGER CHECK (unit_price_minor IS NULL OR unit_price_minor >= 0),
+                line_total_minor INTEGER CHECK (line_total_minor IS NULL OR line_total_minor >= 0),
+                legacy_source TEXT,
+                legacy_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO purchase_order_items (
+                id, purchase_order_id, sort_order, item_name, drawing_no, material,
+                dimension_text, surface, spec, unit, expected_at, remark,
+                ordered_quantity, unit_price_minor, line_total_minor, created_at, updated_at
+            ) VALUES (17, ?, 1, '旧有效行', '', '', '', '', '', '件', '', '', 2, 150, 300, 'now', 'now')
+            """,
+            (order_id,),
+        )
+
+        procurement.ensure_procurement_tables(self.conn)
+        procurement.ensure_procurement_tables(self.conn)
+
+        self.assertEqual(
+            tuple(
+                self.conn.execute(
+                    "SELECT id, item_name, ordered_quantity, unit_price_minor, line_total_minor "
+                    "FROM purchase_order_items"
+                ).fetchone()
+            ),
+            (17, "旧有效行", 2, 150, 300),
+        )
+        self.assertTrue(
+            {
+                "idx_purchase_order_items_order_sort",
+                "idx_purchase_order_items_item_name",
+                "idx_purchase_order_items_drawing_no",
+                "idx_purchase_order_items_legacy_source_id",
+            }.issubset(
+                {
+                    row[1]
+                    for row in self.conn.execute("PRAGMA index_list(purchase_order_items)")
+                }
+            )
+        )
+        self.assertTrue(
+            {
+                "trg_purchase_order_items_require_order_insert",
+                "trg_purchase_order_items_require_order_update",
+                "trg_purchase_orders_restrict_item_id_update",
+                "trg_purchase_orders_cascade_items_delete",
+            }.issubset(
+                {
+                    row[0]
+                    for row in self.conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                    )
+                }
+            )
+        )
+        for column, value in (
+            ("ordered_quantity", 1.5),
+            ("unit_price_minor", 1.5),
+            ("line_total_minor", 1.5),
+        ):
+            with self.subTest(column=column), self.assertRaises(sqlite3.IntegrityError):
+                values = {"ordered_quantity": 1, "unit_price_minor": None, "line_total_minor": None}
+                values[column] = value
+                self.conn.execute(
+                    """
+                    INSERT INTO purchase_order_items (
+                        purchase_order_id, sort_order, item_name, drawing_no, material,
+                        dimension_text, surface, spec, unit, expected_at, remark,
+                        ordered_quantity, unit_price_minor, line_total_minor, created_at, updated_at
+                    ) VALUES (?, 2, '新行', '', '', '', '', '', '件', '', '', ?, ?, ?, 'now', 'now')
+                    """,
+                    (order_id, values["ordered_quantity"], values["unit_price_minor"], values["line_total_minor"]),
+                )
+
     def test_init_db_creates_schema_idempotently_without_foreign_key_violations(self):
         """Application startup must create the new schema repeatedly alongside legacy tables."""
         original_db_path = app.DB_PATH
@@ -232,6 +338,52 @@ class ProcurementSchemaTests(unittest.TestCase):
                     self.assertEqual(
                         conn.execute("SELECT COUNT(*) FROM supplier_legacy_links").fetchone()[0],
                         0,
+                    )
+        finally:
+            app.DB_PATH = original_db_path
+
+    def test_production_connection_restricts_procurement_parent_id_updates(self):
+        """Changing parent IDs must not orphan either supplier child type or order items."""
+        original_db_path = app.DB_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                app.DB_PATH = Path(tmpdir) / "manuals.db"
+                app.init_db()
+                with app.get_db() as conn:
+                    linked_supplier_id = self.add_supplier("SUP-LINK", "关联供应商", conn)
+                    conn.execute(
+                        "INSERT INTO supplier_legacy_links (supplier_id, legacy_source, legacy_id) "
+                        "VALUES (?, 'carton', 2)",
+                        (linked_supplier_id,),
+                    )
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute("UPDATE suppliers SET id = ? WHERE id = ?", (101, linked_supplier_id))
+
+                    ordered_supplier_id = self.add_supplier("SUP-ORDER", "订单供应商", conn)
+                    self.add_order("PO-20260909-0003", ordered_supplier_id, conn)
+                    order_id = conn.execute("SELECT id FROM purchase_orders").fetchone()[0]
+                    conn.execute(
+                        """
+                        INSERT INTO purchase_order_items (
+                            purchase_order_id, sort_order, item_name, drawing_no, material,
+                            dimension_text, surface, spec, unit, expected_at, remark,
+                            ordered_quantity, created_at, updated_at
+                        ) VALUES (?, 1, '板材', '', '', '', '', '', '件', '', '', 1, 'now', 'now')
+                        """,
+                        (order_id,),
+                    )
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute("UPDATE suppliers SET id = ? WHERE id = ?", (102, ordered_supplier_id))
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute("UPDATE purchase_orders SET id = ? WHERE id = ?", (201, order_id))
+
+                    self.assertEqual(
+                        conn.execute("SELECT supplier_id FROM purchase_orders WHERE id = ?", (order_id,)).fetchone()[0],
+                        ordered_supplier_id,
+                    )
+                    self.assertEqual(
+                        conn.execute("SELECT purchase_order_id FROM purchase_order_items").fetchone()[0],
+                        order_id,
                     )
         finally:
             app.DB_PATH = original_db_path

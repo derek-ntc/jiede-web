@@ -9,6 +9,12 @@ from pricing import parse_money_minor
 PURCHASE_CATEGORIES = {"raw_material", "carton", "outsourcing", "other"}
 PURCHASE_STATUSES = {"draft", "ordered", "partially_received", "received", "cancelled"}
 _PURCHASE_QUANTITY_MAX = 2_147_483_647
+_PURCHASE_ORDER_ITEM_COLUMNS = """
+    id, purchase_order_id, sort_order, item_name, drawing_no, material,
+    dimension_text, surface, spec, unit, length, width, height, thickness,
+    expected_at, remark, ordered_quantity, unit_price_minor, line_total_minor,
+    legacy_source, legacy_id, created_at, updated_at
+"""
 
 
 def parse_purchase_category(value: str) -> str:
@@ -58,6 +64,80 @@ def next_purchase_order_no(conn, purchased_at: str) -> str:
     if suffix > 9999:
         raise ValueError("当天采购单号已用尽")
     return f"{prefix}{suffix:04d}"
+
+
+def _create_purchase_order_items_table(conn, table_name, if_not_exists=False):
+    if_not_exists_sql = " IF NOT EXISTS" if if_not_exists else ""
+    conn.execute(
+        f"""
+        CREATE TABLE{if_not_exists_sql} {table_name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            sort_order INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            drawing_no TEXT NOT NULL,
+            material TEXT NOT NULL,
+            dimension_text TEXT NOT NULL,
+            surface TEXT NOT NULL,
+            spec TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            length REAL,
+            width REAL,
+            height REAL,
+            thickness REAL,
+            expected_at TEXT NOT NULL,
+            remark TEXT NOT NULL,
+            ordered_quantity INTEGER NOT NULL CHECK (typeof(ordered_quantity) = 'integer' AND ordered_quantity > 0),
+            unit_price_minor INTEGER CHECK (unit_price_minor IS NULL OR (typeof(unit_price_minor) = 'integer' AND unit_price_minor >= 0)),
+            line_total_minor INTEGER CHECK (line_total_minor IS NULL OR (typeof(line_total_minor) = 'integer' AND line_total_minor >= 0)),
+            legacy_source TEXT,
+            legacy_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _purchase_order_items_requires_integer_upgrade(conn):
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'purchase_order_items'"
+    ).fetchone()
+    if row is None:
+        return False
+    schema = re.sub(r"\s+", "", row[0].lower())
+    return not all(
+        check in schema
+        for check in (
+            "typeof(ordered_quantity)='integer'",
+            "typeof(unit_price_minor)='integer'",
+            "typeof(line_total_minor)='integer'",
+        )
+    )
+
+
+def _upgrade_purchase_order_items_integer_storage(conn):
+    """Atomically rebuild pre-strict item tables while preserving valid rows."""
+    conn.execute("SAVEPOINT purchase_order_items_integer_upgrade")
+    try:
+        _create_purchase_order_items_table(conn, "purchase_order_items_rebuild")
+        conn.execute(
+            f"""
+            INSERT INTO purchase_order_items_rebuild ({_PURCHASE_ORDER_ITEM_COLUMNS})
+            SELECT {_PURCHASE_ORDER_ITEM_COLUMNS} FROM purchase_order_items
+            """
+        )
+        conn.execute("DROP TRIGGER IF EXISTS trg_purchase_orders_restrict_item_id_update")
+        conn.execute("DROP TRIGGER IF EXISTS trg_purchase_orders_cascade_items_delete")
+        conn.execute("DROP TABLE purchase_order_items")
+        conn.execute(
+            "ALTER TABLE purchase_order_items_rebuild RENAME TO purchase_order_items"
+        )
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT purchase_order_items_integer_upgrade")
+        conn.execute("RELEASE SAVEPOINT purchase_order_items_integer_upgrade")
+        raise
+    conn.execute("RELEASE SAVEPOINT purchase_order_items_integer_upgrade")
 
 
 def ensure_procurement_tables(conn) -> None:
@@ -135,35 +215,9 @@ def ensure_procurement_tables(conn) -> None:
         )
         """
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS purchase_order_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
-            sort_order INTEGER NOT NULL,
-            item_name TEXT NOT NULL,
-            drawing_no TEXT NOT NULL,
-            material TEXT NOT NULL,
-            dimension_text TEXT NOT NULL,
-            surface TEXT NOT NULL,
-            spec TEXT NOT NULL,
-            unit TEXT NOT NULL,
-            length REAL,
-            width REAL,
-            height REAL,
-            thickness REAL,
-            expected_at TEXT NOT NULL,
-            remark TEXT NOT NULL,
-            ordered_quantity INTEGER NOT NULL CHECK (typeof(ordered_quantity) = 'integer' AND ordered_quantity > 0),
-            unit_price_minor INTEGER CHECK (unit_price_minor IS NULL OR (typeof(unit_price_minor) = 'integer' AND unit_price_minor >= 0)),
-            line_total_minor INTEGER CHECK (line_total_minor IS NULL OR (typeof(line_total_minor) = 'integer' AND line_total_minor >= 0)),
-            legacy_source TEXT,
-            legacy_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
+    _create_purchase_order_items_table(conn, "purchase_order_items", if_not_exists=True)
+    if _purchase_order_items_requires_integer_upgrade(conn):
+        _upgrade_purchase_order_items_integer_storage(conn)
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_suppliers_active_name ON suppliers (active, name)"
@@ -235,6 +289,19 @@ def ensure_procurement_tables(conn) -> None:
     )
     conn.execute(
         """
+        CREATE TRIGGER IF NOT EXISTS trg_suppliers_restrict_child_id_update
+        BEFORE UPDATE OF id ON suppliers
+        FOR EACH ROW WHEN NEW.id <> OLD.id AND (
+            EXISTS (SELECT 1 FROM supplier_legacy_links WHERE supplier_id = OLD.id)
+            OR EXISTS (SELECT 1 FROM purchase_orders WHERE supplier_id = OLD.id)
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'supplier id has dependent procurement records');
+        END
+        """
+    )
+    conn.execute(
+        """
         CREATE TRIGGER IF NOT EXISTS trg_suppliers_cascade_legacy_links_delete
         AFTER DELETE ON suppliers
         FOR EACH ROW
@@ -270,6 +337,18 @@ def ensure_procurement_tables(conn) -> None:
         FOR EACH ROW WHEN NOT EXISTS (SELECT 1 FROM purchase_orders WHERE id = NEW.purchase_order_id)
         BEGIN
             SELECT RAISE(ABORT, 'purchase_order_items.purchase_order_id references no purchase order');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchase_orders_restrict_item_id_update
+        BEFORE UPDATE OF id ON purchase_orders
+        FOR EACH ROW WHEN NEW.id <> OLD.id AND EXISTS (
+            SELECT 1 FROM purchase_order_items WHERE purchase_order_id = OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase order id has dependent items');
         END
         """
     )
