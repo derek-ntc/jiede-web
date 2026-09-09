@@ -234,6 +234,53 @@ class SupplierManagementTests(unittest.TestCase):
         with app.get_db() as conn:
             self.assertEqual(conn.execute("SELECT active FROM suppliers WHERE id=?", (supplier_id,)).fetchone()[0], 0)
 
+    def test_legacy_linked_supplier_without_orders_stays_deactivated_across_startup(self):
+        supplier_id = self.create_supplier("历史纸箱供方")
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO carton_suppliers (
+                    id, name, contact, phone, remark, created_at, updated_at
+                ) VALUES (
+                    91, '历史纸箱供方', '旧联系人', '0574-0091', '',
+                    '2026-09-09T10:00:00', '2026-09-09T10:00:00'
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO supplier_legacy_links (
+                    supplier_id, legacy_source, legacy_id
+                ) VALUES (?, 'carton_suppliers', 91)
+                """,
+                (supplier_id,),
+            )
+
+        response = self.client.post(
+            f"/admin/business-partners/suppliers/{supplier_id}/delete"
+        )
+        self.assertEqual(response.status_code, 302)
+        app.init_db()
+
+        with app.get_db() as conn:
+            supplier = conn.execute(
+                "SELECT id, active FROM suppliers WHERE id = ?", (supplier_id,)
+            ).fetchone()
+            link = conn.execute(
+                """
+                SELECT supplier_id FROM supplier_legacy_links
+                WHERE legacy_source = 'carton_suppliers' AND legacy_id = 91
+                """
+            ).fetchone()
+            self.assertEqual(tuple(supplier), (supplier_id, 0))
+            self.assertEqual(link["supplier_id"], supplier_id)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM suppliers WHERE trim(name) = '历史纸箱供方'"
+                ).fetchone()[0],
+                1,
+            )
+
     def test_unused_supplier_is_hard_deleted_and_inactive_supplier_can_be_reactivated(self):
         unused_id = self.create_supplier("未使用供方")
         response = self.client.post(f"/admin/business-partners/suppliers/{unused_id}/delete")

@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,38 @@ PROCUREMENT_PERMISSION_COLUMNS = (
     "can_view_purchase_prices",
     "can_manage_suppliers",
 )
+
+
+def pdf_text(response):
+    executable = shutil.which("pdftotext")
+    if executable:
+        result = subprocess.run(
+            [executable, "-layout", "-", "-"],
+            input=response.data,
+            capture_output=True,
+            check=True,
+        )
+        return "".join(result.stdout.decode().split())
+    osascript = shutil.which("osascript")
+    if osascript:
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as pdf:
+            pdf.write(response.data)
+            pdf.flush()
+            script = (
+                "ObjC.import('Foundation'); ObjC.import('PDFKit'); "
+                "function run(argv) { "
+                "const url = $.NSURL.fileURLWithPath(argv[0]); "
+                "const document = $.PDFDocument.alloc.initWithURL(url); "
+                "if (!document) throw new Error('cannot open PDF'); "
+                "return ObjC.unwrap(document.string); }"
+            )
+            result = subprocess.run(
+                [osascript, "-l", "JavaScript", "-e", script, pdf.name],
+                capture_output=True,
+                check=True,
+            )
+        return "".join(result.stdout.decode().split())
+    raise unittest.SkipTest("PDF text QA requires Poppler pdftotext or macOS PDFKit")
 
 
 class ProcurementPermissionTests(unittest.TestCase):
@@ -74,12 +108,146 @@ class ProcurementPermissionTests(unittest.TestCase):
         session["admin_logged_in"] = True
         session["admin_username"] = username
 
+    def create_procurement_only_user(self, username, **permissions):
+        self.create_user(username, **permissions)
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET can_manage_customers = 0,
+                    can_manage_common_info = 0,
+                    can_manage_purchase_followups = 0,
+                    can_manage_carton_purchases = 0,
+                    can_manage_warehouse_inventory = 0,
+                    can_create_products = 0,
+                    can_edit_products = 0,
+                    can_manage_finance = 0,
+                    can_manage_suppliers = 0
+                WHERE username = ?
+                """,
+                (username,),
+            )
+
+    def seed_legacy_carton_purchase(self):
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO carton_purchases (
+                    id, ordered_at, print_mark, supplier_name, board_type,
+                    quantity, unit_price, carton_size, carton_length,
+                    carton_width, carton_height, remark, created_at, updated_at
+                ) VALUES (
+                    73, '2026-09-09', '保密唛头', '保密纸箱厂', 'AB',
+                    7, 1234.56, '40x30x20', 40, 30, 20, '按样生产',
+                    '2026-09-09T10:00:00', '2026-09-09T10:00:00'
+                )
+                """
+            )
+
     def test_purchase_view_does_not_grant_purchase_price(self):
         self.login("buyer")
         with app.app.test_request_context("/admin/purchases/raw-material"):
             self.restore_session("buyer")
             self.assertTrue(app.user_has_permission("purchase_view"))
             self.assertFalse(app.user_can_view_purchase_prices())
+
+    def test_legacy_carton_statement_pdf_hides_all_prices_for_price_blind_user(self):
+        self.seed_legacy_carton_purchase()
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET can_manage_carton_purchases = 1,
+                    can_view_purchase_prices = 0,
+                    can_manage_finance = 0
+                WHERE username = 'buyer'
+                """
+            )
+        self.login("buyer")
+
+        response = self.client.get("/admin/carton-purchases/statement")
+
+        self.assertEqual(response.status_code, 200)
+        text = pdf_text(response)
+        self.assertIn("纸箱采购对账单", text)
+        self.assertIn("保密唛头", text)
+        self.assertIn("保密纸箱厂", text)
+        for secret in ("单价", "金额", "合计", "1234.56", "8641.92"):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, text)
+
+    def test_legacy_single_carton_purchase_order_pdf_hides_all_prices_for_price_blind_user(self):
+        self.seed_legacy_carton_purchase()
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET can_manage_carton_purchases = 1,
+                    can_view_purchase_prices = 0,
+                    can_manage_finance = 0
+                WHERE username = 'buyer'
+                """
+            )
+        self.login("buyer")
+
+        response = self.client.get("/admin/carton-purchases/73/purchase-order")
+
+        self.assertEqual(response.status_code, 200)
+        text = pdf_text(response)
+        self.assertIn("纸箱采购单", text)
+        self.assertIn("保密唛头", text)
+        self.assertIn("保密纸箱厂", text)
+        for secret in ("单价", "总价", "合计", "1234.56", "8641.92"):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, text)
+
+    def test_legacy_carton_pdf_routes_keep_prices_for_price_authorized_user(self):
+        self.seed_legacy_carton_purchase()
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET can_manage_carton_purchases = 1,
+                    can_view_purchase_prices = 1,
+                    can_manage_finance = 0
+                WHERE username = 'buyer'
+                """
+            )
+        self.login("buyer")
+
+        statement = pdf_text(
+            self.client.get("/admin/carton-purchases/statement")
+        )
+        purchase_order = pdf_text(
+            self.client.get("/admin/carton-purchases/73/purchase-order")
+        )
+
+        for text in (statement, purchase_order):
+            with self.subTest(document=text[:20]):
+                self.assertIn("单价", text)
+                self.assertIn("1234.56", text)
+                self.assertIn("8641.92", text)
+
+    def test_purchase_view_and_manage_only_users_can_reach_consistent_admin_entry(self):
+        cases = {
+            "view-only": {"can_view_purchases": 1},
+            "manage-only": {"can_manage_purchases": 1},
+        }
+        for username, permissions in cases.items():
+            with self.subTest(username=username):
+                self.create_procurement_only_user(username, **permissions)
+                self.login(username)
+                response = self.client.get("/admin")
+                self.assertEqual(response.status_code, 200)
+                html = response.get_data(as_text=True)
+                top = html.split("<nav>", 1)[1].split("</nav>", 1)[0]
+                self.assertIn('href="/admin">后台</a>', top)
+                self.assertIn('href="/admin/purchases/raw-material"', html)
+                self.assertIn("统一采购", html)
+                self.assertEqual(
+                    self.client.get("/admin/purchases/raw-material").status_code,
+                    200,
+                )
 
     def test_supplier_mutation_requires_supplier_manage(self):
         self.login("buyer")

@@ -2137,6 +2137,8 @@ def user_can_access_admin_modules():
         user_has_permission("customers"),
         user_has_permission("common_info"),
         user_has_permission("supplier_manage"),
+        user_has_permission("purchase_view"),
+        user_has_permission("purchase_manage"),
         user_has_permission("purchase_followups"),
         user_has_permission("carton_purchases"),
         user_has_permission("warehouse_inventory"),
@@ -2253,6 +2255,8 @@ def user_has_permission(permission):
         return bool(user["can_view_prices"])
     if permission == "finance_manage":
         return bool(user["can_manage_finance"])
+    if permission == "purchase_view":
+        return bool(user["can_view_purchases"] or user["can_manage_purchases"])
     for column, permission_key in PROCUREMENT_PERMISSION_COLUMNS.items():
         if permission == permission_key:
             return bool(user[column])
@@ -10640,15 +10644,21 @@ def delete_supplier(supplier_id):
             abort(404)
         if supplier["system_kind"] == "legacy_unknown":
             abort(409, description="历史系统供应商为只读档案。")
-        is_used = conn.execute(
-            "SELECT 1 FROM purchase_orders WHERE supplier_id = ? LIMIT 1", (supplier_id,)
+        has_historical_reference = conn.execute(
+            """
+            SELECT 1 FROM purchase_orders WHERE supplier_id = ?
+            UNION ALL
+            SELECT 1 FROM supplier_legacy_links WHERE supplier_id = ?
+            LIMIT 1
+            """,
+            (supplier_id, supplier_id),
         ).fetchone()
-        if is_used:
+        if has_historical_reference:
             conn.execute(
                 "UPDATE suppliers SET active = 0, updated_at = ? WHERE id = ?",
                 (datetime.utcnow().isoformat(timespec="seconds"), supplier_id),
             )
-            flash("该供应商已有采购订单，已停用，可随时恢复", "success")
+            flash("该供应商已有历史记录，已停用，可随时恢复", "success")
         else:
             conn.execute("DELETE FROM suppliers WHERE id = ?", (supplier_id,))
             flash("供应商信息已删除", "success")
@@ -13513,7 +13523,7 @@ def carton_purchase_filter_text(filters):
     return "；".join(parts) if parts else "全部记录"
 
 
-def build_carton_purchase_statement_pdf(records, summary, filters):
+def build_carton_purchase_statement_pdf(records, summary, filters, *, include_prices=True):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -13552,8 +13562,13 @@ def build_carton_purchase_statement_pdf(records, summary, filters):
     story = [Paragraph("纸箱采购对账单", title_style)]
     meta_data = [
         [Paragraph("筛选条件", info_style), Paragraph(carton_purchase_filter_text(filters), info_style), Paragraph("制单时间", info_style), Paragraph(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), info_style)],
-        [Paragraph("记录数", info_style), Paragraph(str(summary["record_count"] or 0), info_style), Paragraph("合计金额", info_style), Paragraph(f"{float(summary['total_amount'] or 0):.2f}", info_style)],
+        [Paragraph("记录数", info_style), Paragraph(str(summary["record_count"] or 0), info_style), "", ""],
     ]
+    if include_prices:
+        meta_data[1][2:] = [
+            Paragraph("合计金额", info_style),
+            Paragraph(f"{float(summary['total_amount'] or 0):.2f}", info_style),
+        ]
     meta_table = Table(meta_data, colWidths=[22 * mm, 138 * mm, 22 * mm, 84 * mm])
     meta_table.setStyle(
         TableStyle(
@@ -13573,55 +13588,63 @@ def build_carton_purchase_statement_pdf(records, summary, filters):
     )
     story.extend([meta_table, Spacer(1, 4 * mm)])
 
-    data = [["序号", "下单时间", "送来时间", "供应商", "印刷唛头", "纸板类型", "箱子尺寸CM", "数量", "单价", "金额", "备注"]]
+    data = [["序号", "下单时间", "送来时间", "供应商", "印刷唛头", "纸板类型", "箱子尺寸CM", "数量"]]
+    if include_prices:
+        data[0].extend(["单价", "金额"])
+    data[0].append("备注")
     for index, item in enumerate(records, start=1):
         quantity = int(item["quantity"] or 0)
         unit_price = float(item["unit_price"] or 0)
-        data.append(
-            [
-                str(index),
-                item["ordered_at"] or "",
-                item["received_at"] or "",
-                Paragraph(item["supplier_name"] or "", cell_style),
-                Paragraph(item["print_mark"] or "", cell_style),
-                Paragraph(item["board_type"] or "", cell_style),
-                Paragraph(item["carton_size"] or "", cell_style),
-                str(quantity),
-                f"{unit_price:.2f}",
-                f"{quantity * unit_price:.2f}",
-                Paragraph(item["remark"] or "", cell_style),
-            ]
-        )
-    data.append(["", "", "", "", "合计", "", "", str(summary["total_quantity"] or 0), "", f"{float(summary['total_amount'] or 0):.2f}", ""])
+        row = [
+            str(index),
+            item["ordered_at"] or "",
+            item["received_at"] or "",
+            Paragraph(item["supplier_name"] or "", cell_style),
+            Paragraph(item["print_mark"] or "", cell_style),
+            Paragraph(item["board_type"] or "", cell_style),
+            Paragraph(item["carton_size"] or "", cell_style),
+            str(quantity),
+        ]
+        if include_prices:
+            row.extend([f"{unit_price:.2f}", f"{quantity * unit_price:.2f}"])
+        row.append(Paragraph(item["remark"] or "", cell_style))
+        data.append(row)
+    if include_prices:
+        data.append(["", "", "", "", "合计", "", "", str(summary["total_quantity"] or 0), "", f"{float(summary['total_amount'] or 0):.2f}", ""])
 
-    table = Table(data, colWidths=[9 * mm, 19 * mm, 19 * mm, 24 * mm, 42 * mm, 22 * mm, 28 * mm, 13 * mm, 15 * mm, 18 * mm, 57 * mm], repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
+    col_widths = [9 * mm, 19 * mm, 19 * mm, 24 * mm, 42 * mm, 22 * mm, 28 * mm, 13 * mm]
+    if include_prices:
+        col_widths.extend([15 * mm, 18 * mm, 57 * mm])
+    else:
+        col_widths.append(90 * mm)
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table_styles = [
                 ("FONTNAME", (0, 0), (-1, -1), font_name),
                 ("FONTSIZE", (0, 0), (-1, -1), 7.5),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#155E63")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")),
-                ("FONTNAME", (0, -1), (-1, -1), font_name),
                 ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#8AA0A8")),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("ALIGN", (7, 1), (9, -1), "RIGHT"),
+                ("ALIGN", (7, 1), ((9 if include_prices else 7), -1), "RIGHT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 3),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 3),
                 ("TOPPADDING", (0, 0), (-1, -1), 3),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
+    ]
+    if include_prices:
+        table_styles.extend([
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")),
+            ("FONTNAME", (0, -1), (-1, -1), font_name),
+        ])
+    table.setStyle(TableStyle(table_styles))
     story.append(table)
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 
-def build_carton_purchase_order_pdf(records):
+def build_carton_purchase_order_pdf(records, *, include_prices=True):
     if hasattr(records, "keys"):
         records = [records]
     records = list(records)
@@ -13720,9 +13743,10 @@ def build_carton_purchase_order_pdf(records):
     )
     story.extend([meta_table, Spacer(1, 6 * mm)])
 
-    details = [
-        ["麦头", "纸板类型", "尺寸mm", "纸箱数量", "单价", "总价", "备注"],
-    ]
+    details = [["麦头", "纸板类型", "尺寸mm", "纸箱数量"]]
+    if include_prices:
+        details[0].extend(["单价", "总价"])
+    details[0].append("备注")
     total_quantity = 0
     total_amount = 0
     for record in records:
@@ -13732,41 +13756,44 @@ def build_carton_purchase_order_pdf(records):
         total_quantity += quantity
         total_amount += total_price
         carton_size = (record["carton_size"] or "").replace("×", "x")
-        details.append(
-            [
-                pdf_single_line_paragraph(
-                    record["print_mark"],
-                    mark_cjk_style if any(ord(char) > 127 for char in str(record["print_mark"] or "")) else mark_style,
-                ),
-                pdf_wrapped_paragraph(record["board_type"], cell_style, chunk_size=6),
-                pdf_single_line_paragraph(carton_size, size_style),
-                str(quantity),
-                f"{unit_price:.2f}",
-                f"{total_price:.2f}",
-                pdf_wrapped_paragraph(record["remark"], cell_style, chunk_size=12),
-            ]
-        )
-    details.append(["", "", "合计", str(total_quantity), "", f"{total_amount:.2f}", ""])
-    detail_table = Table(details, colWidths=[68 * mm, 14 * mm, 38 * mm, 18 * mm, 16 * mm, 18 * mm, 58 * mm], repeatRows=1, hAlign="LEFT")
-    detail_table.setStyle(
-        TableStyle(
-            [
+        row = [
+            pdf_single_line_paragraph(
+                record["print_mark"],
+                mark_cjk_style if any(ord(char) > 127 for char in str(record["print_mark"] or "")) else mark_style,
+            ),
+            pdf_wrapped_paragraph(record["board_type"], cell_style, chunk_size=6),
+            pdf_single_line_paragraph(carton_size, size_style),
+            str(quantity),
+        ]
+        if include_prices:
+            row.extend([f"{unit_price:.2f}", f"{total_price:.2f}"])
+        row.append(pdf_wrapped_paragraph(record["remark"], cell_style, chunk_size=12))
+        details.append(row)
+    if include_prices:
+        details.append(["", "", "合计", str(total_quantity), "", f"{total_amount:.2f}", ""])
+    col_widths = [68 * mm, 14 * mm, 38 * mm, 18 * mm]
+    if include_prices:
+        col_widths.extend([16 * mm, 18 * mm, 58 * mm])
+    else:
+        col_widths.append(92 * mm)
+    detail_table = Table(details, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
+    detail_styles = [
                 ("FONTNAME", (0, 0), (-1, -1), font_name),
                 ("FONTSIZE", (0, 0), (-1, -1), 8.5),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#155E63")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")),
                 ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#6B7C87")),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
-                ("ALIGN", (3, 1), (5, -1), "RIGHT"),
+                ("ALIGN", (3, 1), ((5 if include_prices else 3), -1), "RIGHT"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 4),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
+    ]
+    if include_prices:
+        detail_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E8F3F1")))
+    detail_table.setStyle(TableStyle(detail_styles))
     story.extend([detail_table, Spacer(1, 16 * mm)])
 
     sign_table = Table(
@@ -13933,7 +13960,12 @@ def carton_purchase_statement_pdf():
         records = fetch_carton_purchase_records(conn, filters)
         summary = fetch_carton_purchase_summary(conn, filters)
 
-    buffer = build_carton_purchase_statement_pdf(records, summary, filters)
+    buffer = build_carton_purchase_statement_pdf(
+        records,
+        summary,
+        filters,
+        include_prices=user_can_view_purchase_prices(),
+    )
     as_attachment = request.args.get("download") == "1"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return send_file(
@@ -14234,7 +14266,10 @@ def carton_purchase_order_pdf(record_id):
         ).fetchone()
     if record is None:
         abort(404)
-    buffer = build_carton_purchase_order_pdf(record)
+    buffer = build_carton_purchase_order_pdf(
+        record,
+        include_prices=user_can_view_purchase_prices(),
+    )
     as_attachment = request.args.get("download") == "1"
     return send_file(
         buffer,
