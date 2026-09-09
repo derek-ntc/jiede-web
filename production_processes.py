@@ -24,6 +24,8 @@ def _beijing_now():
 
 @contextmanager
 def _savepoint(conn, prefix):
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     name = f"{prefix}_{uuid.uuid4().hex}"
     conn.execute(f"SAVEPOINT {name}")
     try:

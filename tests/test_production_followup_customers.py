@@ -414,6 +414,68 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertEqual(reverted_card[0]["completed_at"], "")
         self.assertEqual(reverted_card[0]["completed_by"], "")
 
+    def test_legacy_stage_route_rejects_a_stage_missing_from_explicit_empty_card(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                [],
+                now="2026-09-09T09:00:00",
+            )
+            before_card = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+
+        response = self.client.post("/admin/production-followups/1/laser")
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            followup = conn.execute(
+                """
+                SELECT laser_completed_at, bending_completed_at,
+                       welding_completed_at
+                FROM production_followups WHERE id = 1
+                """
+            ).fetchone()
+            card = production_processes.load_followup_process_card(conn, 1)
+
+        self.assertEqual(card, before_card)
+        self.assertEqual(tuple(followup), ("", "", ""))
+
+    def test_legacy_stage_route_rejects_a_stage_missing_from_custom_card(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_b,
+                ["下料", "包装"],
+                now="2026-09-09T09:00:00",
+            )
+            before_card = production_processes.create_followup_process_snapshot(
+                conn,
+                2,
+                self.product_b,
+                now="2026-09-09T09:05:00",
+            )
+
+        response = self.client.post("/admin/production-followups/2/laser")
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            followup = conn.execute(
+                """
+                SELECT laser_completed_at, bending_completed_at,
+                       welding_completed_at
+                FROM production_followups WHERE id = 2
+                """
+            ).fetchone()
+            card = production_processes.load_followup_process_card(conn, 2)
+
+        self.assertEqual(card, before_card)
+        self.assertEqual(tuple(followup), ("", "", ""))
+
     def test_deleting_followup_removes_its_process_snapshot_rows(self):
         response = self.client.post("/admin/production-followups/2/delete")
         self.assertEqual(response.status_code, 302)

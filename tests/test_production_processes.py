@@ -208,6 +208,32 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
                     (self.manual_id, "工" * 101),
                 )
 
+    def test_template_save_remains_rollbackable_by_callers_connection_context(self):
+        with self.assertRaisesRegex(RuntimeError, "caller failure"):
+            with app.get_db() as conn:
+                production_processes.save_manual_process_template(
+                    conn,
+                    self.manual_id,
+                    ["下料", "包装"],
+                    now="2026-09-09T10:00:00",
+                )
+                raise RuntimeError("caller failure")
+
+        with app.get_db() as conn:
+            config = conn.execute(
+                "SELECT manual_id FROM manual_process_configs WHERE manual_id = ?",
+                (self.manual_id,),
+            ).fetchone()
+            template = production_processes.load_manual_process_template(
+                conn, self.manual_id
+            )
+
+        self.assertIsNone(config)
+        self.assertEqual(
+            [step["name"] for step in template],
+            ["激光", "折弯", "焊接"],
+        )
+
     def test_followup_snapshot_copies_explicit_template_and_does_not_follow_later_edits(self):
         with app.get_db() as conn:
             production_processes.save_manual_process_template(
@@ -401,6 +427,40 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
             tuple(legacy),
             ("2026-09-09T10:11:00+08:00", "", ""),
         )
+
+    def test_completion_remains_rollbackable_by_callers_connection_context(self):
+        with app.get_db() as conn:
+            followup_id = self._insert_followup(conn, manual_id=None)
+            card = production_processes.create_followup_process_snapshot(
+                conn,
+                followup_id,
+                now="2026-09-09T10:00:00",
+            )
+            first_step_id = card[0]["id"]
+
+        with self.assertRaisesRegex(RuntimeError, "caller failure"):
+            with app.get_db() as conn:
+                production_processes.complete_followup_process_step(
+                    conn,
+                    followup_id,
+                    first_step_id,
+                    "operator-a",
+                    completed_at="2026-09-09T10:10:00+08:00",
+                )
+                raise RuntimeError("caller failure")
+
+        with app.get_db() as conn:
+            card = production_processes.load_followup_process_card(
+                conn, followup_id
+            )
+            legacy = conn.execute(
+                "SELECT laser_completed_at FROM production_followups WHERE id = ?",
+                (followup_id,),
+            ).fetchone()
+
+        self.assertEqual(card[0]["completed_at"], "")
+        self.assertEqual(card[0]["completed_by"], "")
+        self.assertEqual(legacy["laser_completed_at"], "")
 
     def test_add_delete_and_move_only_change_the_uncompleted_tail(self):
         with app.get_db() as conn:

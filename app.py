@@ -9370,32 +9370,7 @@ def complete_production_stage(followup_id, stage):
             except ValueError as error:
                 flash(str(error), "error")
             return production_followup_redirect()
-        if followup[column]:
-            if not production_stage_can_revert(followup, stage):
-                flash("请先撤回后续工序，再撤回当前工序", "error")
-                return production_followup_redirect()
-            conn.execute(
-                f"""
-                UPDATE production_followups
-                SET {column} = '', updated_at = ?
-                WHERE id = ?
-                """,
-                (now, followup_id),
-            )
-            flash(f"{PRODUCTION_STAGE_LABELS[stage]}已改回未完成", "success")
-        else:
-            if not production_stage_can_complete(followup, stage):
-                flash("请按激光、折弯、焊接的顺序完成", "error")
-                return production_followup_redirect()
-            conn.execute(
-                f"""
-                UPDATE production_followups
-                SET {column} = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (now, now, followup_id),
-            )
-            flash(f"{PRODUCTION_STAGE_LABELS[stage]}已完成", "success")
+        flash(f"当前工艺卡中没有{PRODUCTION_STAGE_LABELS[stage]}工艺", "error")
     return production_followup_redirect()
 
 
