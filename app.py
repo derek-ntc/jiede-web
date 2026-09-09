@@ -1802,9 +1802,16 @@ def seed_user(conn, username, password, role, now):
             can_manage_products, can_manage_orders,
             can_manage_customers, can_manage_common_info, can_manage_purchase_followups,
             can_create_products, can_edit_products,
+            can_view_purchases, can_manage_purchases, can_receive_purchases,
+            can_view_purchase_inventory, can_adjust_purchase_inventory,
+            can_outbound_purchase_inventory, can_view_purchase_prices,
+            can_manage_suppliers,
             created_at, updated_at
         )
-        VALUES (?, ?, ?, 1, 1, 1, 1, 1, 1, 1, 1, ?, ?)
+        VALUES (?, ?, ?, 1,
+                1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1,
+                ?, ?)
         """,
         (username, generate_password_hash(password), role, now, now),
     )

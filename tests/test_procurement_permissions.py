@@ -1,6 +1,8 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import app
 from flask import session
@@ -120,6 +122,82 @@ class ProcurementPermissionTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(tuple(user), (1, 0, 0, 0, 0, 0, 0, 1))
 
+    def test_account_edits_grant_all_procurement_permissions_to_admins_only(self):
+        client = app.app.test_client()
+        with client.session_transaction() as client_session:
+            client_session["admin_logged_in"] = True
+            client_session["admin_username"] = "admin"
+
+        client.post(
+            "/admin/users",
+            data={"username": "editable", "password": "password", "role": "operator"},
+        )
+        with app.get_db() as conn:
+            editable_id = conn.execute(
+                "SELECT id FROM users WHERE username = 'editable'"
+            ).fetchone()["id"]
+
+        client.post(f"/admin/users/{editable_id}/edit", data={"role": "admin"})
+        with app.get_db() as conn:
+            admin_flags = conn.execute(
+                f"SELECT {', '.join(PROCUREMENT_PERMISSION_COLUMNS)} FROM users WHERE id = ?",
+                (editable_id,),
+            ).fetchone()
+        self.assertEqual(tuple(admin_flags), (1, 1, 1, 1, 1, 1, 1, 1))
+
+        client.post(
+            f"/admin/users/{editable_id}/edit",
+            data={"role": "operator", "can_receive_purchases": "on"},
+        )
+        with app.get_db() as conn:
+            operator_flags = conn.execute(
+                f"SELECT {', '.join(PROCUREMENT_PERMISSION_COLUMNS)} FROM users WHERE id = ?",
+                (editable_id,),
+            ).fetchone()
+        self.assertEqual(tuple(operator_flags), (0, 0, 1, 0, 0, 0, 0, 0))
+
+
+class ProcurementSeededAdminTests(unittest.TestCase):
+    def setUp(self):
+        self.original_db_path = app.DB_PATH
+        self.original_database_ready = app.DATABASE_READY
+        self.tmpdir = tempfile.TemporaryDirectory()
+        app.DB_PATH = Path(self.tmpdir.name) / "manuals.db"
+        app.DATABASE_READY = False
+
+    def tearDown(self):
+        app.DB_PATH = self.original_db_path
+        app.DATABASE_READY = self.original_database_ready
+        self.tmpdir.cleanup()
+
+    def test_default_and_configured_seeded_admins_persist_all_procurement_permissions(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_USERNAME": "seeded-admin",
+                "ADMIN_PASSWORD": "seeded-password",
+                "ADMIN_ACCOUNTS": "configured-admin:configured-password",
+            },
+            clear=True,
+        ):
+            app.init_db()
+        with app.get_db() as conn:
+            users = conn.execute(
+                f"""
+                SELECT username, {', '.join(PROCUREMENT_PERMISSION_COLUMNS)}
+                FROM users
+                WHERE username IN ('seeded-admin', 'configured-admin')
+                ORDER BY username
+                """
+            ).fetchall()
+        self.assertEqual(
+            [(user["username"], *tuple(user)[1:]) for user in users],
+            [
+                ("configured-admin", 1, 1, 1, 1, 1, 1, 1, 1),
+                ("seeded-admin", 1, 1, 1, 1, 1, 1, 1, 1),
+            ],
+        )
+
 
 class ProcurementPermissionMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -134,7 +212,7 @@ class ProcurementPermissionMigrationTests(unittest.TestCase):
         app.DATABASE_READY = self.original_database_ready
         self.tmpdir.cleanup()
 
-    def test_new_procurement_columns_backfill_legacy_permissions_once(self):
+    def test_new_procurement_columns_backfill_exact_legacy_permissions_once(self):
         legacy_columns = (
             "can_manage_products", "can_manage_orders", "can_view_orders",
             "can_manage_shipped", "can_view_shipped", "can_manage_customers",
@@ -175,21 +253,52 @@ class ProcurementPermissionMigrationTests(unittest.TestCase):
                 """
             )
             columns = ("username", "password_hash", "role", "created_at", "updated_at", *legacy_columns)
-            values = (
-                "legacy-buyer", "hash", "operator", "2026-09-09T10:00:00",
-                "2026-09-09T10:00:00", 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1,
-            )
-            conn.execute(
-                f"INSERT INTO users ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
-                values,
-            )
-            app.ensure_user_table(conn)
+            legacy_users = {
+                "purchase": (0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+                "carton": (0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0),
+                "warehouse": (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0),
+                "powder": (0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0),
+                "price": (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0),
+                "finance": (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+                "none": (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            }
+            for username, permissions in legacy_users.items():
+                conn.execute(
+                    f"INSERT INTO users ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    (username, "hash", "operator", "2026-09-09T10:00:00", "2026-09-09T10:00:00", *permissions),
+                )
+
+        app.init_db()
+        expected = {
+            "purchase": (1, 1, 0, 0, 0, 0, 0, 1),
+            "carton": (1, 1, 1, 0, 0, 0, 0, 1),
+            "warehouse": (0, 0, 1, 1, 1, 1, 0, 0),
+            "powder": (1, 1, 0, 0, 0, 0, 0, 1),
+            "price": (0, 0, 0, 0, 0, 0, 1, 0),
+            "finance": (0, 0, 0, 0, 0, 0, 1, 0),
+            "none": (0, 0, 0, 0, 0, 0, 0, 0),
+        }
+        with app.get_db() as conn:
             actual_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
             self.assertTrue(set(PROCUREMENT_PERMISSION_COLUMNS) <= actual_columns)
-            user = conn.execute(
-                f"SELECT {', '.join(PROCUREMENT_PERMISSION_COLUMNS)} FROM users WHERE username = 'legacy-buyer'"
+            actual = {
+                row["username"]: tuple(row)[1:]
+                for row in conn.execute(
+                    f"SELECT username, {', '.join(PROCUREMENT_PERMISSION_COLUMNS)} FROM users WHERE username IN ({', '.join('?' for _ in expected)})",
+                    tuple(expected),
+                )
+            }
+            conn.execute(
+                "UPDATE users SET can_manage_purchases = 0, can_view_purchase_prices = 0 WHERE username = 'carton'"
+            )
+        self.assertEqual(actual, expected)
+
+        app.init_db()
+        with app.get_db() as conn:
+            preserved = conn.execute(
+                "SELECT can_manage_purchases, can_view_purchase_prices FROM users WHERE username = 'carton'"
             ).fetchone()
-        self.assertEqual(tuple(user), (1, 1, 1, 1, 1, 1, 1, 1))
+        self.assertEqual(tuple(preserved), (0, 0))
 
 
 if __name__ == "__main__":
