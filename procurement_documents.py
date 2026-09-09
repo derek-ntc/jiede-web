@@ -36,19 +36,30 @@ class Column:
 _MATERIAL = Column("material", "材质", 15)
 _LENGTH = Column("length", "长", 10, "number")
 _WIDTH = Column("width", "宽", 10, "number")
-_TAIL = (Column("unit", "单位", 7, optional=True), Column("ordered_quantity", "数量", 15, "number"))
+_QUANTITY = Column("ordered_quantity", "数量", 15, "number")
+_TAIL = (Column("unit", "单位", 7, optional=True), _QUANTITY)
 _PRICES = (Column("unit_price", "单价", 16, "money"), Column("line_total", "金额", 17, "money"))
 _END = (Column("expected_at", "预计到货日期", 17, "date"), Column("remark", "其他要求", 29))
 CATEGORY_DOCUMENT_COLUMNS = {
-    "raw_material": (_MATERIAL, _LENGTH, _WIDTH, Column("thickness", "厚度", 10, "number"), Column("surface", "表面", 14), *_TAIL, *_END),
-    "carton": (_MATERIAL, _LENGTH, _WIDTH, Column("height", "高", 10, "number"), *_TAIL, *_PRICES, *_END),
+    "raw_material": (_MATERIAL, _LENGTH, _WIDTH, Column("thickness", "厚度", 10, "number"), Column("surface", "表面", 14), _QUANTITY, *_END),
+    "carton": (_MATERIAL, _LENGTH, _WIDTH, Column("height", "高", 10, "number"), _QUANTITY, *_PRICES, *_END),
     "outsourcing": (Column("identity", "物品／图号", 27), _MATERIAL, Column("details", "尺寸／厚度／表面", 30, optional=True), *_TAIL, *_PRICES, *_END),
     "other": (Column("identity", "物品／规格", 30), Column("details", "材质／尺寸／厚度／表面", 34, optional=True), *_TAIL, *_PRICES, *_END),
 }
 
 
+def sanitize_document_text(value):
+    """Make saved text safe for XML and PDF, preserving readable separators."""
+    text = "" if value is None else str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+    return "".join(
+        " " if (unicodedata.category(char) in {"Cc", "Cs"} and char != "\n")
+        or ord(char) & 0xFFFF in {0xFFFE, 0xFFFF} else char
+        for char in text)
+
+
 def _text(value):
-    return "" if value is None else str(value)
+    return sanitize_document_text(value)
 
 
 def _join(*values):
@@ -57,6 +68,13 @@ def _join(*values):
 
 def _money(value):
     return None if value is None else Decimal(value) / 100
+
+
+def _excel_money(value):
+    """Excel guarantees 15 significant digits; use exact RMB text beyond that."""
+    if isinstance(value, Decimal) and Decimal(format(float(value), ".15g")) != value:
+        return f"¥{value:,.2f}"
+    return value
 
 
 def purchase_document_view(order, items, *, include_prices):
@@ -84,7 +102,7 @@ def purchase_document_view(order, items, *, include_prices):
                 value = date.fromisoformat(item[column.key]) if item.get(column.key) else None
             else:
                 value = item.get(column.key)
-            row[column.key] = value
+            row[column.key] = _text(value) if column.kind == "text" else value
         rows.append(row)
     columns = [column for column in columns if not column.optional or any(row[column.key] not in (None, "") for row in rows)]
     rows = [{column.key: row[column.key] for column in columns} for row in rows]
@@ -97,7 +115,7 @@ def purchase_document_view(order, items, *, include_prices):
     delivery = ["收货地址：" + _text(order.get("delivery_address")),
                 "收件人：" + _text(order.get("recipient")) + "    电话：" + _text(order.get("recipient_phone")),
                 "订单备注：" + _text(order.get("remark"))]
-    company = [profile.get("company_name") or "宁波市杰德机械科技有限公司"]
+    company = [_text(profile.get("company_name") or "宁波市杰德机械科技有限公司")]
     company.extend(label + _text(profile[key]) for key, label in (("address", "地址："), ("contact", "联系人："), ("phone", "电话："), ("email", "邮箱：")) if profile.get(key))
     result = dict(order_no=_text(order["order_no"]), category=PURCHASE_CATEGORY_LABELS[category],
                   status=PURCHASE_STATUS_LABELS[order["status"]], purchased_at=date.fromisoformat(order["purchased_at"]),
@@ -133,12 +151,19 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
     count = len(columns)
     # Keep the physical page width stable across category/permission projections.
     widths = [column.width * 145 / sum(c.width for c in columns) for column in columns]
+    # A4 fitting may scale a wide order down slightly; never replace a valid amount with ###.
+    for index, column in enumerate(columns):
+        if column.kind == "money":
+            labels = [f"¥{row[column.key]:,.2f}" for row in model["rows"] if row[column.key] is not None]
+            widths[index] = max([widths[index]] + [len(label) + 3 for label in labels])
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     font = Font(name="Arial Unicode MS", size=11, color="202833")
     rule = Side(style="hair", color="BFC7CF")
 
     def write(row, col, value, *, kind="text", bold=False, center=False):
+        if kind == "money":
+            value = _excel_money(value)
         cell = sheet.cell(row, col, value)
         if isinstance(value, str):
             cell.data_type = "s"  # Never interpret supplier/item text as Excel formulas.
@@ -171,7 +196,7 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
     for index, column in enumerate(columns, 1):
         cell = write(header_row, index, column.label, bold=True, center=True)
         cell.fill = PatternFill("solid", fgColor="E8EDF2")
-        cell.border = Border(top=rule, bottom=rule)
+        cell.border = Border(top=rule, bottom=rule, right=rule)
     sheet.row_dimensions[header_row].height = 34
     for source in model["rows"]:
         # Split exceptionally long text into continuation rows, never clip at Excel's height limit.
@@ -191,17 +216,23 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
                 elif column.kind == "money" and value is None:
                     value = "未录价"
                 cell = write(row, index, value, kind=column.kind)
+                if column.kind == "money" and isinstance(cell.value, str):
+                    height = max(height, len(_wrapped_lines(cell.value, max(4, widths[index - 1] - 2))))
                 if column.kind == "date":
                     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = Border(bottom=rule)
+                cell.border = Border(bottom=rule, right=rule)
             sheet.row_dimensions[row].height = max(29, height * 16 + 8)
     if "total" in model:
         row = sheet.max_row + 1
-        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=count - 1)
+        total_column = count // 2 + 1
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=total_column - 1)
+        sheet.merge_cells(start_row=row, start_column=total_column, end_row=row, end_column=count)
         write(row, 1, "合计（RMB／人民币）", bold=True)
-        write(row, count, model["total"] if model["total"] is not None else "未完整录价", kind="money", bold=True)
-        sheet.row_dimensions[row].height = 29
-    for line in model["delivery"] + model["company"]:
+        total = write(row, total_column, model["total"] if model["total"] is not None else "未完整录价", kind="money", bold=True)
+        total_width = sum(widths[total_column - 1:])
+        sheet.row_dimensions[row].height = max(29, len(_wrapped_lines(total.value, max(4, total_width - 2))) * 16 + 8)
+    full_line("\n".join(model["delivery"][:2]))
+    for line in model["delivery"][2:] + model["company"]:
         full_line(line)
     sheet.freeze_panes = f"A{header_row + 1}"
     sheet.print_title_rows = f"{header_row}:{header_row}"
@@ -244,6 +275,19 @@ def _pdf_font():
     return "STSong-Light"
 
 
+def _pdf_cell_parts(paragraph, width, max_height=156):
+    """Split a cell before Table sees it; Table itself only breaks between rows."""
+    parts = []
+    while paragraph.wrap(width, max_height)[1] > max_height:
+        split = paragraph.split(width, max_height)
+        if len(split) != 2:
+            raise ValueError("采购订单文本无法安全分页")
+        parts.append(split[0])
+        paragraph = split[1]
+    parts.append(paragraph)
+    return parts
+
+
 def build_purchase_order_pdf(order, items, *, include_prices: bool) -> BytesIO:
     model = purchase_document_view(order, items, include_prices=include_prices)
     stream = BytesIO()
@@ -264,19 +308,22 @@ def build_purchase_order_pdf(order, items, *, include_prices: bool) -> BytesIO:
         story.append(paragraph("币种：RMB／人民币"))
     story.append(Spacer(1, 8))
     columns = model["columns"]
+    column_widths = [document.width * c.width / sum(c.width for c in columns) for c in columns]
     table_rows = [[paragraph(column.label, "center") for column in columns]]
     for row in model["rows"]:
         values = []
-        for column in columns:
+        for column, width in zip(columns, column_widths):
             value = row[column.key]
             if column.kind == "money":
                 value = "未录价" if value is None else f"¥{value:,.2f}"
             elif column.kind == "number" and value is not None:
                 value = str(value)
-            values.append(paragraph(value, "number" if column.kind in ("number", "money") else "cell"))
-        table_rows.append(values)
-    table = Table(table_rows, colWidths=[document.width * c.width / sum(c.width for c in columns) for c in columns],
-                  repeatRows=1, hAlign="LEFT", splitByRow=1, splitInRow=1)
+            cell = paragraph(value, "number" if column.kind in ("number", "money") else "cell")
+            values.append(_pdf_cell_parts(cell, width - 10))
+        for continuation in range(max(len(parts) for parts in values)):
+            table_rows.append([parts[continuation] if continuation < len(parts) else "" for parts in values])
+    table = Table(table_rows, colWidths=column_widths,
+                  repeatRows=1, hAlign="LEFT", splitByRow=1, splitInRow=0)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EDF2")),
         ("LINEABOVE", (0, 0), (-1, 0), .5, colors.HexColor("#A9B6C3")),

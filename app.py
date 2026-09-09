@@ -11854,6 +11854,14 @@ def purchase_order_detail(order_id, category=None):
     return render_template("purchase_order_detail.html", order=order, items=items, **purchase_page_context(order["category"]))
 
 
+@app.after_request
+def prevent_purchase_export_caching(response):
+    # Also cover routing-level 404s (invalid IDs), cancelled orders, and redirects.
+    if re.fullmatch(r"/admin/purchases/orders/[^/]+/export\.[^/]+", request.path):
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 @app.route("/admin/purchases/orders/<int:order_id>/export.<export_format>")
 @permission_required("purchase_view")
 def export_purchase_order(order_id, export_format):
@@ -11874,7 +11882,6 @@ def export_purchase_order(order_id, export_format):
                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if export_format == "xlsx" else "application/pdf",
                         as_attachment=export_format == "xlsx" or request.args.get("download") == "1",
                         download_name=f"{order['order_no']}-purchase-order.{export_format}")
-    response.headers["Cache-Control"] = "private, no-store"
     return response
 
 
