@@ -33,9 +33,9 @@ def existing_application_lock(path, *, offline=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True, type=Path)
-    parser.add_argument("--env-file", type=Path, help="Use this dotenv file instead of the project-root .env for lock selection; its lock value overrides the process environment. A missing file falls back to the environment/default. Other values are not loaded")
+    parser.add_argument("--env-file", type=Path, help="Use this dotenv file instead of the project-root .env for lock selection; its lock value overrides the process environment. Relative lock values are anchored to the project root, not this file's directory. A missing file falls back to the environment/default. Other values are not loaded")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--lock-path", help="Existing application lock file; overrides .env and process environment. Otherwise use JIEDE_WRITE_LOCK_PATH from .env, then the environment, then /tmp/jiede-web-write.lock. Never created by this command")
+    mode.add_argument("--lock-path", help="Existing application lock file; an explicit relative path uses the caller's current directory. Overrides .env and process environment. Otherwise use JIEDE_WRITE_LOCK_PATH from .env, then the environment, then /tmp/jiede-web-write.lock; relative configured values use the project root. All paths are canonicalized. Never created by this command")
     mode.add_argument("--offline", action="store_true", help="Bypass the application lock ONLY for a static copy or stopped application; concurrent nolock writers can make the report inconsistent")
     args = parser.parse_args()
     lock_path = None

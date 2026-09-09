@@ -16,6 +16,10 @@ def resolve_write_lock_path(project_root, *, explicit_lock_path=None, env_file=N
     dotenv interpolation, never loaded into the caller's environment. Call this
     before the application's existing load_dotenv to share its initial inputs.
     A missing dotenv file is allowed; a present but unreadable file is not.
+
+    Configured relative paths (.env, process env, or default) are project-root
+    relative, including when env_file is elsewhere. An explicit CLI path is
+    caller-CWD relative. Every result is absolute and resolves symlinks/"..".
     """
     value = explicit_lock_path
     if value is None:
@@ -37,4 +41,6 @@ def resolve_write_lock_path(project_root, *, explicit_lock_path=None, env_file=N
     path = Path(value)
     if not path.name or path.name in {".", ".."}:
         raise ValueError("JIEDE_WRITE_LOCK_PATH must name a lock file")
-    return path
+    if explicit_lock_path is None and not path.is_absolute():
+        path = Path(project_root) / path
+    return path.resolve()

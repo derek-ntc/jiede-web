@@ -26,7 +26,7 @@ class WriteLockConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.env_file = self.root / ".env"
         self.db = self.root / "report.db"
         with sqlite3.connect(self.db) as conn:
@@ -45,7 +45,7 @@ class WriteLockConfigurationTests(unittest.TestCase):
     def configure_dotenv(self):
         self.env_file.write_text(f'LOCK_FOLDER="{self.root}"\nJIEDE_WRITE_LOCK_PATH=${{LOCK_FOLDER}}/dotenv.lock\nSECRET_KEY=synthetic-secret-not-for-cli\n', encoding="utf-8")
 
-    def copied_app_configuration(self):
+    def copied_app_configuration(self, *, cwd=None):
         # A copied app's BASE_DIR is temporary; import does not initialize its DB.
         copied_app = self.root / "isolated_app.py"
         shutil.copyfile(ROOT / "app.py", copied_app)
@@ -62,7 +62,7 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 print(json.dumps({'lock': str(module.app.config['WRITE_LOCK_PATH']), 'other_config_preserved': module.app.config['SECRET_KEY'] == 'synthetic-secret-not-for-cli'}))
 """
-        result = subprocess.run([sys.executable, "-c", code, str(ROOT), str(copied_app)], env=self.env, capture_output=True, text=True, timeout=10)
+        result = subprocess.run([sys.executable, "-c", code, str(ROOT), str(copied_app)], cwd=cwd, env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "data/manuals.db").exists())
         return json.loads(result.stdout)
@@ -101,12 +101,83 @@ print(json.dumps({'lock': str(module.app.config['WRITE_LOCK_PATH']), 'other_conf
         self.assertIn(str(self.shell_lock), result.stderr)
         self.assertNotIn("synthetic-secret-not-for-cli", result.stdout + result.stderr)
 
+    def test_relative_dotenv_lock_is_shared_when_app_and_cli_have_different_cwds(self):
+        self.env_file.write_text("JIEDE_WRITE_LOCK_PATH=write.lock\nSECRET_KEY=synthetic-secret-not-for-cli\n", encoding="utf-8")
+        app_config = self.copied_app_configuration(cwd=self.root)
+        project_lock = self.root / "write.lock"
+        project_lock.touch()
+        other_cwd = self.root / "operator-directory"
+        other_cwd.mkdir()
+        decoy_lock = other_cwd / "write.lock"
+        decoy_lock.write_bytes(b"must not select this lock")
+        isolated_cli = self.root / "scripts" / CLI.name
+        isolated_cli.parent.mkdir()
+        shutil.copyfile(CLI, isolated_cli)
+        paths = (self.db, project_lock, decoy_lock, self.env_file)
+        before = [(path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino) for path in paths]
+        with project_lock.open("rb") as held_lock:
+            fcntl.flock(held_lock, fcntl.LOCK_EX)
+            reporter = subprocess.Popen([sys.executable, str(isolated_cli), "--database", str(self.db)], cwd=other_cwd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertTrue(select.select([reporter.stderr], [], [], 5)[0])
+                diagnostic = reporter.stderr.readline()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    reporter.communicate(timeout=0.2)
+                self.assertIn(str(project_lock), diagnostic)
+            finally:
+                fcntl.flock(held_lock, fcntl.LOCK_UN)
+                stdout, stderr = reporter.communicate(timeout=5)
+        self.assertEqual(reporter.returncode, 0, stderr)
+        self.assertEqual(app_config, {"lock": str(project_lock), "other_config_preserved": True})
+        self.assertIsInstance(json.loads(stdout)["sources"], dict)
+        self.assertEqual(before, [(path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino) for path in paths])
+
+    def test_relative_shell_lock_is_project_anchored_and_canonical_from_any_cwd(self):
+        other_cwd = self.root / "operator-directory"
+        other_cwd.mkdir()
+        alias_root = self.root / "project-alias"
+        alias_root.symlink_to(self.root, target_is_directory=True)
+        code = """
+import json, os, sys
+from runtime_config import resolve_write_lock_path
+before = dict(os.environ)
+path = resolve_write_lock_path(sys.argv[1])
+print(json.dumps({'lock': str(path), 'environment_unchanged': before == dict(os.environ), 'app_imported': 'app' in sys.modules}))
+"""
+        for cwd in (self.root, other_cwd):
+            with self.subTest(cwd=cwd):
+                result = subprocess.run([sys.executable, "-c", code, str(alias_root)], cwd=cwd, env=dict(self.env, JIEDE_WRITE_LOCK_PATH="state/../write.lock"), capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"lock": str(self.root / "write.lock"), "environment_unchanged": True, "app_imported": False})
+        self.assertFalse((self.root / "write.lock").exists())
+        self.assertFalse((other_cwd / "write.lock").exists())
+
+    def test_explicit_relative_cli_lock_uses_callers_cwd_and_is_canonical(self):
+        self.configure_dotenv()
+        other_cwd = self.root / "operator-directory"
+        other_cwd.mkdir()
+        (other_cwd / "sub").mkdir()
+        selected_lock = other_cwd / "local.lock"
+        selected_lock.write_bytes(b"operator-selected lock")
+        paths = (self.db, selected_lock, self.dotenv_lock)
+        before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+        with self.dotenv_lock.open("rb") as held_lock:
+            fcntl.flock(held_lock, fcntl.LOCK_EX)
+            result = subprocess.run(self.cmd + ["--lock-path", "sub/../local.lock"], cwd=other_cwd, env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(selected_lock), result.stderr)
+        self.assertEqual(before, [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths])
+        failed = subprocess.run(self.cmd + ["--lock-path", "missing.lock"], cwd=other_cwd, env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse((other_cwd / "missing.lock").exists())
+        self.assertFalse((self.root / "missing.lock").exists())
+
     def test_missing_dotenv_uses_shell_then_default_without_opening_default_lock(self):
         resolve = self.resolver()
         with patch.dict(os.environ, {"JIEDE_WRITE_LOCK_PATH": str(self.shell_lock)}, clear=True):
             self.assertEqual(resolve(self.root), self.shell_lock)
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(resolve(self.root), Path("/tmp/jiede-web-write.lock"))
+            self.assertEqual(resolve(self.root), Path("/tmp").resolve() / "jiede-web-write.lock")
         result = subprocess.run(self.cmd, env=self.env, capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(self.shell_lock), result.stderr)
