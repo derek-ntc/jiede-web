@@ -145,3 +145,36 @@ The actual CLI was also rerun against the existing synthetic `valid.db`, explici
 Changed files in this round: `app.py`, `procurement.py`, `procurement_documents.py`, `scripts/report_procurement_migration.py`, `static/purchase-orders.js`, `templates/purchase_order_form.html`, `tests/js/purchase-orders.test.js`, `tests/test_procurement_migration.py`, and `tests/test_purchase_order_exports.py`.
 
 Residual boundaries: direct out-of-band SQL is not an authorized editor and must preserve legacy provenance; all application updates use the protected domain path. Consistent online reporting depends on every writer using the same stable lock inode/path, as the application already does. `--offline` deliberately disables that protection and must not be used against a live writable database. These are documented operational constraints, not permission to touch a live database or deploy this branch.
+
+## Review fix round 2 — shared dotenv lock configuration
+
+Fix implementation commit: `e6ee8725079746393e7ae87ceee1904f90793235` (`fix: share application write lock configuration`). Only the remaining Important configuration mismatch was addressed. All changes stayed in the designated worktree, and all new configuration/database/lock fixtures were temporary. No real `.env` was read or changed by the configuration QA; no default application lock, real database, deployment, or subagent was used.
+
+### Root cause and minimal correction
+
+The application originally loaded the project `.env` with `override=True` before reading `JIEDE_WRITE_LOCK_PATH`, whereas the report CLI read only its initial process environment. Different `.env` and shell values therefore selected different locks even though both processes used `flock` correctly.
+
+Both consumers now call the side-effect-free `runtime_config.resolve_write_lock_path`. Its precedence is explicit CLI `--lock-path` → project-root `.env` lock value → shell environment → `/tmp/jiede-web-write.lock`. Dotenv interpolation uses the existing python-dotenv dependency and its override semantics. App resolution happens immediately before the unchanged `load_dotenv(BASE_DIR / ".env", override=True)` so both consumers resolve from the same initial inputs; the application still loads all of its other configuration exactly as before. The CLI neither imports `app` nor loads unrelated dotenv values into its environment or output.
+
+`--env-file` is a documented CLI option selecting a different dotenv file solely for lock selection. Its help states override precedence, missing-file fallback, and non-loading of other values. An explicit lock bypasses dotenv parsing entirely. Empty/blank/control-character lock paths and paths that do not name a file raise clear `JIEDE_WRITE_LOCK_PATH` errors rather than silently selecting a fallback. A present but unreadable configuration file also fails clearly. Offline reporting retains its prior explicit warning and skips lock configuration entirely.
+
+### RED → GREEN and concurrency evidence
+
+- Added five tests before production changes. **RED: 5 failures.** The direct reproduction copied `app.py` and the actual CLI into a temporary project root with its own `.env`, while using the worktree's existing dependency modules. The isolated application selected temporary `dotenv.lock`; the unmodified CLI's diagnostic showed temporary `shell.lock`. Other failures covered the missing shared resolver/`--env-file` support.
+- **GREEN: all 5 passed.** The isolated app preserves its other dotenv configuration. While the test process holds `dotenv.lock`, automatic CLI selection signals that exact lock and blocks until release; explicit `--lock-path` selects the shell lock and completes while the dotenv lock remains held. No `.env` uses shell then default correctly; the default is compared as a value only and never opened. Resolver calls do not mutate process environment. Empty and malformed lock values fail without fallback, and synthetic unrelated config values never appear in CLI stdout/stderr.
+- The first post-implementation test run exposed a fixture-only issue: operating systems reject NUL while constructing an environment variable, before the resolver runs. The test now supplies NUL directly to the resolver's explicit-path input while keeping representable invalid values in environment tests. Production behavior was not weakened.
+- Existing CLI tests now pass temporary `--env-file` paths so future real project configuration cannot affect them. The previous real subprocess `nolock` writer test also passed in both focused and final full runs, still reconciling only the completed **15/15 quantity and 4,245/4,245 minor-unit** snapshot with unchanged database hash/mtime.
+
+### Final verification
+
+- Focused Phase 1 + shared-configuration regression: **105 tests in 7.383 seconds, all passed, no skips**.
+- Final complete Python suite, once on final production/test code with the bundled Poppler PATH: **669 tests in 64.285 seconds, OK, skipped=1 (668 passed)**. Only the existing opt-in real-browser shipping-color check skipped; PDF/export tests ran.
+- Node purchase-order tests: **5/5 passed**, no skips.
+- `git diff --check` and staged diff check passed. Reviewed the complete five-file change, including configuration precedence/interpolation, no app import in CLI, unchanged application dotenv loading, explicit-lock handling, error messages, and temporary fixture boundaries.
+- Changed files: `runtime_config.py`, `app.py`, `scripts/report_procurement_migration.py`, `tests/test_runtime_config.py`, and `tests/test_procurement_migration.py`.
+
+Evidence under `/private/tmp/jiede-procurement-task6-qa/`: `fix2-red.log`, `fix2-green.log`, `fix2-focused.log`, `fix2-full-suite.log`, and `fix2-node.log`.
+
+Persisted CLI QA used only synthetic `valid.db` and temporary `fix2.env`, whose lock setting pointed to pre-created `fix1-report.lock` while the shell pointed to missing `fix2-shell-missing.lock`. The CLI selected the dotenv lock, succeeded, and left the incorrect shell lock nonexistent. `fix2-locked-report.json` is byte-identical to `valid-report.json`; `fix2-locked-report.stderr` contains only lock acquisition diagnostics, with no unrelated synthetic dotenv value. Database and lock SHA-256/mtime remain exactly the values in the round-1 table above (`valid.db`: `974dc3b5…`, `1788968068698495263`; lock: `14e98e71…`, `1788969602228878356`). Existing totals remain 4 migrated orders, 14 supplier links, 8 supplier conflicts, 1 attachment, and 1 deferred arrival row.
+
+Operational boundary: use the same deployed project dotenv file for online CLI and application, or deliberately select their exact existing lock with `--lock-path`. No deployment/configuration-file edits were performed by this task.
