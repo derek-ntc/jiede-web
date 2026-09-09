@@ -337,6 +337,47 @@ class ProductBatchAssemblyTests(unittest.TestCase):
         self.assertEqual(len(retained), 1)
         self.assertEqual(retained[0].read_bytes(), b"part-a.pdf")
 
+    def test_batch_delete_retains_quarantine_when_staged_backup_is_missing(self):
+        self.attach_file(self.product_a, "part-a.pdf")
+        self.attach_file(self.product_b, "part-b.pdf")
+        real_load_deletable_manuals = app.load_deletable_manuals
+        load_count = 0
+        quarantine_dirs = []
+
+        def remove_staged_backup_before_final_check(conn, manual_ids):
+            nonlocal load_count
+            load_count += 1
+            if load_count == 2:
+                operation_dirs = list(
+                    (app.MANUALS_DIR / ".delete-quarantine").glob("*")
+                )
+                self.assertEqual(len(operation_dirs), 1)
+                quarantine_dirs.extend(operation_dirs)
+                (operation_dirs[0] / "part-a.pdf").unlink()
+                raise ValueError("forced mutable-state failure")
+            return real_load_deletable_manuals(conn, manual_ids)
+
+        with mock.patch.object(
+            app,
+            "load_deletable_manuals",
+            new=remove_staged_backup_before_final_check,
+        ):
+            with self.assertLogs(app.app.logger.name, level="ERROR") as logs:
+                response = self.client.post(
+                    "/admin/products/delete-batch",
+                    data={"manual_id": [str(self.product_a), str(self.product_b)]},
+                    follow_redirects=True,
+                )
+
+        self.assertIn("整批未删除", response.get_data(as_text=True))
+        self.assert_products_exist(self.product_a, self.product_b)
+        self.assertFalse((app.MANUALS_DIR / "part-a.pdf").exists())
+        self.assertTrue((app.MANUALS_DIR / "part-b.pdf").exists())
+        self.assertEqual(len(quarantine_dirs), 1)
+        self.assertTrue(quarantine_dirs[0].exists())
+        self.assertIn("隔离文件缺失", "\n".join(logs.output))
+        self.assertIn("隔离目录保留在", "\n".join(logs.output))
+
     def test_batch_delete_rejects_persisted_file_path_outside_upload_directory(self):
         outside_file = Path(self.tmpdir.name) / "outside.pdf"
         outside_file.write_bytes(b"outside")
@@ -359,6 +400,33 @@ class ProductBatchAssemblyTests(unittest.TestCase):
         self.assertIn("整批未删除", response.get_data(as_text=True))
         self.assert_products_exist(self.product_a, self.product_b)
         self.assertEqual(outside_file.read_bytes(), b"outside")
+
+    def test_batch_delete_rejects_normalized_quarantine_namespace_path(self):
+        reserved_file = (
+            app.MANUALS_DIR / ".delete-quarantine" / "persisted-file.pdf"
+        )
+        reserved_file.parent.mkdir()
+        reserved_file.write_bytes(b"reserved")
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_files (
+                    manual_id, filename, original_filename, file_type, created_at
+                ) VALUES (?, './.delete-quarantine/persisted-file.pdf',
+                          'persisted-file.pdf', 'file', ?)
+                """,
+                (self.product_a, "2026-09-03T20:00:00"),
+            )
+
+        response = self.client.post(
+            "/admin/products/delete-batch",
+            data={"manual_id": [str(self.product_a), str(self.product_b)]},
+            follow_redirects=True,
+        )
+
+        self.assertIn("整批未删除", response.get_data(as_text=True))
+        self.assert_products_exist(self.product_a, self.product_b)
+        self.assertEqual(reserved_file.read_bytes(), b"reserved")
 
     def test_batch_delete_rejects_upload_symlink_resolving_outside_directory(self):
         outside_file = Path(self.tmpdir.name) / "outside-target.pdf"

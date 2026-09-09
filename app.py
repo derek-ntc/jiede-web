@@ -18139,12 +18139,14 @@ def manual_delete_filenames(conn, manuals):
 
 def resolve_manual_delete_path(root, filename, *, allow_quarantine_namespace=False):
     root = Path(root).resolve()
-    relative_path = Path(str(filename or ""))
+    raw_filename = str(filename or "")
+    raw_path = Path(raw_filename)
+    relative_path = Path(os.path.normpath(raw_filename))
     if (
-        not str(filename or "")
+        not raw_filename
         or not relative_path.parts
-        or relative_path.is_absolute()
-        or ".." in relative_path.parts
+        or raw_path.is_absolute()
+        or ".." in raw_path.parts
         or (
             relative_path.parts[0] == ".delete-quarantine"
             and not allow_quarantine_namespace
@@ -18228,11 +18230,19 @@ def restore_quarantined_manual_uploads(moved_files, quarantine_dir):
     restore_error = None
     for filename, source, destination in reversed(validated_paths):
         try:
-            if destination.exists():
-                source.parent.mkdir(parents=True, exist_ok=True)
-                source = resolve_manual_delete_path(MANUALS_DIR, filename)
-                destination = resolve_manual_delete_path(quarantine_dir, filename)
-                destination.replace(source)
+            if not destination.exists():
+                restore_error = restore_error or OSError(
+                    f"隔离文件缺失，无法恢复 {filename}"
+                )
+                app.logger.error(
+                    "产品删除隔离文件缺失，无法恢复：%s",
+                    destination,
+                )
+                continue
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source = resolve_manual_delete_path(MANUALS_DIR, filename)
+            destination = resolve_manual_delete_path(quarantine_dir, filename)
+            destination.replace(source)
         except (OSError, ValueError) as error:
             restore_error = restore_error or OSError(
                 f"无法恢复隔离文件 {filename}"
