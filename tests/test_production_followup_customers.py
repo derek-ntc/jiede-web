@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import app
+import production_processes
 
 
 class ProductionFollowupCustomerTests(unittest.TestCase):
@@ -348,6 +349,89 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertIn('name="filter_q" value="P1"', html)
         self.assertIn('name="filter_customer" value="客户A"', html)
         self.assertIn("/static/production-followups.js", html)
+
+    def test_new_followup_copies_the_selected_products_process_template(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["下料", "打磨", "包装"],
+                now="2026-09-09T09:00:00",
+            )
+
+        response = self.client.post(
+            "/admin/production-followups",
+            data={
+                "ordered_at": "2026-09-10",
+                "customer": "客户A",
+                "manual_id": str(self.product_a),
+                "drawing_no": "P1",
+                "product_name": "客户A专用产品",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            followup = conn.execute(
+                """
+                SELECT id, process_snapshot_created
+                FROM production_followups
+                WHERE ordered_at = '2026-09-10'
+                """
+            ).fetchone()
+            steps = production_processes.load_followup_process_card(
+                conn, followup["id"]
+            )
+
+        self.assertEqual(followup["process_snapshot_created"], 1)
+        self.assertEqual(
+            [(step["name"], step["sort_order"]) for step in steps],
+            [("下料", 0), ("打磨", 1), ("包装", 2)],
+        )
+
+    def test_legacy_stage_route_updates_the_matching_process_snapshot_step(self):
+        response = self.client.post("/admin/production-followups/1/laser")
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            followup = conn.execute(
+                "SELECT laser_completed_at FROM production_followups WHERE id = 1"
+            ).fetchone()
+            card = production_processes.load_followup_process_card(conn, 1)
+
+        self.assertEqual([step["name"] for step in card], ["激光", "折弯", "焊接"])
+        self.assertEqual(card[0]["completed_at"], followup["laser_completed_at"])
+        self.assertEqual(card[0]["completed_by"], "manager")
+
+        reverted_response = self.client.post("/admin/production-followups/1/laser")
+        self.assertEqual(reverted_response.status_code, 302)
+        with app.get_db() as conn:
+            reverted_followup = conn.execute(
+                "SELECT laser_completed_at FROM production_followups WHERE id = 1"
+            ).fetchone()
+            reverted_card = production_processes.load_followup_process_card(conn, 1)
+        self.assertEqual(reverted_followup["laser_completed_at"], "")
+        self.assertEqual(reverted_card[0]["completed_at"], "")
+        self.assertEqual(reverted_card[0]["completed_by"], "")
+
+    def test_deleting_followup_removes_its_process_snapshot_rows(self):
+        response = self.client.post("/admin/production-followups/2/delete")
+        self.assertEqual(response.status_code, 302)
+
+        with app.get_db() as conn:
+            followup = conn.execute(
+                "SELECT id FROM production_followups WHERE id = 2"
+            ).fetchone()
+            process_count = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM production_followup_process_steps
+                WHERE followup_id = 2
+                """
+            ).fetchone()["c"]
+
+        self.assertIsNone(followup)
+        self.assertEqual(process_count, 0)
 
     def test_product_picker_debounces_aborts_and_clears_customer_association(self):
         script = r'''

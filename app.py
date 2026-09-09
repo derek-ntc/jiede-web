@@ -119,6 +119,12 @@ from reconciliation import (
     format_unit_price_ex_tax_scaled,
 )
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
+from production_processes import (
+    complete_followup_process_step,
+    create_followup_process_snapshot,
+    ensure_production_process_tables,
+    revert_followup_process_step,
+)
 from shipping_workflow import (
     DeliveryOperationConflict,
     bind_legacy_delivery_customer_identity,
@@ -566,6 +572,7 @@ def init_db():
         ensure_reconciliation_tables(conn)
         ensure_feedback_table(conn)
         ensure_production_followup_tables(conn)
+        ensure_production_process_tables(conn)
         ensure_shipping_workflow_tables(conn)
         ensure_indexes(conn)
 
@@ -9239,6 +9246,12 @@ def production_followups():
                     ),
                 )
                 followup_id = cursor.lastrowid
+                create_followup_process_snapshot(
+                    conn,
+                    followup_id,
+                    selected_manual_id,
+                    now=now,
+                )
                 if drawings:
                     save_production_drawing_files(conn, followup_id, drawings)
         except ValueError as error:
@@ -9320,6 +9333,43 @@ def complete_production_stage(followup_id, stage):
         ).fetchone()
         if followup is None:
             abort(404)
+        process_card = create_followup_process_snapshot(
+            conn,
+            followup_id,
+            followup["manual_id"],
+            now=now,
+        )
+        process_step = next(
+            (
+                step
+                for step in process_card
+                if step["name"] == PRODUCTION_STAGE_LABELS[stage]
+            ),
+            None,
+        )
+        if process_step is not None:
+            try:
+                if process_step["completed_at"]:
+                    revert_followup_process_step(
+                        conn,
+                        followup_id,
+                        process_step["id"],
+                    )
+                    flash(
+                        f"{PRODUCTION_STAGE_LABELS[stage]}已改回未完成",
+                        "success",
+                    )
+                else:
+                    complete_followup_process_step(
+                        conn,
+                        followup_id,
+                        process_step["id"],
+                        current_admin_username(),
+                    )
+                    flash(f"{PRODUCTION_STAGE_LABELS[stage]}已完成", "success")
+            except ValueError as error:
+                flash(str(error), "error")
+            return production_followup_redirect()
         if followup[column]:
             if not production_stage_can_revert(followup, stage):
                 flash("请先撤回后续工序，再撤回当前工序", "error")
@@ -9369,6 +9419,10 @@ def delete_production_followup(followup_id):
         ).fetchall()
         for file_row in files:
             delete_production_drawing_file(file_row["filename"])
+        conn.execute(
+            "DELETE FROM production_followup_process_steps WHERE followup_id = ?",
+            (followup_id,),
+        )
         conn.execute("DELETE FROM production_followup_files WHERE followup_id = ?", (followup_id,))
         conn.execute("DELETE FROM production_followups WHERE id = ?", (followup_id,))
 
@@ -18285,6 +18339,14 @@ def delete_manuals(raw_manual_ids):
                 )
                 conn.execute(
                     f"DELETE FROM manual_files WHERE manual_id IN ({placeholders})",
+                    manual_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM manual_process_steps WHERE manual_id IN ({placeholders})",
+                    manual_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM manual_process_configs WHERE manual_id IN ({placeholders})",
                     manual_ids,
                 )
                 conn.execute(
