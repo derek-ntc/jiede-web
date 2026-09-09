@@ -62,4 +62,4 @@ Implementation commit: `632e1ca` (`feat: unify customer and supplier management`
 
 ### Commit
 
-Pending fix commit at the time this report section was written.
+Fix implementation commit: `541a9f4` (`fix: protect inactive delivery profiles`).
