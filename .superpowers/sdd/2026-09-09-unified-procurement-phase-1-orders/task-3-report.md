@@ -29,7 +29,7 @@
 
 ## Commit
 
-Pending commit at the time this report was written.
+Implementation commit: `632e1ca` (`feat: unify customer and supplier management`).
 
 ## Risks / deviations
 
