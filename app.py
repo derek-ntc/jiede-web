@@ -112,7 +112,12 @@ from pricing import (
     normalize_currency,
     parse_money_minor,
 )
-from procurement import ensure_procurement_tables
+from procurement import (
+    ensure_procurement_tables,
+    next_supplier_code,
+    normalize_supplier_payload,
+    supplier_snapshot,
+)
 from reconciliation import (
     TAX_RATE_PPM,
     build_reconciliation_workbook,
@@ -2119,6 +2124,7 @@ def user_can_access_admin_modules():
     return any([
         user_has_permission("customers"),
         user_has_permission("common_info"),
+        user_has_permission("supplier_manage"),
         user_has_permission("purchase_followups"),
         user_has_permission("carton_purchases"),
         user_has_permission("warehouse_inventory"),
@@ -10438,6 +10444,287 @@ def delete_user(user_id):
 
     flash("用户已删除", "success")
     return redirect(url_for("admin_users"))
+
+
+def _supplier_duplicate_error(conn, payload, supplier_id=None):
+    excluded = " AND id != ?" if supplier_id is not None else ""
+    code_params = [payload["code"]]
+    name_params = [payload["name"]]
+    if supplier_id is not None:
+        code_params.append(supplier_id)
+        name_params.append(supplier_id)
+    if conn.execute(
+        f"SELECT 1 FROM suppliers WHERE trim(code) = ?{excluded} LIMIT 1", code_params
+    ).fetchone():
+        return "供应商编码已存在"
+    if conn.execute(
+        f"SELECT 1 FROM suppliers WHERE trim(name) = ?{excluded} LIMIT 1", name_params
+    ).fetchone():
+        return "供应商名称已存在"
+    return None
+
+
+def _delivery_profile_payload(form):
+    payload = {
+        field: str(form.get(field, "") or "").strip()
+        for field in ("name", "delivery_address", "recipient", "phone", "default_remark")
+    }
+    if not payload["name"]:
+        raise ValueError("收货模板名称为必填项")
+    if not payload["delivery_address"]:
+        raise ValueError("收货地址为必填项")
+    payload["is_default"] = 1 if form.get("is_default") else 0
+    return payload
+
+
+@app.route("/admin/business-partners")
+@login_required
+def admin_business_partners():
+    if user_has_permission("customers"):
+        return redirect(url_for("admin_customers"))
+    if user_has_permission("supplier_manage"):
+        return redirect(url_for("admin_suppliers"))
+    if user_has_permission("common_info"):
+        return redirect(url_for("admin_common_info"))
+    flash("当前账号没有权限访问客商管理", "error")
+    return redirect(url_for("admin_index"))
+
+
+@app.route("/admin/business-partners/customers")
+@permission_required("customers")
+def business_partner_customers_alias():
+    return redirect(url_for("admin_customers"))
+
+
+@app.route("/admin/business-partners/common-info")
+@permission_required("common_info")
+def business_partner_common_info_alias():
+    return redirect(url_for("admin_common_info"))
+
+
+@app.route("/admin/business-partners/suppliers", methods=["GET", "POST"])
+@permission_required("supplier_manage")
+def admin_suppliers():
+    if request.method == "POST":
+        try:
+            payload = normalize_supplier_payload(request.form)
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            with get_db() as conn:
+                if not payload["code"]:
+                    payload["code"] = next_supplier_code(conn)
+                duplicate_error = _supplier_duplicate_error(conn, payload)
+                if duplicate_error:
+                    raise ValueError(duplicate_error)
+                conn.execute(
+                    """
+                    INSERT INTO suppliers (
+                        code, name, contact, phone, email, address, remark,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["code"], payload["name"], payload["contact"],
+                        payload["phone"], payload["email"], payload["address"],
+                        payload["remark"], now, now,
+                    ),
+                )
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(url_for("admin_suppliers"))
+        except sqlite3.IntegrityError:
+            flash("供应商编码或名称已存在", "error")
+            return redirect(url_for("admin_suppliers"))
+        flash("供应商信息已新增", "success")
+        return redirect(url_for("admin_suppliers"))
+
+    query = request.args.get("q", "").strip()
+    sql = "SELECT * FROM suppliers"
+    params = []
+    if query:
+        like = f"%{query}%"
+        sql += " WHERE code LIKE ? OR name LIKE ? OR contact LIKE ? OR phone LIKE ? OR email LIKE ? OR address LIKE ? OR remark LIKE ?"
+        params = [like] * 7
+    sql += " ORDER BY active DESC, name COLLATE NOCASE ASC, id DESC"
+    with get_db() as conn:
+        suppliers = conn.execute(sql, params).fetchall()
+    return render_template("suppliers.html", suppliers=suppliers, query=query)
+
+
+@app.route("/admin/business-partners/suppliers/<int:supplier_id>/edit", methods=["POST"])
+@permission_required("supplier_manage")
+def edit_supplier(supplier_id):
+    try:
+        payload = normalize_supplier_payload(request.form)
+        if not payload["code"]:
+            raise ValueError("供应商编码为必填项")
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with get_db() as conn:
+            if conn.execute("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)).fetchone() is None:
+                abort(404)
+            duplicate_error = _supplier_duplicate_error(conn, payload, supplier_id)
+            if duplicate_error:
+                raise ValueError(duplicate_error)
+            conn.execute(
+                """
+                UPDATE suppliers
+                SET code = ?, name = ?, contact = ?, phone = ?, email = ?, address = ?,
+                    remark = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload["code"], payload["name"], payload["contact"],
+                    payload["phone"], payload["email"], payload["address"],
+                    payload["remark"], now, supplier_id,
+                ),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("admin_suppliers"))
+    except sqlite3.IntegrityError:
+        flash("供应商编码或名称已存在", "error")
+        return redirect(url_for("admin_suppliers"))
+    flash("供应商信息已更新", "success")
+    return redirect(url_for("admin_suppliers"))
+
+
+@app.route("/admin/business-partners/suppliers/<int:supplier_id>/delete", methods=["POST"])
+@permission_required("supplier_manage")
+def delete_supplier(supplier_id):
+    with get_db() as conn:
+        supplier = conn.execute("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+        if supplier is None:
+            abort(404)
+        is_used = conn.execute(
+            "SELECT 1 FROM purchase_orders WHERE supplier_id = ? LIMIT 1", (supplier_id,)
+        ).fetchone()
+        if is_used:
+            conn.execute(
+                "UPDATE suppliers SET active = 0, updated_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(timespec="seconds"), supplier_id),
+            )
+            flash("该供应商已有采购订单，已停用，可随时恢复", "success")
+        else:
+            conn.execute("DELETE FROM suppliers WHERE id = ?", (supplier_id,))
+            flash("供应商信息已删除", "success")
+    return redirect(url_for("admin_suppliers"))
+
+
+@app.route("/admin/business-partners/suppliers/<int:supplier_id>/reactivate", methods=["POST"])
+@permission_required("supplier_manage")
+def reactivate_supplier(supplier_id):
+    with get_db() as conn:
+        updated = conn.execute(
+            "UPDATE suppliers SET active = 1, updated_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(timespec="seconds"), supplier_id),
+        )
+        if updated.rowcount == 0:
+            abort(404)
+    flash("供应商已恢复启用", "success")
+    return redirect(url_for("admin_suppliers"))
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles", methods=["GET", "POST"])
+@permission_required("supplier_manage")
+def purchase_delivery_profiles():
+    if request.method == "POST":
+        try:
+            payload = _delivery_profile_payload(request.form)
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            with get_db() as conn:
+                if payload["is_default"]:
+                    conn.execute(
+                        "UPDATE purchase_delivery_profiles SET is_default = 0 WHERE active = 1 AND is_default = 1"
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO purchase_delivery_profiles (
+                        name, delivery_address, recipient, phone, default_remark,
+                        is_default, active, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        payload["name"], payload["delivery_address"], payload["recipient"],
+                        payload["phone"], payload["default_remark"], payload["is_default"], now, now,
+                    ),
+                )
+        except ValueError as error:
+            flash(str(error), "error")
+            return redirect(url_for("purchase_delivery_profiles"))
+        flash("收货模板已新增", "success")
+        return redirect(url_for("purchase_delivery_profiles"))
+
+    with get_db() as conn:
+        profiles = conn.execute(
+            "SELECT * FROM purchase_delivery_profiles ORDER BY active DESC, is_default DESC, name COLLATE NOCASE ASC, id DESC"
+        ).fetchall()
+    return render_template("purchase_delivery_profiles.html", profiles=profiles)
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/edit", methods=["POST"])
+@permission_required("supplier_manage")
+def edit_purchase_delivery_profile(profile_id):
+    try:
+        payload = _delivery_profile_payload(request.form)
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with get_db() as conn:
+            profile = conn.execute(
+                "SELECT active FROM purchase_delivery_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if profile is None:
+                abort(404)
+            if payload["is_default"] and profile["active"]:
+                conn.execute(
+                    "UPDATE purchase_delivery_profiles SET is_default = 0 WHERE active = 1 AND is_default = 1"
+                )
+            conn.execute(
+                """
+                UPDATE purchase_delivery_profiles
+                SET name = ?, delivery_address = ?, recipient = ?, phone = ?,
+                    default_remark = ?, is_default = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    payload["name"], payload["delivery_address"], payload["recipient"],
+                    payload["phone"], payload["default_remark"], payload["is_default"], now, profile_id,
+                ),
+            )
+    except ValueError as error:
+        flash(str(error), "error")
+        return redirect(url_for("purchase_delivery_profiles"))
+    flash("收货模板已更新", "success")
+    return redirect(url_for("purchase_delivery_profiles"))
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/delete", methods=["POST"])
+@permission_required("supplier_manage")
+def deactivate_purchase_delivery_profile(profile_id):
+    with get_db() as conn:
+        updated = conn.execute(
+            """
+            UPDATE purchase_delivery_profiles
+            SET active = 0, is_default = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (datetime.utcnow().isoformat(timespec="seconds"), profile_id),
+        )
+        if updated.rowcount == 0:
+            abort(404)
+    flash("收货模板已停用", "success")
+    return redirect(url_for("purchase_delivery_profiles"))
+
+
+@app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/reactivate", methods=["POST"])
+@permission_required("supplier_manage")
+def reactivate_purchase_delivery_profile(profile_id):
+    with get_db() as conn:
+        updated = conn.execute(
+            "UPDATE purchase_delivery_profiles SET active = 1, updated_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(timespec="seconds"), profile_id),
+        )
+        if updated.rowcount == 0:
+            abort(404)
+    flash("收货模板已恢复启用", "success")
+    return redirect(url_for("purchase_delivery_profiles"))
 
 
 @app.route("/admin/customers", methods=["GET", "POST"])

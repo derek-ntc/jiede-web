@@ -33,11 +33,8 @@
         {% if session.get("admin_logged_in") %}
           <a class="{% if request.endpoint in ['products_index', 'import_product_bom', 'confirm_product_bom_import', 'manual_detail', 'manual_technical', 'manual_preview', 'edit_manual', 'edit_manual_technical'] %}active-nav-link{% endif %}" href="{{ url_for('products_index') }}">产品列表</a>
         {% endif %}
-        {% if can_manage_customers %}
-          <a class="{% if request.endpoint == 'admin_customers' %}active-nav-link{% endif %}" href="{{ url_for('admin_customers') }}">客户信息</a>
-        {% endif %}
-        {% if can_manage_common_info %}
-          <a class="{% if request.endpoint == 'admin_common_info' %}active-nav-link{% endif %}" href="{{ url_for('admin_common_info') }}">常用信息</a>
+        {% if can_manage_customers or can_manage_suppliers or can_manage_common_info %}
+          <a class="{% if request.endpoint and (request.endpoint in ['admin_business_partners', 'admin_customers', 'business_partner_customers_alias', 'customer_billing', 'admin_suppliers', 'edit_supplier', 'delete_supplier', 'reactivate_supplier', 'admin_common_info', 'business_partner_common_info_alias', 'purchase_delivery_profiles', 'edit_purchase_delivery_profile', 'deactivate_purchase_delivery_profile', 'reactivate_purchase_delivery_profile']) %}active-nav-link{% endif %}" href="{{ url_for('admin_business_partners') }}">客商管理</a>
         {% endif %}
         {% if can_manage_purchase_followups or can_manage_carton_purchases %}
           {% if can_manage_purchase_followups %}

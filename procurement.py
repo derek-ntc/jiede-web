@@ -17,6 +17,44 @@ _PURCHASE_ORDER_ITEM_COLUMNS = """
 """
 
 
+def normalize_supplier_payload(form) -> dict[str, object]:
+    """Return trimmed supplier fields while preserving display phone and email text."""
+    payload = {
+        field: str(form.get(field, "") or "").strip()
+        for field in ("code", "name", "contact", "phone", "email", "address", "remark")
+    }
+    if not payload["name"]:
+        raise ValueError("供应商名称为必填项")
+    return payload
+
+
+def supplier_snapshot(row) -> dict[str, str]:
+    """Capture supplier details for immutable purchase-order history."""
+    return {
+        "supplier_code": row["code"],
+        "supplier_name": row["name"],
+        "supplier_contact": row["contact"],
+        "supplier_phone": row["phone"],
+        "supplier_email": row["email"],
+        "supplier_address": row["address"],
+    }
+
+
+def next_supplier_code(conn) -> str:
+    """Find the first unused SUP-00001-style supplier code."""
+    existing = {
+        int(row[0][4:])
+        for row in conn.execute("SELECT code FROM suppliers")
+        if re.fullmatch(r"SUP-\d{5}", row[0])
+    }
+    suffix = 1
+    while suffix in existing:
+        suffix += 1
+    if suffix > 99999:
+        raise ValueError("供应商编码已用尽")
+    return f"SUP-{suffix:05d}"
+
+
 def parse_purchase_category(value: str) -> str:
     """Return a supported purchase category without silently normalizing input."""
     if not isinstance(value, str) or value not in PURCHASE_CATEGORIES:

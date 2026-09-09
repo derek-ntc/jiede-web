@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}公司收货模板{% endblock %}
+{% block content %}
+  {% include "business_partner_tabs.html" %}
+  <section class="page-head"><div><h1>公司收货模板</h1><p>维护采购订单使用的公司收货地址、收件人和送货说明。</p></div><div class="head-stat"><strong>{{ profiles|length }}</strong><span>个模板</span></div></section>
+  <section class="panel">
+    <h2>新增收货模板</h2>
+    <form method="post" action="{{ url_for('purchase_delivery_profiles') }}" class="grid-form">
+      <label>模板名称<input type="text" name="name" required></label>
+      <label>收件人<input type="text" name="recipient"></label>
+      <label>联系电话<input type="text" name="phone"></label>
+      <label class="wide">收货地址<input type="text" name="delivery_address" required></label>
+      <label class="wide">默认送货说明<textarea name="default_remark" rows="2"></textarea></label>
+      <label><input type="checkbox" name="is_default"> 设为默认模板</label>
+      <div class="wide form-actions"><button type="submit">新增模板</button></div>
+    </form>
+  </section>
+  <section class="panel"><h2>收货模板列表</h2><div class="table-wrap"><table>
+    <thead><tr><th>状态</th><th>模板名称</th><th>收货地址</th><th>收件人</th><th>电话</th><th>默认说明</th><th>操作</th></tr></thead>
+    <tbody>{% for profile in profiles %}
+      <tr>
+        <td data-label="状态">{% if not profile.active %}已停用{% elif profile.is_default %}默认{% else %}启用{% endif %}</td>
+        <td data-label="模板名称"><input form="delivery-profile-form-{{ profile.id }}" name="name" value="{{ profile.name }}" required></td>
+        <td data-label="收货地址"><input form="delivery-profile-form-{{ profile.id }}" name="delivery_address" value="{{ profile.delivery_address }}" required></td>
+        <td data-label="收件人"><input form="delivery-profile-form-{{ profile.id }}" name="recipient" value="{{ profile.recipient }}"></td>
+        <td data-label="电话"><input form="delivery-profile-form-{{ profile.id }}" name="phone" value="{{ profile.phone }}"></td>
+        <td data-label="默认说明"><input form="delivery-profile-form-{{ profile.id }}" name="default_remark" value="{{ profile.default_remark }}"></td>
+        <td class="actions" data-label="操作"><div class="action-buttons">
+          <form id="delivery-profile-form-{{ profile.id }}" method="post" action="{{ url_for('edit_purchase_delivery_profile', profile_id=profile.id) }}"><label><input type="checkbox" name="is_default" {% if profile.is_default %}checked{% endif %}> 默认</label></form>
+          <button form="delivery-profile-form-{{ profile.id }}" type="submit">保存</button>
+          {% if profile.active %}<form method="post" action="{{ url_for('deactivate_purchase_delivery_profile', profile_id=profile.id) }}"><button class="danger" type="submit">停用</button></form>{% else %}<form method="post" action="{{ url_for('reactivate_purchase_delivery_profile', profile_id=profile.id) }}"><button type="submit">恢复</button></form>{% endif %}
+        </div></td>
+      </tr>
+    {% else %}<tr><td colspan="7" class="empty">暂无收货模板</td></tr>{% endfor %}</tbody>
+  </table></div></section>
+{% endblock %}
