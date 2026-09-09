@@ -120,6 +120,13 @@ def _upgrade_purchase_order_items_integer_storage(conn):
     """Atomically rebuild pre-strict item tables while preserving valid rows."""
     conn.execute("SAVEPOINT purchase_order_items_integer_upgrade")
     try:
+        old_sequence_row = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'purchase_order_items'"
+        ).fetchone()
+        old_sequence = old_sequence_row[0] if old_sequence_row is not None else 0
+        old_max_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM purchase_order_items"
+        ).fetchone()[0]
         _create_purchase_order_items_table(conn, "purchase_order_items_rebuild")
         conn.execute(
             f"""
@@ -133,6 +140,16 @@ def _upgrade_purchase_order_items_integer_storage(conn):
         conn.execute(
             "ALTER TABLE purchase_order_items_rebuild RENAME TO purchase_order_items"
         )
+        restored_sequence = max(old_sequence, old_max_id)
+        updated_sequence = conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'purchase_order_items'",
+            (restored_sequence,),
+        )
+        if updated_sequence.rowcount == 0:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('purchase_order_items', ?)",
+                (restored_sequence,),
+            )
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT purchase_order_items_integer_upgrade")
         conn.execute("RELEASE SAVEPOINT purchase_order_items_integer_upgrade")
@@ -287,10 +304,11 @@ def ensure_procurement_tables(conn) -> None:
         END
         """
     )
+    conn.execute("DROP TRIGGER IF EXISTS trg_suppliers_restrict_child_id_update")
     conn.execute(
         """
-        CREATE TRIGGER IF NOT EXISTS trg_suppliers_restrict_child_id_update
-        BEFORE UPDATE OF id ON suppliers
+        CREATE TRIGGER trg_suppliers_restrict_child_id_update
+        BEFORE UPDATE ON suppliers
         FOR EACH ROW WHEN NEW.id <> OLD.id AND (
             EXISTS (SELECT 1 FROM supplier_legacy_links WHERE supplier_id = OLD.id)
             OR EXISTS (SELECT 1 FROM purchase_orders WHERE supplier_id = OLD.id)
@@ -340,10 +358,11 @@ def ensure_procurement_tables(conn) -> None:
         END
         """
     )
+    conn.execute("DROP TRIGGER IF EXISTS trg_purchase_orders_restrict_item_id_update")
     conn.execute(
         """
-        CREATE TRIGGER IF NOT EXISTS trg_purchase_orders_restrict_item_id_update
-        BEFORE UPDATE OF id ON purchase_orders
+        CREATE TRIGGER trg_purchase_orders_restrict_item_id_update
+        BEFORE UPDATE ON purchase_orders
         FOR EACH ROW WHEN NEW.id <> OLD.id AND EXISTS (
             SELECT 1 FROM purchase_order_items WHERE purchase_order_id = OLD.id
         )

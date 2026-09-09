@@ -207,7 +207,18 @@ class ProcurementSchemaTests(unittest.TestCase):
                 id, purchase_order_id, sort_order, item_name, drawing_no, material,
                 dimension_text, surface, spec, unit, expected_at, remark,
                 ordered_quantity, unit_price_minor, line_total_minor, created_at, updated_at
-            ) VALUES (17, ?, 1, '旧有效行', '', '', '', '', '', '件', '', '', 2, 150, 300, 'now', 'now')
+            ) VALUES (17, ?, 1, '已删除旧行', '', '', '', '', '', '件', '', '', 2, 150, 300, 'now', 'now')
+            """,
+            (order_id,),
+        )
+        self.conn.execute("DELETE FROM purchase_order_items WHERE id = 17")
+        self.conn.execute(
+            """
+            INSERT INTO purchase_order_items (
+                id, purchase_order_id, sort_order, item_name, drawing_no, material,
+                dimension_text, surface, spec, unit, expected_at, remark,
+                ordered_quantity, unit_price_minor, line_total_minor, created_at, updated_at
+            ) VALUES (1, ?, 1, '旧有效行', '', '', '', '', '', '件', '', '', 2, 150, 300, 'now', 'now')
             """,
             (order_id,),
         )
@@ -222,7 +233,13 @@ class ProcurementSchemaTests(unittest.TestCase):
                     "FROM purchase_order_items"
                 ).fetchone()
             ),
-            (17, "旧有效行", 2, 150, 300),
+            (1, "旧有效行", 2, 150, 300),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'purchase_order_items'"
+            ).fetchone()[0],
+            17,
         )
         self.assertTrue(
             {
@@ -270,6 +287,17 @@ class ProcurementSchemaTests(unittest.TestCase):
                     """,
                     (order_id, values["ordered_quantity"], values["unit_price_minor"], values["line_total_minor"]),
                 )
+        next_item_id = self.conn.execute(
+            """
+            INSERT INTO purchase_order_items (
+                purchase_order_id, sort_order, item_name, drawing_no, material,
+                dimension_text, surface, spec, unit, expected_at, remark,
+                ordered_quantity, created_at, updated_at
+            ) VALUES (?, 3, '升级后新行', '', '', '', '', '', '件', '', '', 1, 'now', 'now')
+            """,
+            (order_id,),
+        ).lastrowid
+        self.assertEqual(next_item_id, 18)
 
     def test_init_db_creates_schema_idempotently_without_foreign_key_violations(self):
         """Application startup must create the new schema repeatedly alongside legacy tables."""
@@ -357,7 +385,7 @@ class ProcurementSchemaTests(unittest.TestCase):
                         (linked_supplier_id,),
                     )
                     with self.assertRaises(sqlite3.IntegrityError):
-                        conn.execute("UPDATE suppliers SET id = ? WHERE id = ?", (101, linked_supplier_id))
+                        conn.execute("UPDATE suppliers SET rowid = ? WHERE id = ?", (101, linked_supplier_id))
 
                     ordered_supplier_id = self.add_supplier("SUP-ORDER", "订单供应商", conn)
                     self.add_order("PO-20260909-0003", ordered_supplier_id, conn)
@@ -373,9 +401,9 @@ class ProcurementSchemaTests(unittest.TestCase):
                         (order_id,),
                     )
                     with self.assertRaises(sqlite3.IntegrityError):
-                        conn.execute("UPDATE suppliers SET id = ? WHERE id = ?", (102, ordered_supplier_id))
+                        conn.execute("UPDATE suppliers SET rowid = ? WHERE id = ?", (102, ordered_supplier_id))
                     with self.assertRaises(sqlite3.IntegrityError):
-                        conn.execute("UPDATE purchase_orders SET id = ? WHERE id = ?", (201, order_id))
+                        conn.execute("UPDATE purchase_orders SET rowid = ? WHERE id = ?", (201, order_id))
 
                     self.assertEqual(
                         conn.execute("SELECT supplier_id FROM purchase_orders WHERE id = ?", (order_id,)).fetchone()[0],
