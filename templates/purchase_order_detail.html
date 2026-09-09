@@ -3,6 +3,13 @@
 {% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css') }}">{% endblock %}
 {% block content %}
 {% include "purchase_tabs.html" %}
+{% if order.status != 'cancelled' %}
+<div class="actions">
+  <a class="button secondary" href="{{ url_for('export_purchase_order', order_id=order.id, export_format='xlsx') }}">导出 Excel</a>
+  <a class="button secondary" href="{{ url_for('export_purchase_order', order_id=order.id, export_format='pdf') }}" data-pdf-preview-url="{{ url_for('export_purchase_order', order_id=order.id, export_format='pdf') }}" data-pdf-preview-name="采购订单 {{ order.order_no }}">预览 PDF</a>
+  <a class="button secondary" href="{{ url_for('export_purchase_order', order_id=order.id, export_format='pdf', download=1) }}">下载 PDF</a>
+</div>
+{% endif %}
 <section class="page-head"><div><h1>采购订单 {{ order.order_no }}</h1><p>{{ category_labels[category] }} · {{ status_labels[order.status] }} · {{ order.purchased_at }}</p></div>
 {% if can_manage_purchases and order.status not in ['received','cancelled'] %}<a class="button" href="{{ url_for('edit_purchase_order', order_id=order.id) }}">编辑订单</a><form method="post" action="{{ url_for('cancel_purchase_order_route', order_id=order.id) }}" onsubmit="return confirm('确定取消此采购订单？历史明细将保留。');"><button class="danger">取消订单</button></form>{% endif %}</section>
 <section class="panel"><h2>供应商资料（下单快照）</h2><p>{{ order.supplier_name }} · {{ order.supplier_code }}</p><p>{{ order.supplier_contact }} · {{ order.supplier_phone }} · {{ order.supplier_email }}</p><p>{{ order.supplier_address }}</p></section>

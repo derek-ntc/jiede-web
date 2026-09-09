@@ -11854,6 +11854,30 @@ def purchase_order_detail(order_id, category=None):
     return render_template("purchase_order_detail.html", order=order, items=items, **purchase_page_context(order["category"]))
 
 
+@app.route("/admin/purchases/orders/<int:order_id>/export.<export_format>")
+@permission_required("purchase_view")
+def export_purchase_order(order_id, export_format):
+    from procurement_documents import build_purchase_order_pdf, build_purchase_order_workbook
+
+    if export_format not in {"xlsx", "pdf"}:
+        abort(404)
+    with get_db() as conn:
+        order, items = purchase_order_or_404(conn, order_id)
+        if order["status"] == "cancelled":
+            abort(409, description="已取消的采购订单不能导出")
+        order = dict(order)
+        profile = conn.execute("SELECT * FROM reconciliation_company_profile WHERE id=1").fetchone()
+        order["company_profile"] = dict(profile) if profile else {}
+    builder = build_purchase_order_workbook if export_format == "xlsx" else build_purchase_order_pdf
+    stream = builder(order, items, include_prices=user_can_view_purchase_prices())
+    response = send_file(stream,
+                        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if export_format == "xlsx" else "application/pdf",
+                        as_attachment=export_format == "xlsx" or request.args.get("download") == "1",
+                        download_name=f"{order['order_no']}-purchase-order.{export_format}")
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 @app.route("/admin/purchases/<category>/<int:order_id>/edit", methods=["GET", "POST"])
 @app.route("/admin/purchases/orders/<int:order_id>/edit", methods=["GET", "POST"])
 @permission_required("purchase_manage")
