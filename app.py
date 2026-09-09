@@ -112,6 +112,7 @@ from pricing import (
     normalize_currency,
     parse_money_minor,
 )
+from procurement import ensure_procurement_tables
 from reconciliation import (
     TAX_RATE_PPM,
     build_reconciliation_workbook,
@@ -574,6 +575,7 @@ def init_db():
         ensure_user_table(conn)
         ensure_customer_table(conn)
         ensure_common_info_table(conn)
+        ensure_procurement_tables(conn)
         ensure_purchase_followup_table(conn)
         ensure_powder_coating_tables(conn)
         ensure_carton_purchase_table(conn)
