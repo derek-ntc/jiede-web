@@ -30,6 +30,8 @@
     <form method="post" action="{{ url_for('create_shipment_from_shipped_page') }}" class="grid-form shipment-create-form" enctype="multipart/form-data" data-shipment-create-form>
       <input type="hidden" name="operation_token" value="{{ ordinary_operation_token }}">
       <input type="hidden" name="recipient_overrides" value="{}" data-recipient-overrides>
+      <input type="hidden" name="shipment_lines" value="[]" data-order-json>
+      <input type="hidden" name="preview_token" value="" data-order-preview-token>
       <script type="application/json" data-recipient-defaults>{{ recipient_defaults|tojson }}</script>
       <label class="shipment-create-search-order">
         订单号搜索
@@ -58,6 +60,8 @@
                 <option
                   value="{{ order.id }}"
                   data-unshipped="{{ order.unshipped_quantity }}"
+                  data-manual-id="{{ order.manual_id }}"
+                  data-specification="{{ order.supplier or '' }}"
                   data-order-no="{{ order.order_no }}"
                   data-drawing-no="{{ order.drawing_no or '' }}"
                   data-product-name="{{ order.product_name or '' }}"
@@ -68,13 +72,21 @@
               {% endfor %}
             </select>
           </label>
+          <div class="shipment-create-specification">规格型号 <span data-order-line-spec></span></div>
           <label class="shipment-create-quantity">
             本次发货数量
-            <input type="number" name="shipped_quantity" min="1" step="1" required data-shipment-quantity>
+            <input type="number" name="shipped_quantity" min="0" max="2147483647" step="1" required data-shipment-quantity>
           </label>
+          <label class="shipment-create-line-remark">本行备注<input name="line_remark" maxlength="500" data-order-line-remark placeholder="仅针对本产品"></label>
           <button type="button" class="secondary compact-button shipment-line-remove" data-remove-shipment-line>删除</button>
+          <p class="wide" role="status" data-order-line-status></p>
         </div>
-        <button type="button" class="secondary compact-button shipment-line-add" data-add-shipment-line>增加产品</button>
+        <button type="button" class="secondary compact-button shipment-line-add" data-add-shipment-line>增加订单产品</button>
+      </div>
+      <div class="wide order-product-footer">
+        <label>添加当前客户产品<input type="search" data-order-extra-search placeholder="添加产品前请选择具体客户" disabled></label>
+        <p>追加产品只属于客户筛选中选定的客户；切换筛选不会移除已选行。同一产品合并为一行，优先按交货期、订单 ID 分配，超出订单部分保存为补充发货。</p>
+        <div data-order-extra-results></div>
       </div>
       <label class="shipment-create-date">
         发货时间
@@ -86,14 +98,12 @@
         <input type="file" name="images" accept="image/*" multiple>
       </label>
       <label class="shipment-create-remark">
-        发货备注
+        整次发货物流备注
         <input type="text" name="logistics_no" placeholder="可选">
       </label>
       <div class="shipment-create-actions form-actions">
-        <button type="submit" {% if not unshipped_orders %}disabled{% endif %}>保存发货</button>
-        {% if not unshipped_orders %}
-          <span class="empty-text">当前没有未发完订单</span>
-        {% endif %}
+        <button type="submit" data-order-submit disabled>保存发货</button>
+        <span role="status" data-order-status>请选择订单或添加当前客户产品</span>
       </div>
     </form>
     </div>
@@ -105,6 +115,7 @@
 {% endblock %}
 {% block scripts %}
   <script src="{{ url_for('static', filename='assembly_shipping.js', v=static_version) }}"></script>
+  <script src="{{ url_for('static', filename='order_shipping.js', v=static_version) }}"></script>
   <script>
     (() => {
       const form = document.querySelector("[data-shipment-create-form]");
@@ -162,13 +173,8 @@
         const select = line.querySelector("[data-shipment-order-select]");
         const quantity = line.querySelector("[data-shipment-quantity]");
         const unshipped = select.selectedOptions[0]?.dataset.unshipped || "";
-        if (unshipped) {
-          quantity.max = unshipped;
-          quantity.placeholder = `最多 ${unshipped}`;
-        } else {
-          quantity.removeAttribute("max");
-          quantity.placeholder = "";
-        }
+        quantity.max = '2147483647';
+        quantity.placeholder = unshipped ? `订单未发 ${unshipped}` : '';
       }
 
       function updateRemoveButtons() {
@@ -204,10 +210,7 @@
               currentStillVisible = true;
             }
           });
-          if (!currentStillVisible) {
-            select.value = "";
-            syncQuantityLimit(line);
-          }
+          // Filters narrow choices, never discard previously selected customers.
         });
         syncRecipients();
       }
@@ -217,10 +220,15 @@
         const removeButton = line.querySelector("[data-remove-shipment-line]");
         select.addEventListener("change", () => { syncQuantityLimit(line); syncRecipients(); });
         removeButton.addEventListener("click", () => {
-          if (shipmentLines().length <= 1) return;
-          line.remove();
+          if (shipmentLines().length <= 1) {
+            select.value = '';
+            line.querySelector('[data-shipment-quantity]').value = '';
+            const remark = line.querySelector('[data-order-line-remark]');
+            if (remark) remark.value = '';
+          } else line.remove();
           updateRemoveButtons();
           syncRecipients();
+          form.orderLinesChanged?.();
         });
         syncQuantityLimit(line);
       }
@@ -233,10 +241,13 @@
         quantity.value = "";
         quantity.removeAttribute("max");
         quantity.placeholder = "";
+        const remark = clone.querySelector('[data-order-line-remark]');
+        if (remark) remark.value = '';
         lines.insertBefore(clone, addLineButton);
         bindLine(clone);
         filterOrders();
         updateRemoveButtons();
+        form.orderLinesChanged?.();
       });
 
       shipmentLines().forEach(bindLine);
@@ -245,6 +256,7 @@
       productSearch.addEventListener("input", filterOrders);
       updateRemoveButtons();
       filterOrders();
+      globalThis.initializeOrderShipmentLines?.(form, {shipmentLines, bindLine, syncRecipients});
     })();
   </script>
 {% endblock %}

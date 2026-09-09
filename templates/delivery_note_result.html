@@ -12,8 +12,8 @@
   {% if note.invalidated %}<p role="alert">送货单已失效：发货来源已删除或不再匹配，不能下载有效送货单。</p>
   {% else %}
   {% if note.missing_recipient %}<p role="status">提示：收货资料未完整填写，请与客户核对。已保存的收货快照不会随客户资料变更。</p>{% endif %}
-  <div class="table-wrap"><table><thead><tr><th>产品图号</th><th>产品名称</th><th>规格型号</th><th>单位</th><th>数量</th></tr></thead>
-  <tbody>{% for item in note['items'] %}<tr><td>{{ item.drawing_no }}</td><td>{{ item.product_name }}</td><td>{{ item.specification }}{% if item.specification_is_fallback %}<span class="empty-text">（当前规格，历史未保存）</span>{% endif %}</td><td>{{ item.unit }}</td><td>{{ item.shipped_quantity }}</td></tr>{% endfor %}</tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>产品图号</th><th>产品名称</th><th>规格型号</th><th>单位</th><th>数量</th><th>备注</th></tr></thead>
+  <tbody>{% for item in note['items'] %}<tr><td>{{ item.drawing_no }}</td><td>{{ item.product_name }}</td><td>{{ item.specification }}{% if item.specification_is_fallback %}<span class="empty-text">（当前规格，历史未保存）</span>{% endif %}</td><td>{{ item.unit }}</td><td>{{ item.shipped_quantity }}{% if item.shipped_quantity == 0 %}<span class="empty-text">（本次不发）</span>{% endif %}</td><td style="white-space:pre-wrap;overflow-wrap:anywhere">{{ item.remark }}</td></tr>{% endfor %}</tbody></table></div>
   <a class="button" href="{{ url_for('download_delivery_note', note_id=note.id) }}">下载送货单 PDF</a>
   {% endif %}
 </section>

@@ -287,7 +287,20 @@ body:is(.page-admin_orders, .page-shipped_orders, .page-shipment_operations) {
 .erp-page .shipment-mode-tab:not(.active) { background: #fff; border-color: #a8bac8; color: #075c9b; }
 .erp-page .shipment-create-form { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 16px; }
 .erp-page .shipment-create-lines { grid-column: 1 / -1; gap: 8px; }
-.erp-page .shipment-create-line { grid-template-columns: minmax(0, 1fr) 130px auto; gap: 8px; }
+.erp-page .shipment-create-line {
+  grid-template-columns: minmax(180px, 2fr) minmax(100px, 1fr) 120px minmax(160px, 1.5fr) auto;
+  grid-template-areas: "product spec quantity remark remove" "status status status status status";
+  gap: 8px; padding: 10px; border: 1px solid #d5dadd; border-radius: 4px;
+}
+.erp-page .shipment-create-line .shipment-create-order { grid-area: product; }
+.erp-page .shipment-create-line .shipment-create-specification { grid-area: spec; overflow-wrap: anywhere; font-size: 12px; }
+.erp-page .shipment-create-line .shipment-create-quantity { grid-area: quantity; }
+.erp-page .shipment-create-line .shipment-create-line-remark { grid-area: remark; min-width: 0; }
+.erp-page .shipment-create-line .shipment-line-remove { grid-area: remove; }
+.erp-page .shipment-create-line [data-order-line-status] { grid-area: status; margin: 0; color: #80420b; overflow-wrap: anywhere; }
+.erp-page .order-product-footer { padding: 12px; background: #f2f5f7; border: 1px solid #d5dadd; }
+.erp-page .order-product-footer p { font-size: 12px; line-height: 1.5; }
+.erp-page [data-order-extra-results] { display: flex; flex-wrap: wrap; gap: 6px; }
 .erp-page .shipment-create-remark { grid-column: 1 / 3; }
 .erp-page .shipment-create-images { grid-column: 2 / 4; }
 .erp-page .shipment-create-actions { grid-column: 3; justify-self: end; }
@@ -350,7 +363,10 @@ body:is(.page-admin_orders, .page-shipped_orders, .page-shipment_operations) {
   .erp-page .shipment-mode-tabs { display: flex; }
   .erp-page .shipment-create-form { grid-template-columns: 1fr; }
   .erp-page .shipment-create-form > * { grid-column: 1 / -1; }
-  .erp-page .shipment-create-line { grid-template-columns: minmax(0, 1fr) auto; }
+  .erp-page .shipment-create-line {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "product product" "spec spec" "quantity remove" "remark remark" "status status";
+  }
   .erp-page .shipment-create-line .shipment-create-order { grid-column: 1 / -1; }
   .erp-page .shipment-create-line .shipment-create-quantity { grid-column: 1; }
   .erp-page .shipment-create-actions { justify-self: start; }

@@ -251,7 +251,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(scan_response.json["product"]["id"], manual_id)
         self.assertEqual(scan_response.json["product"]["inventory_code"], "SKU-ABC")
 
-    def test_shipment_is_blocked_when_inventory_is_insufficient(self):
+    def test_shipment_shortage_is_saved_with_limited_inventory_deduction(self):
         manual_id, order_id = self.create_product_and_order()
         location_id = self.stock_product(manual_id, 2)
 
@@ -265,12 +265,14 @@ class InventoryTests(unittest.TestCase):
             follow_redirects=True,
         )
         self.assertIn("库存不足", response.get_data(as_text=True))
-        self.assertIn("请先调整库存后再出库", response.get_data(as_text=True))
+        self.assertIn("实际扣减 2，缺货 1", response.get_data(as_text=True))
         with app.get_db() as conn:
             shipment_count = conn.execute("SELECT COUNT(*) AS c FROM product_order_shipments").fetchone()["c"]
             balance = app.inventory_balance_for_location(conn, manual_id, location_id)
-        self.assertEqual(shipment_count, 0)
-        self.assertEqual(balance, 2)
+            self.assertEqual(conn.execute("SELECT SUM(quantity) FROM inventory_transactions WHERE type='out'").fetchone()[0], 2)
+            self.assertEqual(conn.execute('SELECT shipped_quantity FROM product_orders WHERE id=?', (order_id,)).fetchone()[0], 3)
+        self.assertEqual(shipment_count, 1)
+        self.assertEqual(balance, 0)
 
     def test_shipment_create_edit_and_delete_keep_inventory_in_sync(self):
         manual_id, order_id = self.create_product_and_order()

@@ -42,6 +42,32 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         return dict(shipped_at='2026-09-08', order_id=str(self.order),
                     shipped_quantity='20', operation_token='ordinary-token', **extra)
 
+    def test_delivery_html_and_real_pdf_show_zero_and_final_remark_column_without_prices(self):
+        zero = self.create_product('ZERO-PDF')
+        order = self.create_order(zero, 'ZERO-ORDER', 5)
+        response = self.client.post('/admin/shipped-orders/new', data={
+            'order_id': [str(order), str(self.order)], 'shipped_quantity': ['0', '2'],
+            'line_remark': ['ZERO-REMARK <fragile> & hold', 'POSITIVE-REMARK'],
+            'shipped_at': '2026-09-09', 'operation_token': 'remark-pdf'})
+        self.assertRegex(response.location, r'/admin/delivery-notes/operations/\d+$')
+        body = self.client.get(response.location).get_data(as_text=True)
+        self.assertRegex(body, r'<th>数量</th><th>备注</th></tr>')
+        self.assertIn('ZERO-REMARK &lt;fragile&gt; &amp; hold', body)
+        with app.get_db() as conn:
+            note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
+        response = self.client.get(f'/admin/delivery-notes/{note_id}.pdf')
+        self.assertEqual(response.status_code, 200)
+        from base64 import a85decode
+        import zlib
+        streams = re.findall(rb'stream\r?\n(.*?)endstream', response.data, re.S)
+        text = ''.join(zlib.decompress(a85decode(stream.strip()[:-2])).decode('latin-1')
+                       for stream in streams if stream.strip().endswith(b'~>'))
+        self.assertIn('ZERO-REMARK', text)
+        self.assertIn('POSITIVE-REMARK', text)
+        self.assertIn('ZERO-PDF', text)
+        self.assertIn('0', text)
+        self.assertNotIn('CNY', text)
+
     def test_assembly_snapshot_keeps_order_zero_remarks_and_replay_is_read_only(self):
         zero_product = self.create_product('ZERO-DN')
         self.configure_components([(zero_product, 3), (self.product, 1)])

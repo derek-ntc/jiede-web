@@ -142,6 +142,7 @@ from shipping_workflow import (
     format_delivery_timestamp,
     load_delivery_note,
     parse_recipient_overrides,
+    parse_order_shipment_lines,
     start_delivery_operation,
     supplemental_source_select,
     current_specification_snapshots,
@@ -2639,7 +2640,7 @@ def selected_shipment_images():
     return [file for file in request.files.getlist("images") if file and (file.filename or file.mimetype)]
 
 
-def save_shipment_images(conn, shipment_id, files):
+def save_shipment_images(conn, shipment_id, files, *, supplemental=False):
     staged_files = _stage_shipment_images(files)
     saved = []
     uploaded_at = datetime.utcnow().isoformat(timespec="seconds")
@@ -2647,7 +2648,7 @@ def save_shipment_images(conn, shipment_id, files):
     try:
         for staged in staged_files:
             filename = stored_shipment_image_filename(
-                shipment_id,
+                f'supplemental-{shipment_id}' if supplemental else shipment_id,
                 staged["original_filename"],
                 staged["suffix"],
             )
@@ -2657,9 +2658,10 @@ def save_shipment_images(conn, shipment_id, files):
                 raise FileExistsError("发货图片文件名冲突")
             os.replace(staged["stage_path"], final_path)
             staged["created_final"] = True
+            image_table = 'supplemental_shipment_images' if supplemental else 'product_order_shipment_images'
             conn.execute(
-                """
-                INSERT INTO product_order_shipment_images (
+                f"""
+                INSERT INTO {image_table} (
                     shipment_id, filename, original_filename, content_type,
                     file_size, uploaded_at, uploaded_ip, uploaded_user_agent
                 )
@@ -4320,6 +4322,9 @@ def get_shipment_customer_options(conn):
             SELECT TRIM(customer) AS customer
             FROM assembly_shipment_batches
             WHERE TRIM(customer) != ''
+            UNION ALL
+            SELECT TRIM(customer) AS customer FROM supplemental_shipments
+            WHERE TRIM(customer) != ''
         )
         ORDER BY customer COLLATE NOCASE ASC, customer ASC
         """
@@ -4340,6 +4345,7 @@ def get_unshipped_order_options(conn):
     return conn.execute(
         f"""
         SELECT product_orders.id,
+               product_orders.manual_id,
                product_orders.order_no,
                product_orders.quantity,
                product_orders.planned_ship_at,
@@ -5148,7 +5154,7 @@ def validate_shipment_inventory(conn, requested_items, extra_available_by_manual
         raise ValueError(f"库存不足：{'；'.join(shortages)}。请先调整库存后再出库")
 
 
-def deduct_inventory_for_shipment(conn, shipment_id, order_id, quantity):
+def deduct_inventory_for_shipment(conn, shipment_id, order_id, quantity, *, allow_shortage=False):
     order = conn.execute(
         """
         SELECT product_orders.manual_id,
@@ -5175,7 +5181,7 @@ def deduct_inventory_for_shipment(conn, shipment_id, order_id, quantity):
         """,
         (order["manual_id"], order["default_location_id"] or -1),
     ).fetchall()
-    if sum(int(row["quantity"] or 0) for row in locations) < remaining:
+    if not allow_shortage and sum(int(row["quantity"] or 0) for row in locations) < remaining:
         raise ValueError("库存不足，请先调整库存后再出库")
 
     for location in locations:
@@ -5197,6 +5203,7 @@ def deduct_inventory_for_shipment(conn, shipment_id, order_id, quantity):
             remark="发货记录自动扣减库存",
         )
         remaining -= outbound_quantity
+    return int(quantity) - remaining
 
 
 def reverse_shipment_inventory_deduction(conn, shipment_id):
@@ -5238,7 +5245,7 @@ def assembly_inventory_related_id(item_id):
 
 
 def deduct_inventory_allow_shortage(
-    conn, item_id, manual_id, quantity, customer, reference
+    conn, item_id, manual_id, quantity, customer, reference, *, supplemental=False
 ):
     item_id = parse_positive_int(item_id, "组装发货明细 ID")
     manual_id = parse_positive_int(manual_id, "配件 ID")
@@ -5277,11 +5284,11 @@ def deduct_inventory_allow_shortage(
             manual_id,
             outbound_quantity,
             from_location_id=location["location_id"],
-            related_order_type=ASSEMBLY_INVENTORY_RELATED_TYPE,
-            related_order_id=assembly_inventory_related_id(item_id),
+            related_order_type='补充发货' if supplemental else ASSEMBLY_INVENTORY_RELATED_TYPE,
+            related_order_id=f'supplemental:{item_id}' if supplemental else assembly_inventory_related_id(item_id),
             related_order_no=str(reference or "").strip(),
             customer=str(customer or "").strip(),
-            remark="组装发货自动扣减库存",
+            remark='补充发货自动扣减库存' if supplemental else '组装发货自动扣减库存',
         )
         remaining -= outbound_quantity
         deducted += outbound_quantity
@@ -5925,6 +5932,35 @@ def fetch_shipped_orders(
 
     sql += " ORDER BY product_order_shipments.shipped_at DESC, product_order_shipments.id DESC"
     return conn.execute(sql, params).fetchall()
+
+
+def fetch_supplemental_shipments(conn, query='', selected_customer='', shipped_at='', include_prices=False):
+    columns = '''id, operation_id, manual_id, customer, drawing_no, product_name,
+        specification_snapshot AS specification, unit, shipped_quantity,
+        inventory_deducted_quantity, inventory_shortage_quantity, shipped_at,
+        logistics_no, remark, created_by'''
+    if include_prices:
+        columns += ', unit_price_minor, currency, unit_price_minor*shipped_quantity AS line_total_minor'
+    sql = f'SELECT {columns} FROM supplemental_shipments WHERE shipped_quantity > 0'
+    params = []
+    if query:
+        sql += " AND (drawing_no LIKE ? OR product_name LIKE ? OR customer LIKE ? OR specification_snapshot LIKE ? OR shipped_at LIKE ? OR remark LIKE ?)"
+        params.extend([f'%{query}%'] * 6)
+    if selected_customer:
+        sql += ' AND customer=?'
+        params.append(selected_customer)
+    if shipped_at:
+        sql += ' AND shipped_at LIKE ?'
+        params.append(f'{shipped_at}%')
+    rows = [dict(r) for r in conn.execute(sql+' ORDER BY shipped_at DESC,id DESC', params)]
+    for row in rows:
+        row['images'] = [dict(image) for image in conn.execute(
+            'SELECT filename,original_filename FROM supplemental_shipment_images WHERE shipment_id=? ORDER BY id', (row['id'],))]
+        claim = conn.execute('''SELECT s.id AS statement_id,s.statement_no,s.status
+            FROM reconciliation_statement_items i JOIN reconciliation_statements s ON s.id=i.statement_id
+            WHERE i.active_claim_key=?''', (f"supplemental:{row['id']}",)).fetchone()
+        row['reconciliation_claim'] = dict(claim) if claim else None
+    return rows
 
 
 def _fetch_assembly_shipment_batches_by_ids(
@@ -8237,6 +8273,7 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
         "数量",
         "订单号",
         "发货时间",
+        "备注",
     ]]
     for index, shipment in enumerate(shipped_orders, start=1):
         data.append([
@@ -8248,13 +8285,14 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
             Paragraph(str(shipment["shipped_quantity"] or 0), cell_style),
             Paragraph(xml_escape(shipment["order_no"] or "-"), cell_style),
             Paragraph(xml_escape(shipment["shipped_at"] or "-"), cell_style),
+            Paragraph(xml_escape(str(shipment['remark'] or '') if 'remark' in shipment.keys() else '').replace('\n', '<br/>'), cell_style),
         ])
     if len(data) == 1:
-        data.append([Paragraph("暂无发货记录", cell_style)] + [""] * 7)
+        data.append([Paragraph("暂无发货记录", cell_style)] + [""] * 8)
 
     table = Table(
         data,
-        colWidths=[10 * mm, 25 * mm, 35 * mm, 46 * mm, 12 * mm, 12 * mm, 24 * mm, 20 * mm],
+        colWidths=[8 * mm, 22 * mm, 26 * mm, 32 * mm, 10 * mm, 11 * mm, 22 * mm, 20 * mm, 43 * mm],
         repeatRows=1,
     )
     table.setStyle(
@@ -15060,6 +15098,8 @@ def shipped_orders():
             include_prices=include_prices,
         )
         shipped_orders = attach_shipment_images(conn, shipped_orders)
+        supplemental_shipments = fetch_supplemental_shipments(
+            conn, query, selected_customer, shipped_at, include_prices=include_prices)
         assembly_batches = fetch_assembly_shipment_batches(
             conn,
             query=query,
@@ -15079,6 +15119,7 @@ def shipped_orders():
     return render_template(
         "shipped_orders.html",
         shipped_orders=shipped_orders,
+        supplemental_shipments=supplemental_shipments,
         assembly_batches=assembly_batches,
         query=query,
         customers=customers,
@@ -15693,42 +15734,93 @@ def create_shipment_from_shipped_page():
     return redirect(url_for('delivery_note_result', operation_id=state['operation_id']))
 
 
+def build_order_shipment_preview(conn, rows):
+    """Resolve product ownership, ordered allocation and available stock afresh."""
+    items, remaining_by_order, stock_by_manual, seen = [], {}, {}, set()
+    for row in rows:
+        order = None
+        if row['order_id'] is not None:
+            order = conn.execute('SELECT * FROM product_orders WHERE id=?', (row['order_id'],)).fetchone()
+            if order is None:
+                raise ValueError('请选择有效的订单')
+        manual_id = order['manual_id'] if row['legacy'] else row['manual_id']
+        manual = conn.execute('SELECT * FROM manuals WHERE id=?', (manual_id,)).fetchone()
+        if manual is None:
+            raise ValueError('关联产品不存在')
+        customer = (order['customer'] or manual['customer'] or '').strip() if row['legacy'] else row['customer']
+        if not row['legacy'] and (not customer or manual['customer'] != customer):
+            raise ValueError('追加产品前请选择具体客户，产品必须属于当前客户')
+        if order and (order['manual_id'] != manual_id or (order['customer'] or manual['customer'] or '').strip() != customer):
+            raise ValueError('订单、产品和客户不匹配')
+        if not row['legacy'] and (customer, manual_id) in seen:
+            raise ValueError('同一客户产品请合并为一行')
+        seen.add((customer, manual_id))
+        orders = conn.execute(f'''SELECT o.id,o.order_no,
+            o.quantity-COALESCE(s.shipped_total,o.shipped_quantity,0) AS unshipped_quantity
+            FROM product_orders o JOIN manuals m ON m.id=o.manual_id
+            LEFT JOIN ({order_shipment_summary_subquery(include_assembly=True, conn=conn)}) s ON s.order_id=o.id
+            WHERE o.manual_id=? AND COALESCE(NULLIF(TRIM(o.customer),''),m.customer,'')=?
+            ORDER BY CASE WHEN TRIM(o.planned_ship_at)='' THEN 1 ELSE 0 END,
+                o.planned_ship_at,o.id''', (manual_id, customer)).fetchall()
+        candidates = []
+        for candidate in orders:
+            remaining_by_order.setdefault(candidate['id'], max(0, int(candidate['unshipped_quantity'] or 0)))
+            if not row['legacy'] or candidate['id'] == row['order_id']:
+                candidates.append(dict(candidate, unshipped_quantity=remaining_by_order[candidate['id']]))
+        if row['legacy'] and row['quantity'] > sum(c['unshipped_quantity'] for c in candidates):
+            raise ValueError('发货数量不能大于未发数量')
+        allocations = allocate_quantity(row['quantity'], candidates)
+        for allocation in allocations:
+            if allocation['order_id'] is not None:
+                remaining_by_order[allocation['order_id']] -= allocation['quantity']
+        stock_by_manual.setdefault(manual_id, max(0, inventory_total_for_manual(conn, manual_id)))
+        deducted = min(row['quantity'], stock_by_manual[manual_id])
+        available = stock_by_manual[manual_id]
+        stock_by_manual[manual_id] -= deducted
+        order_numbers = {r['id']: r['order_no'] for r in orders}
+        for allocation in allocations:
+            allocation['order_no'] = order_numbers.get(allocation['order_id'], '未关联订单')
+        item = dict(row, manual_id=manual_id, customer=customer,
+                    drawing_no=manual['drawing_no'] or '', product_name=manual['product_name'] or '',
+                    specification=manual['supplier'] or '', unit=manual['unit'] or '',
+                    allocations=allocations, available_inventory=available,
+                    inventory_deducted_quantity=deducted, inventory_shortage_quantity=row['quantity']-deducted,
+                    unallocated_quantity=sum(a['quantity'] for a in allocations if a['order_id'] is None),
+                    order_no=' / '.join(a['order_no'] for a in allocations) or (order['order_no'] if order else '未关联订单'))
+        items.append(item)
+    result = {'items': items}
+    result['preview_token'] = preview_token(result)
+    return result
+
+
+@app.route('/admin/shipped-orders/order-preview', methods=['POST'])
+@permission_required('shipped_manage')
+def order_shipment_preview():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error='请求数据格式无效'), 400
+    try:
+        rows = parse_order_shipment_lines({'shipment_lines': json.dumps(payload.get('lines'))})
+        with get_db() as conn:
+            result = build_order_shipment_preview(conn, rows)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    return jsonify(result)
+
+
+@app.route('/admin/shipped-orders/order-product-options')
+@permission_required('shipped_manage')
+def order_product_options():
+    return assembly_component_options.__wrapped__()
+
+
 def _create_shipment_from_shipped_page(state):
     shipped_at = request.form.get("shipped_at", "").strip()
     logistics_no = request.form.get("logistics_no", "").strip()
-    order_ids = request.form.getlist("order_id")
-    shipped_quantities = request.form.getlist("shipped_quantity")
-
     if not shipped_at:
-        flash("请填写发货时间", "error")
-        return redirect(url_for("shipment_operations"))
-
-    requested_items = []
-    for order_id, shipped_quantity in zip_longest(order_ids, shipped_quantities, fillvalue=""):
-        order_id = str(order_id or "").strip()
-        shipped_quantity = str(shipped_quantity or "").strip()
-        if not order_id and not shipped_quantity:
-            continue
-        if not order_id or not shipped_quantity:
-            flash("请选择订单，并填写发货数量", "error")
-            return redirect(url_for("shipment_operations"))
-        try:
-            order_id_value = int(order_id)
-            shipped_quantity_value = int(shipped_quantity)
-        except ValueError:
-            flash("发货数量必须为整数", "error")
-            return redirect(url_for("shipment_operations"))
-        if shipped_quantity_value <= 0:
-            flash("发货数量必须大于 0", "error")
-            return redirect(url_for("shipment_operations"))
-        requested_items.append((order_id_value, shipped_quantity_value))
-
-    if not requested_items:
-        flash("请选择订单，并填写发货数量和发货时间", "error")
-        return redirect(url_for("shipment_operations"))
-
+        raise ValueError("请填写发货时间")
+    rows = parse_order_shipment_lines(request.form)
     now = datetime.utcnow().isoformat(timespec="seconds")
-    shipment_ids = []
     image_files = selected_shipment_images()
     operation_token, request_digest = delivery_request_identity(request.form, image_files, 'ordinary')
     operator = current_admin_username()
@@ -15739,106 +15831,78 @@ def _create_shipment_from_shipped_page(state):
             state.update(committed=True, operation_id=existing['id'])
             return redirect(url_for('delivery_note_result', operation_id=existing['id']))
         recipient_overrides = parse_recipient_overrides(request.form)
-        unique_order_ids = list(dict.fromkeys(order_id for order_id, _ in requested_items))
-        placeholders = ",".join("?" for _ in unique_order_ids)
-        rows = conn.execute(
-            f"""
-            SELECT product_orders.*,
-                   product_orders.quantity - COALESCE(shipments.shipped_total, product_orders.shipped_quantity, 0) AS unshipped_quantity
-            FROM product_orders
-            LEFT JOIN ({order_shipment_summary_subquery(include_assembly=True, conn=conn)}) AS shipments ON shipments.order_id = product_orders.id
-            WHERE product_orders.id IN ({placeholders})
-            """,
-            unique_order_ids,
-        ).fetchall()
-        orders_by_id = {row["id"]: row for row in rows}
-        remaining_by_order = {
-            row["id"]: int(row["unshipped_quantity"] or 0)
-            for row in rows
-        }
-        for order_id_value, shipped_quantity_value in requested_items:
-            order = orders_by_id.get(order_id_value)
-            if order is None:
-                flash("请选择有效的订单", "error")
-                return redirect(url_for("shipment_operations"))
-            if shipped_quantity_value > remaining_by_order.get(order_id_value, 0):
-                flash("发货数量不能大于未发数量", "error")
-                return redirect(url_for("shipment_operations"))
-            remaining_by_order[order_id_value] -= shipped_quantity_value
-
-        try:
-            validate_shipment_inventory(conn, requested_items)
-        except ValueError as error:
-            flash(str(error), "error")
-            return redirect(url_for("shipment_operations"))
-
-        for order_id_value, shipped_quantity_value in requested_items:
-            order = orders_by_id[order_id_value]
-            specification_snapshot = current_specification_snapshots(
-                conn, [order["manual_id"]]
-            )[int(order["manual_id"])]
-            price_snapshot = current_product_price_snapshot(
-                conn,
-                order["manual_id"],
-                current_admin_username(),
-                now,
-            )
-            signature_token = unique_signature_token(conn)
-            photo_upload_token = unique_shipment_photo_token(conn)
-            signature_expires = signature_expires_at()
-            cursor = conn.execute(
-                """
-                INSERT INTO product_order_shipments (
-                    order_id, shipped_quantity, shipped_at, created_at, email_sent_at, logistics_no,
-                    signature_token, signature_status, signature_expires_at, photo_upload_token,
-                    specification_snapshot,
-                    unit_price_minor, currency, price_recorded_by, price_recorded_at
-                )
-                VALUES (?, ?, ?, ?, '', ?, ?, '未签收', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    order_id_value,
-                    shipped_quantity_value,
-                    shipped_at,
-                    now,
-                    logistics_no,
-                    signature_token,
-                    signature_expires,
-                    photo_upload_token,
-                    specification_snapshot,
-                    price_snapshot["unit_price_minor"],
-                    price_snapshot["currency"],
-                    price_snapshot["price_recorded_by"],
-                    price_snapshot["price_recorded_at"],
-                ),
-            )
-            shipment_id = cursor.lastrowid
-            shipment_ids.append(shipment_id)
-            deduct_inventory_for_shipment(
-                conn,
-                shipment_id,
-                order_id_value,
-                shipped_quantity_value,
-            )
-            if image_files:
-                for file_storage in image_files:
-                    try:
-                        file_storage.stream.seek(0)
-                    except Exception:
-                        pass
-                try:
-                    state['saved_images'].extend(save_shipment_images(conn, shipment_id, image_files))
-                except ValueError as error:
-                    conn.rollback()
-                    flash(f"发货图片格式不支持：{error}", "error")
-                    return redirect(url_for("shipment_operations"))
-            sync_order_shipment_summary(conn, order_id_value, updated_at=now)
+        preview = build_order_shipment_preview(conn, rows)
+        if 'shipment_lines' in request.form and request.form.get('preview_token') != preview['preview_token']:
+            return jsonify(error='订单或库存已变化，请核对最新预览后重新保存', preview=preview), 409
         operation_id = start_delivery_operation(conn, operation_token, request_digest, operator)
-        create_delivery_notes(conn, operation_id, [('ordinary', sid) for sid in shipment_ids], recipient_overrides, operator)
+        refs, display_lines = [], []
+        for item in preview['items']:
+            line_refs = []
+            price = current_product_price_snapshot(conn, item['manual_id'], operator, now) if item['quantity'] else None
+            for allocation in item['allocations']:
+                quantity = allocation['quantity']
+                order_id = allocation['order_id']
+                if order_id is not None:
+                    sid = conn.execute("""
+                        INSERT INTO product_order_shipments (
+                            order_id, shipped_quantity, shipped_at, created_at, logistics_no, remark,
+                            signature_token, signature_status, signature_expires_at, photo_upload_token,
+                            specification_snapshot, unit_price_minor, currency, price_recorded_by, price_recorded_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, '未签收', ?, ?, ?, ?, ?, ?, ?)
+                    """, (order_id, quantity, shipped_at, now, logistics_no, item['remark'],
+                          unique_signature_token(conn), signature_expires_at(), unique_shipment_photo_token(conn),
+                          item['specification'], price['unit_price_minor'], price['currency'],
+                          price['price_recorded_by'], price['price_recorded_at'])).lastrowid
+                    deduct_inventory_for_shipment(conn, sid, order_id, quantity, allow_shortage=True)
+                    if image_files:
+                        for upload in image_files:
+                            upload.stream.seek(0)
+                        try:
+                            state['saved_images'].extend(save_shipment_images(conn, sid, image_files))
+                        except ValueError as error:
+                            raise ValueError(f'发货图片格式不支持：{error}') from error
+                    sync_order_shipment_summary(conn, order_id, updated_at=now)
+                    line_refs.append(('ordinary', sid))
+                else:
+                    product = conn.execute('SELECT sku,model FROM manuals WHERE id=?', (item['manual_id'],)).fetchone()
+                    sid = conn.execute("""
+                        INSERT INTO supplemental_shipments (
+                            operation_id,manual_id,customer,drawing_no,product_name,specification_snapshot,
+                            sku,model,unit,shipped_quantity,inventory_deducted_quantity,inventory_shortage_quantity,
+                            shipped_at,logistics_no,remark,unit_price_minor,currency,price_recorded_by,price_recorded_at,
+                            created_by,created_at,updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (operation_id,item['manual_id'],item['customer'],item['drawing_no'],item['product_name'],
+                          item['specification'],product['sku'] or '',product['model'] or '',item['unit'],quantity,
+                          quantity,shipped_at,logistics_no,item['remark'],price['unit_price_minor'],price['currency'],
+                          price['price_recorded_by'],price['price_recorded_at'],operator,now,now)).lastrowid
+                    deducted = deduct_inventory_allow_shortage(
+                        conn,sid,item['manual_id'],quantity,item['customer'],f'BC-{sid}',supplemental=True)
+                    conn.execute('UPDATE supplemental_shipments SET inventory_deducted_quantity=?,inventory_shortage_quantity=? WHERE id=?',
+                                 (deducted,quantity-deducted,sid))
+                    if image_files:
+                        for upload in image_files:
+                            upload.stream.seek(0)
+                        try:
+                            state['saved_images'].extend(save_shipment_images(conn, sid, image_files, supplemental=True))
+                        except ValueError as error:
+                            raise ValueError(f'发货图片格式不支持：{error}') from error
+                    line_refs.append(('supplemental', sid))
+            refs.extend(line_refs)
+            display = dict(item, shipped_at=shipped_at)
+            if len(line_refs) == 1:
+                display.update(source_type=line_refs[0][0], source_id=line_refs[0][1])
+            display_lines.append(display)
+        create_delivery_notes(conn, operation_id, refs, recipient_overrides, operator, display_lines=display_lines)
         state['operation_id'] = operation_id
         conn.commit()
         state['committed'] = True
-    flash(f"已新增 {len(shipment_ids)} 条发货记录", "success")
+    flash(f"已新增 {len(refs)} 条发货记录", "success")
+    for item in preview['items']:
+        if item['unallocated_quantity']:
+            flash(f"{item['drawing_no']}：未关联订单 {item['unallocated_quantity']}，已保存为补充发货", 'warning')
+        if item['inventory_shortage_quantity']:
+            flash(f"{item['drawing_no']}：库存不足，实际扣减 {item['inventory_deducted_quantity']}，缺货 {item['inventory_shortage_quantity']}", 'warning')
     return redirect(url_for("delivery_note_result", operation_id=operation_id))
 
 
@@ -16522,17 +16586,6 @@ def edit_shipment(shipment_id):
                 flash("修改后的发货数量超过了订单总数量", "error")
                 return redirect(url_for("edit_shipment", shipment_id=shipment_id))
 
-            tracked_inventory_quantity = shipment_inventory_deducted_quantity(conn, shipment_id)
-            try:
-                validate_shipment_inventory(
-                    conn,
-                    [(shipment["order_id"], shipped_quantity_value)],
-                    {shipment["manual_id"]: tracked_inventory_quantity},
-                )
-            except ValueError as error:
-                flash(str(error), "error")
-                return redirect(url_for("edit_shipment", shipment_id=shipment_id))
-
             now = datetime.utcnow().isoformat(timespec="seconds")
             reverse_shipment_inventory_deduction(conn, shipment_id)
             conn.execute(
@@ -16550,6 +16603,7 @@ def edit_shipment(shipment_id):
                 shipment_id,
                 shipment["order_id"],
                 shipped_quantity_value,
+                allow_shortage=True,
             )
             signature_reset = shipment["signature_status"] == "已签收" or bool(shipment["signed_at"])
             if signature_reset:
@@ -16592,6 +16646,86 @@ def delete_shipment(shipment_id):
 
     flash("发货记录已删除", "success")
     return redirect(url_for("shipped_orders"))
+
+
+def reverse_supplemental_inventory(conn, shipment_id):
+    related_id = f'supplemental:{int(shipment_id)}'
+    transactions = conn.execute("SELECT * FROM inventory_transactions WHERE type='out' AND related_order_type='补充发货' AND related_order_id=? ORDER BY id DESC", (related_id,)).fetchall()
+    for row in transactions:
+        update_inventory_balance(conn, row['manual_id'], row['from_location_id'], row['quantity'])
+    conn.execute("DELETE FROM inventory_transactions WHERE type='out' AND related_order_type='补充发货' AND related_order_id=?", (related_id,))
+
+
+@app.route('/admin/shipped-orders/supplemental/<int:shipment_id>/edit', methods=['GET', 'POST'])
+@permission_required('shipped_manage')
+def edit_supplemental_shipment(shipment_id):
+    try:
+        with get_db() as conn:
+            if request.method == 'POST':
+                conn.execute('BEGIN IMMEDIATE')
+            source = conn.execute('SELECT * FROM supplemental_shipments WHERE id=?', (shipment_id,)).fetchone()
+            if source is None:
+                abort(404)
+            shipment = dict(source)
+            shipment['claimed'] = finance_source_is_claimed(conn, 'supplemental', shipment_id) or reconciliation_source_is_claimed(conn, 'supplemental', shipment_id)
+            if request.method == 'POST':
+                quantity = parse_assembly_quantity(request.form.get('shipped_quantity'), '发货数量')
+                if quantity == 0:
+                    raise ValueError('已保存的发货来源必须为正数；不再发货请删除记录')
+                shipped_at = request.form.get('shipped_at', '').strip()
+                remark = request.form.get('remark', '')
+                if not shipped_at or len(remark) > 500:
+                    raise ValueError('请填写发货时间，行备注最多 500 个字符')
+                if (quantity, shipped_at, remark) != (shipment['shipped_quantity'], shipment['shipped_at'], shipment['remark']):
+                    assert_finance_sources_mutable(conn, [('supplemental', shipment_id)])
+                    assert_reconciliation_sources_mutable(conn, [('supplemental', shipment_id)])
+                deducted = shipment['inventory_deducted_quantity']
+                if quantity != shipment['shipped_quantity']:
+                    product = conn.execute('SELECT customer FROM manuals WHERE id=?', (shipment['manual_id'],)).fetchone()
+                    if product is None or product['customer'] != shipment['customer']:
+                        raise ValueError('产品不存在或客户归属已变化，不能修改数量')
+                    reverse_supplemental_inventory(conn, shipment_id)
+                    deducted = deduct_inventory_allow_shortage(conn, shipment_id, shipment['manual_id'], quantity, shipment['customer'], f'BC-{shipment_id}', supplemental=True)
+                conn.execute('''UPDATE supplemental_shipments SET shipped_quantity=?,shipped_at=?,remark=?,
+                    logistics_no=?,inventory_deducted_quantity=?,inventory_shortage_quantity=?,updated_at=? WHERE id=?''',
+                    (quantity,shipped_at,remark,request.form.get('logistics_no','').strip(),deducted,quantity-deducted,
+                     datetime.utcnow().isoformat(timespec='seconds'),shipment_id))
+                flash('补充发货已更新；原送货单保留本次发货时的快照', 'success')
+                return redirect(url_for('shipped_orders'))
+    except ValueError as error:
+        flash(str(error), 'error')
+        return redirect(url_for('edit_supplemental_shipment', shipment_id=shipment_id))
+    return render_template('supplemental_shipment_edit.html', shipment=shipment)
+
+
+@app.route('/admin/shipped-orders/supplemental/<int:shipment_id>/delete', methods=['POST'])
+@permission_required('shipped_manage')
+def delete_supplemental_shipment(shipment_id):
+    image_files = []
+    try:
+        with get_db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT id FROM supplemental_shipments WHERE id=?', (shipment_id,)).fetchone() is None:
+                abort(404)
+            assert_finance_sources_mutable(conn, [('supplemental', shipment_id)])
+            assert_reconciliation_sources_mutable(conn, [('supplemental', shipment_id)])
+            reverse_supplemental_inventory(conn, shipment_id)
+            image_files = [row[0] for row in conn.execute('SELECT filename FROM supplemental_shipment_images WHERE shipment_id=?', (shipment_id,))]
+            conn.execute('DELETE FROM supplemental_shipment_images WHERE shipment_id=?', (shipment_id,))
+            conn.execute('DELETE FROM supplemental_shipments WHERE id=?', (shipment_id,))
+    except ValueError as error:
+        flash(str(error), 'error')
+        return redirect(url_for('shipped_orders'))
+    for filename in image_files:
+        if secure_filename(filename) != filename:
+            app.logger.error('补充发货图片文件名无效，跳过清理')
+            continue
+        try:
+            (SHIPMENT_IMAGES_DIR / filename).unlink(missing_ok=True)
+        except OSError:
+            app.logger.exception('补充发货已删除，但图片清理失败：%s', filename)
+    flash('补充发货已删除，已恢复实际扣减库存，原送货单已失效', 'success')
+    return redirect(url_for('shipped_orders'))
 
 
 def _render_public_reconciliation(statement=None, items=(), error="", status=200):

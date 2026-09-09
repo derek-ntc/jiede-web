@@ -159,7 +159,7 @@ class BusinessListLayoutTests(unittest.TestCase):
     def test_failed_shipping_returns_to_operations_without_creating_a_record(self):
         for data in [{}, {'shipped_at': '2026-09-04'},
                      {'shipped_at': '2026-09-04', 'order_id': str(self.order), 'shipped_quantity': '81'},
-                     {'shipped_at': '2026-09-04', 'order_id': str(self.order), 'shipped_quantity': '1'}]:
+                     {'shipped_at': '2026-09-04', 'order_id': str(self.order), 'shipped_quantity': '-1'}]:
             response = self.client.post('/admin/shipped-orders/new', data=data)
             self.assertEqual(response.status_code, 302)
             self.assertEqual(urlsplit(response.location).path, '/admin/shipped-orders/create')

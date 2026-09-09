@@ -12,7 +12,7 @@
       <p>按发货记录展示每一次发货的时间、产品和数量。</p>
     </div>
     <div class="head-stat">
-      <strong data-shipment-history-count>{{ (shipped_orders|length) + (assembly_batches|length) }}</strong>
+      <strong data-shipment-history-count>{{ (shipped_orders|length) + (assembly_batches|length) + (supplemental_shipments|length) }}</strong>
       <span>{% if query or selected_customer or selected_shipped_at %}条搜索结果{% else %}条发货记录{% endif %}</span>
     </div>
   </section>
@@ -85,6 +85,27 @@
         <div data-reconciliation-source-fields></div>
         <span class="empty-text" data-reconciliation-selection-summary>请选择同一客户、同一币种且已定价的发货明细。</span>
       </form>
+    {% endif %}
+
+    {% if supplemental_shipments %}
+      <section aria-labelledby="supplemental-history-title">
+        <h3 id="supplemental-history-title">补充发货 · 未关联订单</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>发货记录</th><th>客户 / 日期</th><th>产品图号 / 名称</th><th>规格型号</th><th>数量</th><th>库存结果</th><th>物流备注</th>
+            {% if can_view_prices %}<th>单价 / 金额</th>{% endif %}{% if can_manage_finance %}<th>对账</th>{% endif %}<th>操作</th><th>备注</th></tr></thead>
+          <tbody>{% for shipment in supplemental_shipments %}<tr>
+            <td>BC-{{ shipment.id }}{% set note = delivery_source_notes.get(('supplemental', shipment.id)) %}{% if note and can_view_shipped %}<br><a href="{{ url_for('delivery_note_result', operation_id=note.operation_id) }}">{{ note.document_no }}</a>{% endif %}</td>
+            <td>{{ shipment.customer }}<br>{{ shipment.shipped_at }}</td><td>{{ shipment.drawing_no }}<br>{{ shipment.product_name }}{% if can_view_shipped %}{% for image in shipment.images %}<br><a href="{{ url_for('shipment_image', filename=image.filename) }}">{{ image.original_filename }}</a>{% endfor %}{% endif %}</td>
+            <td>{{ shipment.specification }}</td><td>{{ shipment.shipped_quantity }} {{ shipment.unit }}</td>
+            <td>扣减 {{ shipment.inventory_deducted_quantity }}{% if shipment.inventory_shortage_quantity %}<br><span role="status">库存不足：缺货 {{ shipment.inventory_shortage_quantity }}</span>{% endif %}</td><td>{{ shipment.logistics_no }}</td>
+            {% if can_view_prices %}<td>{% if shipment.unit_price_minor is not none %}{{ shipment.unit_price_minor|money_minor(shipment.currency) }} / {{ shipment.line_total_minor|money_minor(shipment.currency) }} {{ shipment.currency }}{% else %}未记录价格{% endif %}</td>{% endif %}
+            {% if can_manage_finance %}<td><label><input type="checkbox" data-reconciliation-source data-customer="{{ shipment.customer }}" data-currency="{{ shipment.currency or '' }}" value="supplemental:{{ shipment.id }}" {% if shipment.reconciliation_claim or shipment.unit_price_minor is none %}disabled{% endif %}>{{ '已对账' if shipment.reconciliation_claim else '选择' }}</label>
+              {% if shipment.reconciliation_claim %}<a href="{{ url_for('reconciliation_statement_detail', statement_id=shipment.reconciliation_claim.statement_id) }}">{{ shipment.reconciliation_claim.statement_no }}</a>{% endif %}</td>{% endif %}
+            <td>{% if can_manage_shipped %}<a href="{{ url_for('edit_supplemental_shipment', shipment_id=shipment.id) }}">修改</a><form method="post" action="{{ url_for('delete_supplemental_shipment', shipment_id=shipment.id) }}" onsubmit="return confirm('删除此补充发货？仅恢复实际扣减库存，原送货单会失效。')"><button class="danger compact-button">删除</button></form>{% endif %}</td>
+            <td style="white-space:pre-wrap;overflow-wrap:anywhere">{{ shipment.remark }}</td>
+          </tr>{% endfor %}</tbody>
+        </table></div>
+      </section>
     {% endif %}
 
     {% if assembly_batches %}

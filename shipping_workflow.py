@@ -221,6 +221,11 @@ def ensure_shipping_workflow_tables(conn):
     )""")
     conn.execute('CREATE INDEX IF NOT EXISTS idx_supplemental_shipments_operation ON supplemental_shipments(operation_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_supplemental_shipments_customer ON supplemental_shipments(customer, shipped_at)')
+    conn.execute('''CREATE TABLE IF NOT EXISTS supplemental_shipment_images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, shipment_id INTEGER NOT NULL REFERENCES supplemental_shipments(id),
+        filename TEXT NOT NULL, original_filename TEXT NOT NULL, content_type TEXT NOT NULL,
+        file_size INTEGER NOT NULL, uploaded_at TEXT NOT NULL, uploaded_ip TEXT NOT NULL,
+        uploaded_user_agent TEXT NOT NULL)''')
     # Batch references survive replacement of assembly item IDs. Changes and
     # invalidation participate in the source transaction (including rollbacks).
     for source_type, table in [('ordinary', 'product_order_shipments'),
@@ -235,6 +240,21 @@ def ensure_shipping_workflow_tables(conn):
                 WHERE id IN (SELECT note_id FROM delivery_note_sources
                     WHERE source_type = '{source_type}' AND source_id = OLD.id);
                 END""")
+            conn.execute(f'''CREATE TRIGGER IF NOT EXISTS delivery_zero_{source_type}_{action.lower()}
+                AFTER {action} ON {table} BEGIN
+                UPDATE delivery_notes SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') {invalidation}
+                WHERE operation_id IN (SELECT n.operation_id FROM delivery_notes n
+                    JOIN delivery_note_sources s ON s.note_id=n.id
+                    WHERE s.source_type='{source_type}' AND s.source_id=OLD.id)
+                AND NOT EXISTS (SELECT 1 FROM delivery_note_sources s WHERE s.note_id=delivery_notes.id);
+                END''')
+    for action in ('UPDATE', 'DELETE'):
+        invalidation = ', invalidated=1' if action == 'DELETE' else ''
+        conn.execute(f'''CREATE TRIGGER IF NOT EXISTS delivery_operation_{action.lower()}
+            AFTER {action} ON delivery_operations BEGIN
+            UPDATE delivery_notes SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') {invalidation}
+            WHERE operation_id=OLD.id;
+            END''')
     conn.execute("""CREATE TRIGGER IF NOT EXISTS delivery_ordinary_order_update
         AFTER UPDATE OF order_no, manual_id, customer ON product_orders BEGIN
         UPDATE delivery_notes SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -385,6 +405,48 @@ def format_delivery_timestamp(value):
     return parsed.astimezone(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S（北京时间）')
 
 
+def parse_order_shipment_lines(form):
+    """Normalize modern product rows and legacy order/quantity form lists."""
+    from assembly_shipping import parse_nonnegative_int, parse_positive_int
+    if 'shipment_lines' in form:
+        try:
+            rows = json.loads(form['shipment_lines'])
+        except (TypeError, ValueError) as error:
+            raise ValueError('发货明细格式无效') from error
+        legacy = False
+    else:
+        ids, quantities = form.getlist('order_id'), form.getlist('shipped_quantity')
+        remarks = form.getlist('line_remark')
+        if len(ids) != len(quantities) or (remarks and len(remarks) != len(ids)):
+            raise ValueError('订单、数量和备注必须一一对应')
+        rows = [dict(order_id=oid, quantity=qty, remark=remarks[i] if remarks else '', source_kind='order')
+                for i, (oid, qty) in enumerate(zip(ids, quantities)) if str(oid).strip() or str(qty).strip()]
+        legacy = True
+    if not isinstance(rows, list) or not rows or len(rows) > 500:
+        raise ValueError('请提交 1 至 500 行发货明细')
+    normalized = []
+    for raw in rows:
+        if not isinstance(raw, dict) or raw.get('source_kind') not in ('order', 'extra'):
+            raise ValueError('发货明细来源无效')
+        remark = raw.get('remark', '')
+        if not isinstance(remark, str) or len(remark) > 500:
+            raise ValueError('发货行备注不能超过 500 个字符')
+        order_id = raw.get('order_id')
+        if order_id is not None:
+            order_id = parse_positive_int(order_id, '订单 ID')
+        if raw['source_kind'] == 'order' and order_id is None:
+            raise ValueError('请选择有效的订单')
+        normalized.append(dict(
+            order_id=order_id, source_kind=raw['source_kind'],
+            manual_id=None if legacy else parse_positive_int(raw.get('manual_id'), '产品 ID'),
+            customer=None if legacy else str(raw.get('customer') or '').strip(),
+            quantity=parse_nonnegative_int(raw.get('quantity'), '发货数量'),
+            remark=remark, legacy=legacy))
+    if not any(row['quantity'] > 0 for row in normalized):
+        raise ValueError('至少有一个产品的发货数量必须大于 0')
+    return normalized
+
+
 def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides, operator,
                           *, display_lines=None):
     """Group authoritative sources by customer; caller owns commit/rollback.
@@ -393,6 +455,9 @@ def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides
     display_lines optionally supplies the full ordered document, including zero
     rows, with an explicit customer per row. Without it, snapshot source rows.
     Source links are optional (a merged row may span several source records).
+    An additional customer may have only zero rows: each such row must belong
+    to that customer's current product/optional order. The operation still
+    requires positive sources, but that customer's note has snapshot rows only.
     """
     groups = {}
     source_lines = []
@@ -408,8 +473,18 @@ def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides
     for raw in source_lines if display_lines is None else display_lines:
         line = dict(raw)
         customer = line.get('customer')
-        if customer not in groups:
-            raise ValueError('送货单明细客户与发货来源不一致')
+        if customer not in groups or not groups[customer]:
+            # Zero-only customer documents have no accounting source. Accept
+            # only a real, currently customer-owned product; never arbitrary text.
+            manual = conn.execute('SELECT customer FROM manuals WHERE id=?', (line.get('manual_id'),)).fetchone()
+            if line.get('quantity') != 0 or not customer or manual is None or manual['customer'] != customer:
+                raise ValueError('送货单明细客户与发货来源不一致')
+            if line.get('order_id') is not None:
+                order = conn.execute('SELECT manual_id,customer FROM product_orders WHERE id=?', (line['order_id'],)).fetchone()
+                if order is None or order['manual_id'] != line.get('manual_id') or (order['customer'] or manual['customer']) != customer:
+                    raise ValueError('送货单明细客户与订单不一致')
+            groups.setdefault(customer, [])
+            line_groups.setdefault(customer, [])
         quantity = line.get('quantity', line.get('shipped_quantity'))
         if type(quantity) is not int or not 0 <= quantity <= 2_147_483_647:
             raise ValueError('送货单数量必须为非负整数')
@@ -488,7 +563,10 @@ def load_delivery_note(conn, note_id):
                          for item in snapshots]
         for item in note['items']:
             item.update(live_signature_metadata.get((item['source_type'], item['source_id']), {}))
-    if not note['sources']:
+    if not note['sources'] and (not snapshots or any(item['quantity'] != 0 for item in snapshots)):
+        note['invalidated'] = 1
+    if not note['sources'] and note['customer_id'] is not None and conn.execute(
+            'SELECT id FROM customers WHERE id=?', (note['customer_id'],)).fetchone() is None:
         note['invalidated'] = 1
     note['missing_recipient'] = any(not note[field] for field in ('recipient_name', 'recipient_phone', 'address'))
     return note

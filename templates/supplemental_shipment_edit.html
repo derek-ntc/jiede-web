@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}修改补充发货{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>修改补充发货 · BC-{{ shipment.id }}</h1>
+  <p>{{ shipment.customer }} / {{ shipment.drawing_no }} / {{ shipment.product_name }} / 未关联订单</p>
+  {% if shipment.claimed %}<p role="alert">已加入开票或对账单，数量、日期和行备注已锁定；仍可更新物流备注。</p>{% endif %}
+  <form method="post" class="grid-form">
+    <label>规格型号<input value="{{ shipment.specification_snapshot }}" disabled></label>
+    <label>发货日期<input name="shipped_at" type="date" value="{{ shipment.shipped_at }}" required {% if shipment.claimed %}readonly{% endif %}></label>
+    <label>数量<input name="shipped_quantity" type="number" min="1" max="2147483647" value="{{ shipment.shipped_quantity }}" required {% if shipment.claimed %}readonly{% endif %}></label>
+    <label>本行备注<input name="remark" maxlength="500" value="{{ shipment.remark }}" {% if shipment.claimed %}readonly{% endif %}></label>
+    <label>物流备注<input name="logistics_no" value="{{ shipment.logistics_no }}"></label>
+    <p>库存只扣除现有数量，差额记录缺货；原送货单保持创建时的快照。</p>
+    <div class="wide form-actions"><button type="submit">保存</button><a href="{{ url_for('shipped_orders') }}">返回已发货清单</a></div>
+  </form>
+</section>
+{% endblock %}
