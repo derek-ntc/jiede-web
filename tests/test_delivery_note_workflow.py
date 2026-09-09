@@ -12,6 +12,7 @@ from unittest.mock import patch
 import app
 import shipping_workflow
 from tests.test_assembly_shipping import AssemblyTask7TestCase, VALID_PNG_BYTES, png_bytes
+from tests.test_product_bom_import import workbook_upload
 
 
 class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
@@ -41,6 +42,173 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
     def ordinary_data(self, **extra):
         return dict(shipped_at='2026-09-08', order_id=str(self.order),
                     shipped_quantity='20', operation_token='ordinary-token', **extra)
+
+    def test_import_list_template_snapshot_and_claimed_batch_delete_work_together(self):
+        with app.get_db() as conn:
+            conn.execute("UPDATE manuals SET unit_price_minor=123, remark='保留旧备注' WHERE id=?", (self.product,))
+        preview = self.client.post('/admin/products/import', data={
+            'customer': '客户A', 'file': workbook_upload([
+                ('物料编码', '物料名称', '规格型号', '单位'),
+                ('SKU-UPDATED', '重新导入的产品', 'P1', 'PCS'),
+                ('SKU-FREE', '可删除的产品', 'FREE-IMPORT', 'PCS'),
+            ])}, content_type='multipart/form-data')
+        self.assertEqual(preview.status_code, 200)
+        token = re.search(r'name="import_token"\s+value="([^"]+)"', preview.get_data(as_text=True)).group(1)
+        confirmed = self.client.post('/admin/products/import/confirm', data={'import_token': token})
+        self.assertEqual(confirmed.location, '/admin/products')
+        with app.get_db() as conn:
+            self.assertEqual(tuple(conn.execute('''SELECT drawing_no,supplier,sku,unit,unit_price_minor,remark
+                FROM manuals WHERE id=?''', (self.product,)).fetchone()),
+                ('P1', 'P1', 'SKU-UPDATED', 'PCS', 123, '保留旧备注'))
+            free = conn.execute("SELECT id FROM manuals WHERE drawing_no='FREE-IMPORT'").fetchone()[0]
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM product_assembly_components WHERE manual_id=?',
+                                         (self.product,)).fetchone()[0], 1)
+        listed = self.client.get('/admin/products?supplier=P1').get_data(as_text=True)
+        self.assertIn('重新导入的产品', listed)
+        self.assertNotIn('可删除的产品', listed)
+        self.assertIn('规格型号', listed)
+
+        template = f'/admin/{self.product}/process-template'
+        self.assertEqual(self.client.post(template, data={'process_name': ['下料', '检验 <终检>']}).status_code, 302)
+
+        def create_card():
+            response = self.client.post('/admin/production-followups', data={
+                'ordered_at': '2026-09-09', 'customer': '客户A', 'manual_id': str(self.product),
+                'drawing_no': 'P1', 'product_name': '重新导入的产品'})
+            self.assertEqual(response.status_code, 302)
+            with app.get_db() as conn:
+                return conn.execute('SELECT MAX(id) FROM production_followups').fetchone()[0]
+
+        historical = create_card()
+        self.client.get('/admin/production-followups')
+        with self.client.session_transaction() as session:
+            csrf = session['production_followup_csrf_token']
+        with app.get_db() as conn:
+            step = conn.execute('SELECT id FROM production_followup_process_steps WHERE followup_id=? ORDER BY sort_order',
+                                (historical,)).fetchone()[0]
+        completed = self.client.post(f'/admin/production-followups/{historical}/processes/{step}/complete',
+                                     data={'production_followup_csrf_token': csrf})
+        self.assertEqual(completed.status_code, 302)
+        with app.get_db() as conn:
+            old_steps = [dict(row) for row in conn.execute(
+                'SELECT * FROM production_followup_process_steps WHERE followup_id=? ORDER BY sort_order', (historical,))]
+            self.assertTrue(old_steps[0]['completed_at'])
+            self.assertEqual(old_steps[0]['completed_by'], 'admin')
+        self.assertEqual(self.client.post(template, data={'process_name': ['包装']}).status_code, 302)
+        current = create_card()
+        app.init_db()
+        app.init_db()
+        with app.get_db() as conn:
+            self.assertEqual([dict(row) for row in conn.execute(
+                'SELECT * FROM production_followup_process_steps WHERE followup_id=? ORDER BY sort_order', (historical,))], old_steps)
+            self.assertEqual([row[0] for row in conn.execute(
+                'SELECT name FROM production_followup_process_steps WHERE followup_id=?', (current,))], ['包装'])
+        card = self.client.get(f'/admin/production-followups/{historical}/process-card').get_data(as_text=True)
+        self.assertIn('检验 &lt;终检&gt;', card)
+        self.assertIn('admin', card)
+
+        data = self.ordinary_data()
+        data['shipped_quantity'] = '1'
+        self.assertRegex(self.client.post('/admin/shipped-orders/new', data=data).location,
+                         r'/admin/delivery-notes/operations/\d+$')
+        with app.get_db() as conn:
+            source = conn.execute('SELECT id FROM product_order_shipments').fetchone()[0]
+            customer = conn.execute("SELECT id FROM customers WHERE name='客户A'").fetchone()[0]
+            app.create_finance_invoice(conn, customer, [('ordinary', source)], 'admin')
+            app.create_reconciliation_statement(conn, [('ordinary', source)], 'admin')
+        blocked = self.client.post('/admin/products/delete-batch', data={
+            'manual_id': [str(free), str(self.product)], 'return_supplier': 'P1'}, follow_redirects=True)
+        self.assertIn('整批未删除', blocked.get_data(as_text=True))
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM manuals WHERE id IN (?,?)', (free, self.product)).fetchone()[0], 2)
+        deleted = self.client.post('/admin/products/delete-batch', data={'manual_id': str(free), 'return_q': 'FREE-IMPORT'})
+        self.assertIn('/admin/products?q=FREE-IMPORT', deleted.location)
+        with app.get_db() as conn:
+            self.assertIsNone(conn.execute('SELECT id FROM manuals WHERE id=?', (free,)).fetchone())
+            self.assertIsNotNone(conn.execute('SELECT id FROM manuals WHERE id=?', (self.product,)).fetchone())
+
+    def test_both_shipment_modes_preserve_zero_added_rows_through_accounting_and_restart(self):
+        for mode in ('assembly', 'ordinary'):
+            with self.subTest(mode=mode):
+                positive = self.create_product(f'{mode}-POS')
+                zero = self.create_product(f'{mode}-ZERO')
+                extra = self.create_product(f'{mode}-EXTRA')
+                self.create_order(positive, f'{mode}-ORDER', 10)
+                zero_order = self.create_order(zero, f'{mode}-ZERO-ORDER', 9)
+                self.stock_product(positive, 10)
+                self.stock_product(zero, 5)
+                self.stock_product(extra, 1)
+                with app.get_db() as conn:
+                    for product, price in [(positive, 123), (zero, 999), (extra, 250)]:
+                        conn.execute("UPDATE manuals SET supplier='冻结规格', unit='PCS', unit_price_minor=?, currency='CNY' WHERE id=?",
+                                     (price, product))
+                quantities = [2, 0, 3]
+                remarks = ['先发两件', '本次不发 <待补>', '追加三件 & 缺货两件']
+                if mode == 'assembly':
+                    self.configure_components([(positive, 1), (zero, 1)])
+                    preview = self.client.post('/admin/shipped-orders/assembly-preview', json={
+                        'customer': '客户A', 'assembly_drawing_no': 'ASM-100', 'set_quantity': 2,
+                        'selected_manual_ids': [positive, zero, extra],
+                        'overrides': dict(zip([positive, zero, extra], quantities)),
+                        'remarks': dict(zip([positive, zero, extra], remarks))})
+                    self.assertEqual(preview.status_code, 200)
+                    data = self.save_data(preview.get_json(), extra_data={
+                        'selected_manual_ids': [str(positive), str(zero), str(extra)],
+                        'line_remark': remarks, 'operation_token': f'e2e-{mode}'})
+                    route = '/admin/shipped-orders/assembly/new'
+                else:
+                    lines = [dict(manual_id=product, customer='客户A', source_kind='extra', quantity=quantity, remark=remark)
+                             for product, quantity, remark in zip([positive, zero, extra], quantities, remarks)]
+                    preview = self.client.post('/admin/shipped-orders/order-preview', json={'lines': lines})
+                    self.assertEqual(preview.status_code, 200)
+                    data = dict(shipment_lines=json.dumps(lines), shipped_at='2026-09-09', operation_token=f'e2e-{mode}',
+                                preview_token=preview.get_json()['preview_token'])
+                    route = '/admin/shipped-orders/new'
+                saved = self.client.post(route, data=data)
+                self.assertEqual(saved.status_code, 201 if mode == 'assembly' else 302)
+                receipt = saved.get_json()['redirect_url'] if mode == 'assembly' else saved.location
+                retry = self.client.post(route, data=data)
+                self.assertEqual(retry.status_code, saved.status_code)
+                self.assertEqual(retry.get_json()['redirect_url'] if mode == 'assembly' else retry.location, receipt)
+                with app.get_db() as conn:
+                    note_id = conn.execute('SELECT MAX(id) FROM delivery_notes').fetchone()[0]
+                    note = shipping_workflow.load_delivery_note(conn, note_id)
+                    expected_items = [(positive, 2, remarks[0]), (zero, 0, remarks[1]), (extra, 3, remarks[2])]
+                    self.assertEqual([(i['manual_id'], i['quantity'], i['remark']) for i in note['items']], expected_items)
+                    self.assertEqual([app.inventory_total_for_manual(conn, product) for product in (positive, zero, extra)], [8, 5, 0])
+                    self.assertEqual(conn.execute('SELECT shipped_quantity FROM product_orders WHERE id=?', (zero_order,)).fetchone()[0], 0)
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM inventory_transactions WHERE manual_id=? AND type='out'", (zero,)).fetchone()[0], 0)
+                    sources = [row for row in app.fetch_available_finance_sources(conn, '客户A')
+                               if row['drawing_no'] in (f'{mode}-POS', f'{mode}-ZERO', f'{mode}-EXTRA')]
+                    self.assertEqual(sorted(row['quantity'] for row in sources), [2, 3])
+                    self.assertEqual({row['source_type'] for row in sources},
+                                     {'assembly_item'} if mode == 'assembly' else {'ordinary', 'supplemental'})
+                    refs = [(row['source_type'], row['source_id']) for row in sources]
+                    customer = conn.execute("SELECT id FROM customers WHERE name='客户A'").fetchone()[0]
+                    invoice = app.create_finance_invoice(conn, customer, refs, 'admin')
+                    statement = app.create_reconciliation_statement(conn, refs, 'admin')['statement_id']
+                    self.assertEqual(conn.execute('SELECT total_minor FROM finance_invoices WHERE id=?', (invoice,)).fetchone()[0], 996)
+                    self.assertEqual(conn.execute('SELECT amount_incl_tax_minor FROM reconciliation_statements WHERE id=?', (statement,)).fetchone()[0], 996)
+                    for table, parent, parent_id in [('finance_invoice_items', 'invoice_id', invoice),
+                                                     ('reconciliation_statement_items', 'statement_id', statement)]:
+                        self.assertEqual(sorted(row[0] for row in conn.execute(f'SELECT quantity FROM {table} WHERE {parent}=?', (parent_id,))), [2, 3])
+                    for check in (app.assert_finance_sources_mutable, app.assert_reconciliation_sources_mutable):
+                        with self.assertRaises(ValueError):
+                            check(conn, refs)
+                    conn.execute("UPDATE manuals SET supplier='后来规格', unit_price_minor=9999 WHERE id IN (?,?,?)", (positive, zero, extra))
+                app.init_db()
+                app.init_db()
+                with app.get_db() as conn:
+                    after = shipping_workflow.load_delivery_note(conn, note_id)
+                    self.assertEqual([(i['manual_id'], i['quantity'], i['remark']) for i in after['items']], expected_items)
+                    self.assertEqual([i['specification'] for i in after['items']], ['冻结规格'] * 3)
+                    self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(), [])
+                html = self.client.get(receipt).get_data(as_text=True)
+                self.assertIn('本次不发 &lt;待补&gt;', html)
+                self.assertIn('追加三件 &amp; 缺货两件', html)
+                pdf = self.client.get(f'/admin/delivery-notes/{note_id}.pdf')
+                self.assertEqual(pdf.status_code, 200)
+                self.assertTrue(pdf.data.startswith(b'%PDF'))
 
     def test_delivery_html_and_real_pdf_show_zero_and_final_remark_column_without_prices(self):
         zero = self.create_product('ZERO-PDF')

@@ -358,11 +358,9 @@ class ShippingWorkflowFieldTests(AssemblyAppTestCase):
         empty_workbook = app.build_shipped_orders_workbook([saved_empty], "", "", "")
         self.assertNotIn(label, str(empty_workbook.active.cell(row=4, column=6).value or ''))
 
-    def test_product_import_help_keeps_legacy_specification_header_mapping_explicit(self):
+    def test_product_import_help_explains_dual_specification_mapping(self):
         html = self.client.get("/admin/products/import").get_data(as_text=True)
-        self.assertIn("旧模板", html)
-        self.assertIn("规格型号", html)
-        self.assertIn("产品图号", html)
+        self.assertIn("“规格型号”同时用于产品图号匹配并写入产品列表的规格型号", html)
 
 
 if __name__ == "__main__":

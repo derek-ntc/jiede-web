@@ -10,7 +10,6 @@ import zlib
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from threading import BrokenBarrierError
 from unittest.mock import patch
 
 import app
@@ -107,6 +106,7 @@ def _post_in_subprocess(
     start_event,
     result_queue,
     completed_event=None,
+    ready_event=None,
 ):
     app.DB_PATH = Path(db_path)
     app.app.config["WRITE_LOCK_PATH"] = str(write_lock_path)
@@ -115,6 +115,8 @@ def _post_in_subprocess(
         session["admin_logged_in"] = True
         session["admin_username"] = "admin"
         session["admin_role"] = "admin"
+    if ready_event is not None:
+        ready_event.set()
     start_event.wait(10)
     try:
         response = client.post(route, data=data)
@@ -1870,28 +1872,27 @@ class AssemblySaveTests(AssemblyAppTestCase):
         self.assertEqual(result_queue.get(timeout=2), "acquired")
 
     def test_two_workers_with_same_token_serialize_then_return_201_and_409(self):
+        self._assert_concurrent_save_replays_once(operation_token=None)
+
+    def test_two_workers_with_same_operation_token_return_identical_201_receipt(self):
+        self._assert_concurrent_save_replays_once(operation_token="process-replay")
+
+    def _assert_concurrent_save_replays_once(self, operation_token):
         manual_id = self.create_product("P-CONCURRENT", "客户A")
         self.configure_component(manual_id)
         order_id = self.create_order(manual_id, "SO-CONCURRENT", 100)
         self.stock_product(manual_id, 100)
         preview = self.post_preview().get_json()
         save_data = self.save_data(preview)
+        if operation_token is not None:
+            save_data["operation_token"] = operation_token
         context = multiprocessing.get_context("fork")
         start_event = context.Event()
         result_queue = context.Queue()
-        barrier = context.Barrier(2)
-        original_save = app.save_assembly_shipment
-
-        def synchronized_save(*args, **kwargs):
-            try:
-                barrier.wait(timeout=1)
-            except BrokenBarrierError:
-                pass
-            return original_save(*args, **kwargs)
-
+        ready_events = [context.Event(), context.Event()]
         processes = []
-        with patch.object(app, "save_assembly_shipment", side_effect=synchronized_save):
-            for _ in range(2):
+        try:
+            for ready_event in ready_events:
                 process = context.Process(
                     target=_post_in_subprocess,
                     args=(
@@ -1901,22 +1902,43 @@ class AssemblySaveTests(AssemblyAppTestCase):
                         save_data,
                         start_event,
                         result_queue,
+                        None,
+                        ready_event,
                     ),
                 )
                 process.start()
                 processes.append(process)
+            # Synchronize before the HTTP write lock. A barrier inside save
+            # cannot be reached by the second serialized writer.
+            self.assertTrue(all(event.wait(5) for event in ready_events))
+            start_event.set()
+            # Drain before join: a full 409 preview can exceed the OS pipe
+            # buffer, and multiprocessing waits for its feeder on child exit.
+            results = [result_queue.get(timeout=10) for _ in processes]
+            for process in processes:
+                process.join(5)
+            self.assertTrue(all(process.exitcode == 0 for process in processes),
+                            [(process.pid, process.exitcode) for process in processes])
+        finally:
             start_event.set()
             for process in processes:
-                process.join(10)
                 if process.is_alive():
                     process.terminate()
                     process.join(5)
+            result_queue.close()
+            result_queue.join_thread()
 
-        self.assertTrue(all(not process.is_alive() for process in processes))
-        self.assertTrue(all(process.exitcode == 0 for process in processes))
-        results = [result_queue.get(timeout=2) for _ in processes]
-        self.assertEqual(sorted(result[0] for result in results), [201, 409])
+        if operation_token is None:
+            self.assertEqual(sorted(result[0] for result in results), [201, 409])
+            conflict = next(body for status, body in results if status == 409)
+            self.assertIn("preview", conflict)
+            self.assertNotEqual(conflict["preview"]["preview_token"], preview["preview_token"])
+        else:
+            self.assertEqual([result[0] for result in results], [201, 201])
+            self.assertEqual(results[0][1], results[1][1])
         with app.get_db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM delivery_operations").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM delivery_notes").fetchone()[0], 1)
             self.assertEqual(
                 conn.execute("SELECT COUNT(*) FROM assembly_shipment_batches").fetchone()[0],
                 1,
