@@ -1,5 +1,7 @@
 # Task 5 report: purchase order exports
 
+The initial implementation record below is historical. The **Review fix round 1** section at the end supersedes its column, PDF splitting, amount precision, test-count and final-QA claims.
+
 ## Result and scope
 
 Implemented and committed as `cfe2c63f502d692adadfc993df1179e5ba96c3bd` (`feat: export purchase orders`). Work was confined to `/Users/derek/Documents/jiede-web/.worktrees/unified-procurement`; QA artifacts are outside Git. No deployment, dependency additions, main-workspace source changes, or subagents.
@@ -107,3 +109,61 @@ Final visual conclusion: centered title/order number, complete Chinese text, cle
 - XLSX page count can vary with the recipient's installed CJK font and spreadsheet application's font substitution. Verified locally with Arial Unicode MS and bundled LibreOffice. PDF font discovery retains a registered STSong-Light CJK fallback on hosts without a loadable TTF; target VPS/browser-specific rendering remains part of eventual deployment acceptance, not performed here.
 - Company footer is intentionally current profile data, not a historical snapshot, per Controller ruling. Supplier and delivery remain immutable saved snapshots.
 - No application schema, inventory behavior, migration, deployment, or financial workflow was changed.
+
+## Review fix round 1
+
+Addressed all four Important findings and the three requested Minor improvements. Scope remained the isolated worktree; no dependencies, deployment, subagents or repeated skill markers. Receiving-code-review, TDD, systematic-debugging, verification-before-completion, Spreadsheet and PDF skills guided regression-first changes and the reopened/rendered visual checks.
+
+### Changes and RED evidence
+
+- Raw-material and carton column definitions now omit unit even when a saved item supplies one. Exact-column tests failed first on the extra 单位 column. Outsourcing/other retain the optional unit contract.
+- Reproduced the 4,000-character remark failure: page 7 had nine table headers and later pages could contain only a header. PDF cells are now pre-split into bounded continuation paragraphs; the table uses row-only splitting (`splitInRow=0`) and `repeatRows=1`. The regression asserts at most one header per page, actual remark content on every detail page, all 999 repetitions plus the ending marker, and the complete delivery/company block at the end.
+- Excel precision RED used a legal item: unit minor amount `4294967298`, quantity `2147483647`, line minor amount `9223372036854775806`. The old workbook reread the line as `9.223372036854776e16`, and a 500-line total as `4.611686018427388e19`, losing minor units. Now amounts that survive a 15-significant-digit numeric round-trip remain numeric; all others become exact formatted RMB text. Tests require line/total `¥92,233,720,368,547,758.06` and 500-line total `¥46,116,860,184,273,879,030.00`. The safe unit price remains numeric `42949672.98`.
+- Shared text sanitization normalizes CR/LF, turns tabs into readable spaces, and replaces control/surrogate/noncharacter code points with spaces before either renderer. Builder RED reproduced openpyxl `IllegalCharacterError`; route regression persists controls in SQLite and requires both formats to return 200 with readable Chinese words preserved. User text still cannot become Excel formulas or ReportLab markup.
+- Added worksheet vertical separators and joined delivery address/recipient into one printable row, backed by a failing border/delivery-pair test. Scoped export responses now receive `private, no-store` even for 404 (including non-integer IDs) and 409; error-cache tests failed first.
+- Visual QA found a second amount-layout issue after precision was fixed: the legal safe unit price displayed `###`, and the exact total wrapped its final digit onto a separate line. A width-contract test failed (`14.0606 < 17`), then money columns were sized for formatted values and the total received a wider merged amount span. Final rerender shows the full single-line values without hashes or missing digits.
+
+Initial focused revision RED: 21 tests, 12 failed subtest assertions and 2 errors, captured in `/private/tmp/jiede-procurement-task5-qa/fix1-red.log`. Subsequent legal-boundary and visual-width RED checks were run before their respective fixes. Final focused GREEN: 29 tests in 2.232 seconds, no skips (`tests.test_purchase_order_exports` plus `tests.test_procurement_permissions`); log `fix1-focused.log`.
+
+### Revised verification and commit
+
+Fix commit: `2bddfb4` (`fix: harden purchase order document exports`). Changed production/test files: `procurement_documents.py`, `app.py`, `tests/test_purchase_order_exports.py`. No template or dependency changes in this fix round.
+
+After final visual QA, ran the full Python suite **once in this review round**:
+
+```text
+PATH="/Users/derek/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/poppler/bin:$PATH" .venv/bin/python -m unittest discover -s tests -v
+Ran 639 tests in 60.764s
+OK (skipped=1)
+```
+
+638 passed. The sole skip is the same pre-existing real-browser shipping color test requiring `JIEDE_BROWSER_TESTS=1`; all export tests executed. Full log: `/private/tmp/jiede-procurement-task5-qa/fix1-full-suite.log`. Existing datetime deprecation warnings are unchanged. Reviewed the complete diff; `git diff --check` and `git diff --cached --check` passed before the fix commit. Only this report remains for the separate documentation commit.
+
+### Revised artifact and visual QA
+
+Temporary generator `generate_fix1.py` produced the following final files under `/private/tmp/jiede-procurement-task5-qa/`. Every listed PDF page was rendered using `pdftoppm`; every PNG was actually opened with `view_image`. XLSX files were first reopened with openpyxl, then converted with the existing headless `soffice` and the QA-only fontconfig described above.
+
+| Final sample basename | Direct PDF pages viewed | XLSX-rendered pages viewed |
+| --- | ---: | ---: |
+| `fix1-raw_material-hidden` | 1 | 1 |
+| `fix1-carton-priced` | 1 | 1 |
+| `fix1-outsourcing-priced` | 1 | 1 |
+| `fix1-other-priced` | 1–4 | 1–5 |
+| `fix1-other-hidden` | 1–4 | 1–4 |
+| `fix1-huge-money` | 1 | 1 |
+| `fix1-controls` | 1 | 1 |
+| `fix1-long-remark-hidden` | 01–10 | not generated (PDF pagination regression) |
+| `fix1-long-remark-priced` | 01–12 | not generated (PDF pagination regression) |
+
+There are 35 direct-PDF PNGs and 14 XLSX-rendered PNGs, **49 final pages viewed**. Files use `<basename>.pdf` / `.xlsx`, `xlsx-rendered/<basename>.pdf`, and `<basename>-pdf-<page>.png` / `-xlsx-<page>.png`; the two extreme PDF filenames use zero-padded page numbers. QA generation/reopen/header-count evidence is in `fix1-qa.log`.
+
+Reopened XLSX checks confirm typed purchase date `2026-09-09`, numeric ordinary money, exact-text unsafe money, leading-zero snapshot codes, landscape A4, one-page width/unlimited height and repeated headings. Updated print areas/header rows: raw `A1:H17`/8, carton `A1:I19`/9, outsourcing `A1:I19`/9, priced other `A1:H49`/9, hidden other `A1:F47`/8, huge money `A1:H18`/9, controls `A1:F16`/8.
+
+Final visual conclusion: Chinese and the sanitized readable separators render correctly; raw/carton have no unit; amount digits are complete; no clipping, overlap, duplicate headers within a page, header-only direct-PDF pages, or page-number/footer collisions. Excel's delivery address and recipient now stay together in the representative long order, and vertical rules visibly distinguish neighboring columns. The original 4,000-character test checked only overall text retention and missed per-page header defects; this round explicitly tests and visually checks those page-level conditions.
+
+### Remaining presentation tradeoffs
+
+- Conservative continuation rows preserve all 4,000 remark characters but produce 10 hidden-price pages or 12 priced pages in this deliberately extreme sample, with unused cells/whitespace to the left of continued remarks. The hidden-price PDF's last page contains the complete delivery/company block and no table header; it is not an empty/header-only page.
+- Ordinary PDF delivery/company blocks stay together, so a final contact-only page can occur. XLSX print titles still repeat on a final page containing totals/contact information; the workbook-wide repeating-header contract was retained. Extremely long delivery fields can still continue across rows/pages, rather than being clipped.
+- Unsafe large monetary cells intentionally become exact RMB text, so spreadsheet consumers must not assume every monetary cell is arithmetic-ready numeric data. This is the Controller's precision ruling, not an accidental type conversion.
+- QA uses local CJK fonts and existing LibreOffice/Poppler only; no Node or renderer executable is required by the VPS application. The prior font-substitution/deployment limitations still apply.
