@@ -85,6 +85,12 @@ function appendAssemblyCell(row, label, value) {
 }
 
 function renderAssemblyPreview(form, preview) {
+  const active = document.activeElement;
+  const selection = active?.matches("[data-assembly-item-remark]") && form.contains(active)
+    ? {manualId: active.dataset.manualId, start: active.selectionStart,
+      end: active.selectionEnd, direction: active.selectionDirection}
+    : null;
+  let activeRemark = null;
   const rows = preview.items.map((item) => {
     const row = document.createElement("tr");
     row.className = "assembly-preview-item";
@@ -128,6 +134,7 @@ function renderAssemblyPreview(form, preview) {
     remark.readOnly = form.dataset.assemblyFinanceClaimed === "1";
     remark.dataset.assemblyItemRemark = "";
     remark.dataset.manualId = String(item.manual_id);
+    if (selection?.manualId === remark.dataset.manualId) activeRemark = remark;
     remark.setAttribute("aria-label", `${item.drawing_no || "配件"} 本行备注`);
     remarkCell.appendChild(remark);
     row.appendChild(remarkCell);
@@ -151,12 +158,18 @@ function renderAssemblyPreview(form, preview) {
     remove.textContent = "删除";
     remove.dataset.assemblyRemoveItem = String(item.manual_id);
     remove.disabled = form.dataset.assemblyFinanceClaimed === "1";
-    remove.addEventListener("click", () => form._assemblyRemoveItem?.(String(item.manual_id)));
+    remove.addEventListener("click", () => {
+      if (form._assemblyRemoveItem?.(String(item.manual_id))) row.remove();
+    });
     actions.appendChild(remove);
     row.appendChild(actions);
     return row;
   });
   form.querySelector("[data-assembly-preview]").replaceChildren(...rows);
+  if (activeRemark) {
+    activeRemark.focus({preventScroll: true});
+    activeRemark.setSelectionRange(selection.start, selection.end, selection.direction);
+  }
   form._assemblyOverrides = Object.fromEntries(
     preview.items.map((item) => [String(item.manual_id), String(item.shipped_quantity)])
   );
@@ -240,6 +253,7 @@ function initializeAssemblyShipmentForm(form) {
   let optionsGeneration = 0;
   let previewPending = false;
   let submitPending = false;
+  let composingRemark = null;
   let optionsController = null;
   let previewController = null;
   let candidateController = null;
@@ -281,6 +295,7 @@ function initializeAssemblyShipmentForm(form) {
   };
 
   const refreshPreview = async (generation = cancelPreview()) => {
+    if (composingRemark) return;
     const customerValue = customer.value.trim();
     const drawingValue = drawing.value.trim();
     const setValue = sets.value.trim();
@@ -300,7 +315,7 @@ function initializeAssemblyShipmentForm(form) {
     setAssemblyStatus(form, "正在更新组装发货预览…");
     try {
       const preview = await requestAssemblyPreview(form, controller.signal);
-      if (generation !== previewGeneration || controller !== previewController) return;
+      if (generation !== previewGeneration || controller !== previewController || composingRemark) return;
       form._assemblyPreview = preview;
       renderAssemblyPreview(form, preview);
       setAssemblyStatus(form, preview.warnings.length ? "请核对下方警告后保存。" : "预览已更新，可以保存。");
@@ -324,6 +339,10 @@ function initializeAssemblyShipmentForm(form) {
     form._assemblyPreview = null;
     submitButton.disabled = true;
     renderAssemblyWarnings(form.querySelector("[data-assembly-warning-summary]"), []);
+    if (composingRemark) {
+      setAssemblyStatus(form, "正在输入备注，完成后更新预览…");
+      return;
+    }
     setAssemblyStatus(form, "正在等待输入完成后更新预览…");
     previewTimer = window.setTimeout(() => refreshPreview(generation), 300);
   };
@@ -333,7 +352,10 @@ function initializeAssemblyShipmentForm(form) {
     form._assemblySelectedIds = (form._assemblySelectedIds || []).filter((id) => id !== manualId);
     delete form._assemblyOverrides[manualId];
     delete form._assemblyRemarks[manualId];
+    form._assemblyItems = (form._assemblyItems || []).filter((item) => String(item.manual_id) !== manualId);
+    if (composingRemark?.dataset.manualId === manualId) composingRemark = null;
     schedulePreview();
+    return true;
   };
 
   form.querySelector("[data-assembly-recalculate]")?.addEventListener("click", () => {
@@ -413,6 +435,7 @@ function initializeAssemblyShipmentForm(form) {
     form._assemblyItems = [];
     form._assemblyOverrides = {};
     form._assemblyRemarks = {};
+    composingRemark = null;
     clearAssemblyPreview(form, "已重置本次删减和追加，正在加载该客户的组装件图号…");
     populateAssemblyDrawings(form, []);
     const selectedCustomer = customer.value.trim();
@@ -437,11 +460,24 @@ function initializeAssemblyShipmentForm(form) {
     form._assemblyItems = [];
     form._assemblyOverrides = {};
     form._assemblyRemarks = {};
+    composingRemark = null;
     clearAssemblyPreview(form);
     schedulePreview();
     setAssemblyStatus(form, "已重置本次删减和追加，正在按组装件配置预览…");
   });
   sets.addEventListener("input", schedulePreview);
+  form.addEventListener("compositionstart", (event) => {
+    if (!event.target.matches("[data-assembly-item-remark]") || locked || submitPending) return;
+    composingRemark = event.target;
+    schedulePreview(); // Cancel any debounce/in-flight preview before the IME edits the node.
+  });
+  form.addEventListener("compositionend", (event) => {
+    if (event.target !== composingRemark) return;
+    composingRemark = null;
+    if (!form._assemblySelectedIds?.includes(event.target.dataset.manualId)) return;
+    form._assemblyRemarks[event.target.dataset.manualId] = event.target.value;
+    schedulePreview();
+  });
   form.addEventListener("input", (event) => {
     const isQuantity = event.target.matches("[data-assembly-item-quantity]");
     const isRemark = event.target.matches("[data-assembly-item-remark]");
@@ -449,11 +485,12 @@ function initializeAssemblyShipmentForm(form) {
     if (locked || submitPending || !form._assemblySelectedIds?.includes(event.target.dataset.manualId)) return;
     const values = isQuantity ? form._assemblyOverrides : form._assemblyRemarks;
     values[event.target.dataset.manualId] = event.target.value;
+    if (isRemark && event.isComposing) composingRemark = event.target;
     schedulePreview();
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (submitPending || previewPending) return;
+    if (submitPending || previewPending || composingRemark) return;
     const preview = form._assemblyPreview;
     if (!preview) {
       await refreshPreview(cancelPreview());

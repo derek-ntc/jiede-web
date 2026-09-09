@@ -11,6 +11,22 @@ import app
 from tests.test_assembly_shipping import AssemblyTask7TestCase, VALID_PNG_BYTES
 
 
+class AssemblyShipmentBrowserRegressionTests(unittest.TestCase):
+    def run_scenario(self, scenario):
+        result = subprocess.run(['node', 'tests/assembly_shipping_ui.cjs', scenario],
+                                cwd=Path(app.__file__).parent, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_deleting_last_positive_line_renders_only_remaining_zero_rows(self):
+        self.run_scenario('deletion')
+
+    def test_remark_preview_preserves_active_focus_and_selection(self):
+        self.run_scenario('focus')
+
+    def test_remark_composition_defers_preview_and_keeps_final_text(self):
+        self.run_scenario('composition')
+
+
 class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
     def setUp(self):
         self.files = tempfile.TemporaryDirectory()
@@ -335,9 +351,10 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
             constructor(value='') { this.value=value; this.dataset={}; this.children=[]; this.listeners={}; this.classList={toggle(){},add(){}}; }
             addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
             async emit(type, event={target:this, preventDefault(){}}) { for (const fn of this.listeners[type] || []) await fn(event); }
-            append(...items) { this.children.push(...items); }
+            append(...items) { for (const item of items) { item.parent=this; this.children.push(item); } }
             appendChild(item) { this.append(item); return item; }
-            replaceChildren(...items) { this.children=items; }
+            replaceChildren(...items) { this.children=[]; this.append(...items); }
+            remove() { this.parent.children=this.parent.children.filter(item=>item!==this); }
             setAttribute(name,value) { this[name]=value; }
             matches(selector) { return (selector === '[data-assembly-item-quantity]' && this.dataset.assemblyItemQuantity !== undefined) || (selector === '[data-assembly-item-remark]' && this.dataset.assemblyItemRemark !== undefined); }
             set innerHTML(value) { throw Error('Untrusted HTML insertion'); }
