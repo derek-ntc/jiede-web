@@ -178,3 +178,30 @@ Evidence under `/private/tmp/jiede-procurement-task6-qa/`: `fix2-red.log`, `fix2
 Persisted CLI QA used only synthetic `valid.db` and temporary `fix2.env`, whose lock setting pointed to pre-created `fix1-report.lock` while the shell pointed to missing `fix2-shell-missing.lock`. The CLI selected the dotenv lock, succeeded, and left the incorrect shell lock nonexistent. `fix2-locked-report.json` is byte-identical to `valid-report.json`; `fix2-locked-report.stderr` contains only lock acquisition diagnostics, with no unrelated synthetic dotenv value. Database and lock SHA-256/mtime remain exactly the values in the round-1 table above (`valid.db`: `974dc3b5…`, `1788968068698495263`; lock: `14e98e71…`, `1788969602228878356`). Existing totals remain 4 migrated orders, 14 supplier links, 8 supplier conflicts, 1 attachment, and 1 deferred arrival row.
 
 Operational boundary: use the same deployed project dotenv file for online CLI and application, or deliberately select their exact existing lock with `--lock-path`. No deployment/configuration-file edits were performed by this task.
+
+## Review fix round 3 — cwd-independent configured lock identity
+
+Fix implementation commit: `a324822367904b63580ba28510653bda1a0dc9e7` (`fix: anchor configured write locks to project root`). Read the task brief, this report, the `review-630413d..9f66839.diff` package, and the controller-relayed Important finding before changing code. The receiving-code-review, TDD, and verification-before-completion skills guided reproduction and the minimal correction. Scope remained the designated worktree and synthetic temporary fixtures; no real `.env`, production database, default lock contents, deployment, push, or subagent was used.
+
+### Exact relative-path contract
+
+- Precedence remains explicit `--lock-path` → dotenv lock value → shell lock value → default.
+- **Non-explicit relative lock values** from dotenv, shell, or a future relative default are anchored to the application project root. An alternate `--env-file` does not change that anchor; its own relative filename still follows ordinary CLI current-directory semantics.
+- **Explicit `--lock-path` relative values** are anchored to the CLI caller's current working directory, matching an operator's normal interpretation of a supplied filename. They still override all dotenv/shell configuration.
+- **All returned paths** are absolute and canonicalized with `Path.resolve()`, resolving `..` and existing symlinks. Already-absolute values keep their target. The current absolute default `/tmp/jiede-web-write.lock` resolves to the same target (for example `/private/tmp/...` on macOS), not a different lock inode.
+- The only executable production change is the resolver's final relative-path anchoring and canonicalization. Dotenv precedence/interpolation, other application configuration values, environment non-mutation, CLI no-app-import behavior, and lock/database open modes are unchanged. CLI help and the resolver docstring state the contract. Resolution and reporting do not create or modify lock files.
+
+### TDD and verification
+
+Added three regression tests before changing production behavior and updated existing absolute-path expectations to the canonical-path contract. **RED: 8 configuration tests ran with 5 failed assertions** (including two cwd cases in one test). Most importantly, with the project's `write.lock` held, the old CLI launched by absolute script path from a second cwd opened that directory's same-named decoy lock and completed immediately: the expected blocking timeout did not occur. Shell paths remained unanchored, explicit paths remained noncanonical, and the default retained its symlink spelling.
+
+**GREEN: 8/8 configuration tests in 1.429 seconds.** A temporary copied app starts from the temporary project root and a copied actual CLI starts from a different cwd. Both now select the project's same absolute lock, and the CLI waits until that lock is released despite a valid decoy lock in its cwd. Database, dotenv, project lock, and decoy lock bytes, nanosecond mtimes, and inodes are unchanged. The shell-path test exercises two cwd values plus a symlinked project root and `state/../write.lock`; both return the same canonical path without importing `app`, mutating the environment, or creating files. Explicit `sub/../local.lock` uses the caller's directory, completes while the dotenv lock is held, preserves file bytes/mtime, and an explicit missing lock fails without creation.
+
+Final requested focused verification:
+
+- Phase 1 plus configuration suite: **108 tests in 8.293 seconds, all passed, no skips**, using the bundled Poppler PATH. This includes the existing real subprocess `nolock` writer/report snapshot regression, permissions, orders, exports, schema, suppliers, migration, and startup tests.
+- Node purchase-order tests: **5/5 passed**, no skips.
+- `git diff --check` and staged diff check passed; all three changed code/test files were self-reviewed. No unrelated changes were included.
+- This narrow round requested focused verification only; the full-suite result in round 2 belongs to that earlier revision and is not claimed as a fresh full run of round 3.
+
+Logs: `/private/tmp/jiede-procurement-task6-qa/fix3-red.log`, `fix3-green.log`, `fix3-focused.log`, and `fix3-node.log`. Changed files: `runtime_config.py`, `scripts/report_procurement_migration.py`, and `tests/test_runtime_config.py`.
