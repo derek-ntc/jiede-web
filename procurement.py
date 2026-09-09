@@ -2,8 +2,9 @@
 
 import re
 import math
+import json
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from pricing import line_total_minor, parse_money_minor
@@ -427,6 +428,10 @@ def _upgrade_purchase_order_items_integer_storage(conn):
         )
         conn.execute("DROP TRIGGER IF EXISTS trg_purchase_orders_restrict_item_id_update")
         conn.execute("DROP TRIGGER IF EXISTS trg_purchase_orders_cascade_items_delete")
+        # Cross-table triggers cannot refer to the temporarily absent item table.
+        # ensure_procurement_tables recreates these after the atomic rebuild.
+        conn.execute("DROP TRIGGER IF EXISTS trg_legacy_attachment_insert")
+        conn.execute("DROP TRIGGER IF EXISTS trg_legacy_attachment_update")
         conn.execute("DROP TABLE purchase_order_items")
         conn.execute(
             "ALTER TABLE purchase_order_items_rebuild RENAME TO purchase_order_items"
@@ -526,6 +531,75 @@ def ensure_procurement_tables(conn) -> None:
     _create_purchase_order_items_table(conn, "purchase_order_items", if_not_exists=True)
     if _purchase_order_items_requires_integer_upgrade(conn):
         _upgrade_purchase_order_items_integer_storage(conn)
+    # Mark system-owned suppliers explicitly; a matching display name/code is not
+    # proof that an existing business supplier may be repurposed by migration.
+    for table, column, definition in (
+        ("suppliers", "system_kind", "TEXT NOT NULL DEFAULT ''"),
+        ("purchase_orders", "legacy_metadata", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS procurement_migration_conflicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            legacy_source TEXT NOT NULL, legacy_id INTEGER NOT NULL,
+            entity TEXT NOT NULL, name TEXT NOT NULL, field TEXT NOT NULL,
+            kept_value TEXT NOT NULL, incoming_value TEXT NOT NULL,
+            reason TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE (legacy_source, legacy_id, entity, name, field, kept_value, incoming_value, reason)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_order_legacy_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+            purchase_order_item_id INTEGER NOT NULL REFERENCES purchase_order_items(id),
+            legacy_source TEXT NOT NULL, legacy_id INTEGER NOT NULL,
+            stored_filename TEXT NOT NULL, original_filename TEXT NOT NULL,
+            UNIQUE (legacy_source, legacy_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_legacy_unknown_supplier_identity
+        BEFORE UPDATE ON suppliers
+        WHEN OLD.system_kind='legacy_unknown' AND (
+            NEW.active<>0 OR NEW.code<>OLD.code OR NEW.name<>OLD.name
+            OR NEW.system_kind<>OLD.system_kind OR NEW.id<>OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'historical system supplier is read-only'); END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_legacy_unknown_supplier_delete
+        BEFORE DELETE ON suppliers WHEN OLD.system_kind='legacy_unknown'
+        BEGIN SELECT RAISE(ABORT, 'historical system supplier is read-only'); END
+    """)
+    # Production SQLite uses nolock connections with foreign_keys disabled.
+    # Preserve attachment relationships there as well as on FK-enabled fixtures.
+    for event in ("INSERT", "UPDATE"):
+        conn.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_legacy_attachment_{event.lower()}
+            BEFORE {event} ON purchase_order_legacy_attachments
+            WHEN NOT EXISTS (
+                SELECT 1 FROM purchase_order_items i JOIN purchase_orders o ON o.id=i.purchase_order_id
+                WHERE i.id=NEW.purchase_order_item_id AND o.id=NEW.purchase_order_id
+                  AND i.legacy_source=NEW.legacy_source AND i.legacy_id=NEW.legacy_id
+                  AND o.legacy_source=NEW.legacy_source AND o.legacy_id=NEW.legacy_id)
+            BEGIN SELECT RAISE(ABORT, 'legacy attachment source/order/item mismatch'); END
+        """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_legacy_attachment_restrict_item_delete
+        BEFORE DELETE ON purchase_order_items
+        WHEN EXISTS (SELECT 1 FROM purchase_order_legacy_attachments WHERE purchase_order_item_id=OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'purchase item has historical attachments'); END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_legacy_attachment_restrict_item_identity
+        BEFORE UPDATE ON purchase_order_items
+        WHEN (NEW.id<>OLD.id OR NEW.purchase_order_id<>OLD.purchase_order_id
+              OR NEW.legacy_source IS NOT OLD.legacy_source OR NEW.legacy_id IS NOT OLD.legacy_id)
+             AND EXISTS (SELECT 1 FROM purchase_order_legacy_attachments WHERE purchase_order_item_id=OLD.id)
+        BEGIN SELECT RAISE(ABORT, 'purchase item has historical attachments'); END
+    """)
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_suppliers_active_name ON suppliers (active, name)"
@@ -682,3 +756,249 @@ def ensure_procurement_tables(conn) -> None:
         END
         """
     )
+
+
+# Table names and field names below are fixed in code, never supplied by input.
+_LEGACY_SUPPLIER_SOURCES = (
+    "carton_suppliers", "arrival_suppliers", "powder_coating_suppliers",
+    "carton_products", "carton_purchases", "arrival_records",
+    "powder_coating_products", "powder_coating_records", "purchase_followups",
+)
+_LEGACY_ORDER_SOURCES = ("carton_purchases", "purchase_followups")
+_UNKNOWN_CODE = "LEGACY-UNKNOWN"
+_UNKNOWN_NAME = "历史未指定供应商"
+_SUPPLIER_MERGE_FIELDS = ("contact", "phone", "email", "address", "remark")
+
+
+def _legacy_rows(conn, source):
+    if source not in _LEGACY_SUPPLIER_SOURCES:
+        raise ValueError("Unknown legacy source")
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (source,)).fetchone() is None:
+        return []
+    cursor = conn.execute(f"SELECT * FROM {source} ORDER BY id")
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor]
+
+
+def _migration_conflict(conn, source, identifier, entity, name, field, kept, incoming, reason, now):
+    conn.execute("""
+        INSERT INTO procurement_migration_conflicts
+            (legacy_source,legacy_id,entity,name,field,kept_value,incoming_value,reason,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (legacy_source,legacy_id,entity,name,field,kept_value,incoming_value,reason) DO NOTHING
+    """, (source, identifier, entity, name, field, str(kept), str(incoming), reason, now, now))
+
+
+def _legacy_text(row, field):
+    value = row.get(field)
+    return str(value if value is not None else "").strip()
+
+
+def _unknown_supplier(conn, source, row, now):
+    candidates = [r for r in conn.execute("SELECT * FROM suppliers ORDER BY id")
+                  if r["code"] == _UNKNOWN_CODE or r["name"].strip() == _UNKNOWN_NAME]
+    if candidates:
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            if candidate["system_kind"] == "legacy_unknown" and candidate["code"] == _UNKNOWN_CODE and candidate["name"] == _UNKNOWN_NAME and candidate["active"] == 0:
+                return candidate["id"]
+        _migration_conflict(conn, source, row["id"], "supplier", _UNKNOWN_NAME, "identity", ",".join(str(r["id"]) for r in candidates), _UNKNOWN_CODE, "blocking_unknown_collision", now)
+        return None
+    return conn.execute("""
+        INSERT INTO suppliers (code,name,active,system_kind,created_at,updated_at)
+        VALUES (?,?,0,'legacy_unknown',?,?)
+    """, (_UNKNOWN_CODE, _UNKNOWN_NAME, now, now)).lastrowid
+
+
+def _migrate_legacy_supplier(conn, source, row, now):
+    existing_link = conn.execute("SELECT supplier_id FROM supplier_legacy_links WHERE legacy_source=? AND legacy_id=?", (source, row["id"])).fetchone()
+    if existing_link is not None:
+        return existing_link[0]
+    master = source.endswith("_suppliers")
+    name = _legacy_text(row, "name" if master else "supplier_name")
+    if not name:
+        supplier_id = _unknown_supplier(conn, source, row, now)
+        if supplier_id is None:
+            return None
+    else:
+        supplier = next((r for r in conn.execute("SELECT * FROM suppliers ORDER BY id")
+                         if r["name"].strip() == name), None)
+        if supplier is None:
+            supplier_id = conn.execute("INSERT INTO suppliers (code,name,created_at,updated_at) VALUES (?,?,?,?)", (next_supplier_code(conn), name, now, now)).lastrowid
+            supplier = conn.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+        supplier_id = supplier["id"]
+        # Business-record remarks describe the purchase, not the supplier.
+        if master:
+            for field in _SUPPLIER_MERGE_FIELDS:
+                incoming = _legacy_text(row, field)
+                kept = str(supplier[field] or "")
+                if incoming and not kept.strip():
+                    conn.execute(f"UPDATE suppliers SET {field}=?,updated_at=? WHERE id=?", (incoming, now, supplier_id))
+                elif incoming and incoming != kept.strip():
+                    _migration_conflict(conn, source, row["id"], "supplier", name, field, kept, incoming, "different_nonempty_value", now)
+    conn.execute("INSERT INTO supplier_legacy_links (supplier_id,legacy_source,legacy_id) VALUES (?,?,?)", (supplier_id, source, row["id"]))
+    return supplier_id
+
+
+def _legacy_order_payload(source, row, now):
+    """Validate historical values without filling bad data with plausible values."""
+    quantity = parse_purchase_quantity(row.get("quantity"))
+    carton = source == "carton_purchases"
+    recorded = _legacy_text(row, "recorded_at")
+    created = _legacy_text(row, "created_at")
+    if recorded:
+        _purchase_date(recorded)
+    if created:
+        _purchase_date(created[:10])
+        try:
+            datetime.fromisoformat(created)
+        except ValueError as error:
+            raise ValueError("历史创建时间无效") from error
+    purchased = _legacy_text(row, "ordered_at" if carton else "purchased_at")
+    if purchased:
+        purchased = _purchase_date(purchased)
+        status = "ordered"
+    else:
+        status = "draft"
+        # Explicit malformed dates are conflicts; only absent dates fall back.
+        if recorded:
+            purchased = _purchase_date(recorded)
+        elif created:
+            purchased = _purchase_date(created[:10])
+        else:
+            purchased = _purchase_date(now[:10])
+    received = _legacy_text(row, "received_at") if carton else ""
+    expected = _purchase_date(received) if received else purchased
+    price = parse_money_minor(_legacy_text(row, "unit_price"), "CNY") if carton else None
+    item = {field: "" for field in _ITEM_TEXT_FIELDS}
+    item.update({field: None for field in _DIMENSION_FIELDS})
+    item.update(item_name=_legacy_text(row, "print_mark" if carton else "item_name"),
+                ordered_quantity=quantity, unit_price_minor=price,
+                line_total_minor=line_total_minor(price, quantity), expected_at=expected,
+                remark=_legacy_text(row, "remark"), unit="个" if carton else "")
+    if carton:
+        item.update(material=_legacy_text(row, "board_type"), dimension_text=_legacy_text(row, "carton_size"))
+        for field in ("length", "width", "height"):
+            value = row.get(f"carton_{field}")
+            # Zero is the legacy schema's explicit 'not recorded' default.
+            item[field] = None if value in (None, "", 0, "0", "0.0") else _purchase_dimension(value)
+    metadata = {field: row.get(field, "") for field in ("recorded_at", "purchased_at", "ordered_at", "received_at", "completed", "purchased")}
+    metadata["expected_at_derived"] = not bool(received)
+    return dict(category="carton" if carton else "other", purchased_at=purchased, status=status,
+                legacy_metadata=json.dumps(metadata, ensure_ascii=False, sort_keys=True)), item
+
+
+def migrate_legacy_procurement(conn, now: str) -> dict[str, object]:
+    """Backfill Phase 1 under a savepoint; never commit the caller's transaction.
+
+    Call only after ensure_procurement_tables and legacy schema initialization.
+    Data-validation errors are recorded per source row. SQL/programming errors
+    escape and roll back all migration work, including suppliers and conflicts.
+    """
+    _purchase_date(now[:10])
+    orders_created = 0
+    with _purchase_transaction(conn):
+        sources = {source: _legacy_rows(conn, source) for source in _LEGACY_SUPPLIER_SOURCES}
+        for source, rows in sources.items():
+            for row in rows:
+                _migrate_legacy_supplier(conn, source, row, now)
+        for source in _LEGACY_ORDER_SOURCES:
+            for row in sources[source]:
+                if conn.execute("SELECT 1 FROM purchase_orders WHERE legacy_source=? AND legacy_id=?", (source, row["id"])).fetchone():
+                    continue
+                try:
+                    header, item = _legacy_order_payload(source, row, now)
+                except ValueError as error:
+                    # Textual serialization also preserves NaN/Infinity diagnostics
+                    # without emitting non-standard JSON numeric tokens.
+                    incoming = json.dumps({key: None if value is None else str(value) for key, value in row.items()}, ensure_ascii=False, sort_keys=True)
+                    _migration_conflict(conn, source, row["id"], "order", _legacy_text(row, "print_mark" if source == "carton_purchases" else "item_name"), "row", "", incoming, str(error), now)
+                    continue
+                supplier = conn.execute("SELECT s.* FROM suppliers s JOIN supplier_legacy_links l ON l.supplier_id=s.id WHERE l.legacy_source=? AND l.legacy_id=?", (source, row["id"])).fetchone()
+                if supplier is None:
+                    continue  # Explicitly recorded blocking unknown-supplier conflict.
+                header.update(supplier_snapshot(supplier))
+                header.update(supplier_id=supplier["id"], order_no=f"LEGACY-{'CARTON' if source == 'carton_purchases' else 'OTHER'}-{row['id']}",
+                              delivery_address="", recipient="", recipient_phone="", remark=_legacy_text(row, "remark"),
+                              currency="CNY", legacy_source=source, legacy_id=row["id"],
+                              created_by=_legacy_text(row, "recorded_by"), updated_by=_legacy_text(row, "recorded_by"),
+                              created_at=_legacy_text(row, "created_at") or now, updated_at=_legacy_text(row, "updated_at") or now)
+                order_id = conn.execute(f"INSERT INTO purchase_orders ({','.join(header)}) VALUES ({','.join('?' for _ in header)})", tuple(header.values())).lastrowid
+                item.update(purchase_order_id=order_id, sort_order=0, legacy_source=source, legacy_id=row["id"], created_at=header["created_at"], updated_at=header["updated_at"])
+                item_id = conn.execute(f"INSERT INTO purchase_order_items ({','.join(item)}) VALUES ({','.join('?' for _ in item)})", tuple(item.values())).lastrowid
+                if _legacy_text(row, "image_filename"):
+                    conn.execute("INSERT INTO purchase_order_legacy_attachments (purchase_order_id,purchase_order_item_id,legacy_source,legacy_id,stored_filename,original_filename) VALUES (?,?,?,?,?,?)",
+                                 (order_id, item_id, source, row["id"], row["image_filename"], row.get("image_original_filename", "")))
+                orders_created += 1
+    return {"orders_created": orders_created}
+
+
+def procurement_migration_report(conn) -> dict[str, object]:
+    """Pure SELECT/PRAGMA audit: no schema creation, migration, or file I/O."""
+    required = ("suppliers", "supplier_legacy_links", "purchase_orders", "purchase_order_items", "procurement_migration_conflicts", "purchase_order_legacy_attachments")
+    for table in required:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
+            raise ValueError(f"Required procurement migration schema is missing: {table}")
+    for table, field in (("suppliers", "system_kind"), ("purchase_orders", "legacy_metadata")):
+        if field not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            raise ValueError(f"Required procurement migration schema is missing: {table}.{field}")
+
+    def dictionaries(sql, params=()):
+        cursor = conn.execute(sql, params)
+        columns = [column[0] for column in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor]
+
+    conflicts = dictionaries("SELECT * FROM procurement_migration_conflicts ORDER BY legacy_source,legacy_id,entity,field,kept_value,incoming_value,reason,id")
+    links = dictionaries("SELECT * FROM supplier_legacy_links ORDER BY legacy_source,legacy_id")
+    orders = dictionaries("SELECT * FROM purchase_orders ORDER BY legacy_source,legacy_id,id")
+    items = dictionaries("SELECT * FROM purchase_order_items ORDER BY legacy_source,legacy_id,id")
+    attachments = dictionaries("SELECT * FROM purchase_order_legacy_attachments ORDER BY legacy_source,legacy_id")
+    report = {"sources": {}, "supplier_sources": {}, "conflicts": conflicts,
+              "blocking_unknown_conflicts": sum(c["reason"] == "blocking_unknown_collision" for c in conflicts),
+              "unknown_links": conn.execute("SELECT COUNT(*) FROM supplier_legacy_links l JOIN suppliers s ON s.id=l.supplier_id WHERE s.system_kind='legacy_unknown'").fetchone()[0],
+              "derived_expected_dates": sum(bool(json.loads(o["legacy_metadata"]).get("expected_at_derived")) for o in orders if o["legacy_source"] in _LEGACY_ORDER_SOURCES),
+              "duplicate_source_keys": [], "foreign_key_check": [list(row) for row in conn.execute("PRAGMA foreign_key_check")]}
+    old_attachments = set()
+    for source in _LEGACY_SUPPLIER_SOURCES:
+        rows = _legacy_rows(conn, source)
+        source_ids = {r["id"] for r in rows}
+        linked_ids = {r["legacy_id"] for r in links if r["legacy_source"] == source}
+        report["supplier_sources"][source] = {"old": len(rows), "linked": len(source_ids & linked_ids), "unlinked": len(source_ids - linked_ids)}
+        if source not in (*_LEGACY_ORDER_SOURCES, "arrival_records"):
+            continue
+        source_orders = {r["legacy_id"]: r for r in orders if r["legacy_source"] == source}
+        source_items = [r for r in items if r["legacy_source"] == source]
+        migrated = {r["legacy_id"] for r in source_items if r["legacy_id"] in source_orders and r["purchase_order_id"] == source_orders[r["legacy_id"]]["id"]} & source_ids
+        conflicted = {c["legacy_id"] for c in conflicts if c["legacy_source"] == source and (c["entity"] == "order" or c["reason"] == "blocking_unknown_collision")} & source_ids - migrated
+        deferred = len(rows) if source == "arrival_records" else 0
+        summary = {"old": len(rows), "examined": len(rows) if deferred else len(migrated | conflicted),
+                   "migrated": len(migrated), "conflicted": 0 if deferred else len(conflicted), "deferred": deferred,
+                   "unmigrated": 0 if deferred else len(source_ids - migrated - conflicted),
+                   "old_quantity": 0, "new_quantity": sum(r["ordered_quantity"] for r in source_items),
+                   "old_amount_minor": 0, "new_amount_minor": sum(r["line_total_minor"] or 0 for r in source_items),
+                   "invalid_quantity_rows": 0, "invalid_amount_rows": 0,
+                   "old_unpriced_rows": 0, "new_unpriced_rows": sum(r["unit_price_minor"] is None for r in source_items)}
+        for row in rows:
+            if source in _LEGACY_ORDER_SOURCES and _legacy_text(row, "image_filename"):
+                old_attachments.add((source, row["id"]))
+            try:
+                quantity = parse_purchase_quantity(row.get("quantity"))
+                summary["old_quantity"] += quantity
+            except ValueError:
+                summary["invalid_quantity_rows"] += 1
+                quantity = None
+            try:
+                price = parse_money_minor(_legacy_text(row, "unit_price"), "CNY") if source != "purchase_followups" else None
+                if price is None:
+                    summary["old_unpriced_rows"] += 1
+                elif quantity is not None:
+                    summary["old_amount_minor"] += line_total_minor(price, quantity)
+            except ValueError:
+                summary["invalid_amount_rows"] += 1
+        report["sources"][source] = summary
+    linked_attachments = {(a["legacy_source"], a["legacy_id"]) for a in attachments}
+    report["attachments"] = {"old": len(old_attachments), "linked": len(old_attachments & linked_attachments), "unlinked": len(old_attachments - linked_attachments)}
+    for table in ("supplier_legacy_links", "purchase_orders", "purchase_order_items", "purchase_order_legacy_attachments"):
+        for row in dictionaries(f"SELECT legacy_source,legacy_id,COUNT(*) AS count FROM {table} WHERE legacy_source IS NOT NULL AND legacy_id IS NOT NULL GROUP BY legacy_source,legacy_id HAVING COUNT(*)>1 ORDER BY legacy_source,legacy_id"):
+            report["duplicate_source_keys"].append(dict(table=table, **row))
+    return report

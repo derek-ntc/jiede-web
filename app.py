@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from email.message import EmailMessage
 from io import BytesIO
 from textwrap import wrap
-from datetime import datetime
+from datetime import datetime, timezone
 from datetime import timedelta
 from functools import wraps
 from itertools import zip_longest
@@ -122,6 +122,7 @@ from procurement import (
     ensure_procurement_tables,
     fetch_purchase_orders,
     load_purchase_order,
+    migrate_legacy_procurement,
     next_supplier_code,
     normalize_purchase_order_payload,
     normalize_supplier_payload,
@@ -624,6 +625,8 @@ def init_db():
         ensure_production_process_tables(conn)
         ensure_shipping_workflow_tables(conn)
         ensure_indexes(conn)
+        # All legacy sources must exist before the atomic, idempotent backfill.
+        migrate_legacy_procurement(conn, datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 def ensure_columns(conn):
@@ -8906,6 +8909,33 @@ def ensure_database():
         abort(404)
 
 
+@app.before_request
+def legacy_procurement_compatibility():
+    """Freeze historical procurement writers, including indirect order creation.
+
+    Arrival and powder-coating workflows remain on their legacy pages in Phase 1.
+    Use path boundaries so unrelated routes cannot accidentally become read-only.
+    """
+    legacy_roots = (
+        "/admin/purchase-followups", "/admin/carton-purchases",
+        "/admin/carton-products", "/admin/carton-suppliers",
+        "/admin/orders/carton-purchases",
+    )
+    if request.method not in _HTTP_SAFE_METHODS and any(
+        request.path == root or request.path.startswith(root + "/")
+        for root in legacy_roots
+    ):
+        abort(409, description="历史采购已迁移为只读，请使用统一采购。")
+    if request.method in {"GET", "HEAD"}:
+        category = {"admin_purchase_followups": "other", "admin_carton_purchases": "carton"}.get(request.endpoint)
+        if category is not None:
+            # The destination enforces the new permission; do not revive obsolete
+            # legacy grants after an administrator has explicitly revoked access.
+            if not session.get("admin_logged_in"):
+                return redirect(url_for("admin_login"))
+            return redirect(url_for("purchase_orders", category=category))
+
+
 @app.route("/")
 def index():
     return redirect(url_for("admin_index"))
@@ -9349,6 +9379,8 @@ def dashboard():
         )
         stats = {
             "products": conn.execute("SELECT COUNT(*) AS c FROM manuals").fetchone()["c"],
+            "purchase_orders": conn.execute("SELECT COUNT(*) FROM purchase_orders").fetchone()[0],
+            "purchase_drafts": conn.execute("SELECT COUNT(*) FROM purchase_orders WHERE status='draft'").fetchone()[0],
             "customers": conn.execute("SELECT COUNT(*) AS c FROM customers").fetchone()["c"],
             "common_infos": conn.execute("SELECT COUNT(*) AS c FROM common_infos").fetchone()["c"],
             "purchase_followups": conn.execute("SELECT COUNT(*) AS c FROM purchase_followups").fetchone()["c"],
@@ -10569,8 +10601,11 @@ def edit_supplier(supplier_id):
             raise ValueError("供应商编码为必填项")
         now = datetime.utcnow().isoformat(timespec="seconds")
         with get_db() as conn:
-            if conn.execute("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)).fetchone() is None:
+            supplier = conn.execute("SELECT id,system_kind FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+            if supplier is None:
                 abort(404)
+            if supplier["system_kind"] == "legacy_unknown":
+                abort(409, description="历史系统供应商为只读档案。")
             duplicate_error = _supplier_duplicate_error(conn, payload, supplier_id)
             if duplicate_error:
                 raise ValueError(duplicate_error)
@@ -10601,9 +10636,11 @@ def edit_supplier(supplier_id):
 @permission_required("supplier_manage")
 def delete_supplier(supplier_id):
     with get_db() as conn:
-        supplier = conn.execute("SELECT id FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+        supplier = conn.execute("SELECT id,system_kind FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
         if supplier is None:
             abort(404)
+        if supplier["system_kind"] == "legacy_unknown":
+            abort(409, description="历史系统供应商为只读档案。")
         is_used = conn.execute(
             "SELECT 1 FROM purchase_orders WHERE supplier_id = ? LIMIT 1", (supplier_id,)
         ).fetchone()
@@ -10623,6 +10660,9 @@ def delete_supplier(supplier_id):
 @permission_required("supplier_manage")
 def reactivate_supplier(supplier_id):
     with get_db() as conn:
+        supplier = conn.execute("SELECT system_kind FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+        if supplier is not None and supplier["system_kind"] == "legacy_unknown":
+            abort(409, description="历史系统供应商不能恢复启用。")
         updated = conn.execute(
             "UPDATE suppliers SET active = 1, updated_at = ? WHERE id = ?",
             (datetime.utcnow().isoformat(timespec="seconds"), supplier_id),
@@ -15447,6 +15487,7 @@ def admin_index():
         purchase_followup_count = conn.execute(
             "SELECT COUNT(*) AS c FROM purchase_followups"
         ).fetchone()["c"]
+        purchase_order_count = conn.execute("SELECT COUNT(*) FROM purchase_orders").fetchone()[0]
         powder_coating_count = conn.execute(
             "SELECT COUNT(*) AS c FROM powder_coating_records"
         ).fetchone()["c"]
@@ -15476,6 +15517,7 @@ def admin_index():
         customer_count=customer_count,
         common_info_count=common_info_count,
         purchase_followup_count=purchase_followup_count,
+        purchase_order_count=purchase_order_count,
         powder_coating_count=powder_coating_count,
         carton_purchase_count=carton_purchase_count,
         arrival_record_count=arrival_record_count,

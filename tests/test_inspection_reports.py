@@ -136,7 +136,7 @@ class InspectionReportTests(unittest.TestCase):
         app.DB_PATH = original_db_path
         app.DATABASE_READY = original_database_ready
 
-    def test_powder_page_is_disabled_and_carton_purchase_is_available(self):
+    def test_powder_page_is_disabled_and_unified_procurement_is_available(self):
         original_db_path = app.DB_PATH
         original_database_ready = app.DATABASE_READY
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -157,21 +157,23 @@ class InspectionReportTests(unittest.TestCase):
             for html in (dashboard_html, admin_html, users_html):
                 self.assertNotIn("喷塑记录", html)
                 self.assertNotIn("/admin/powder-coating", html)
-            self.assertIn("纸箱采购管理", dashboard_html)
-            self.assertIn("/admin/carton-purchases", dashboard_html)
-            self.assertIn("纸箱采购管理", admin_html)
-            self.assertIn("/admin/carton-purchases", admin_html)
-            self.assertIn("纸箱采购", users_html)
+            self.assertIn("统一采购", dashboard_html)
+            self.assertIn("/admin/purchases/raw-material", dashboard_html)
+            self.assertIn("统一采购", admin_html)
+            self.assertIn("/admin/purchases/raw-material", admin_html)
+            self.assertIn("纸箱/到货记录", users_html)
             self.assertIn("到货记录", dashboard_html)
             self.assertIn("到货记录", admin_html)
 
             self.assertEqual(client.get("/admin/powder-coating").status_code, 404)
-            self.assertEqual(client.get("/admin/carton-purchases").status_code, 200)
+            response = client.get("/admin/carton-purchases")
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/admin/purchases/carton")
 
         app.DB_PATH = original_db_path
         app.DATABASE_READY = original_database_ready
 
-    def test_orders_can_generate_carton_purchase_records(self):
+    def test_orders_cannot_create_legacy_carton_purchase_records_after_migration(self):
         original_db_path = app.DB_PATH
         original_database_ready = app.DATABASE_READY
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -218,58 +220,30 @@ class InspectionReportTests(unittest.TestCase):
                 session["admin_role"] = "admin"
 
             orders_html = client.get("/admin/orders").get_data(as_text=True)
-            self.assertIn("生成纸箱采购清单", orders_html)
-            self.assertIn("/admin/orders/carton-purchases", orders_html)
+            self.assertNotIn("生成纸箱采购清单", orders_html)
+            self.assertIn("/admin/purchases/carton", orders_html)
 
             response = client.post(
                 "/admin/orders/carton-purchases",
                 data={"order_id": [str(order_id)]},
             )
-            self.assertEqual(response.status_code, 302)
-            self.assertIn("/admin/carton-purchases", response.headers["Location"])
+            self.assertEqual(response.status_code, 409)
 
             with app.get_db() as conn:
                 rows = conn.execute("SELECT * FROM carton_purchases").fetchall()
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["print_mark"], "JDX-001-40pcs")
-            self.assertEqual(rows[0]["quantity"], 3)
-            self.assertEqual(rows[0]["carton_size"], "310x320x330")
-            self.assertEqual(rows[0]["carton_length"], 310)
-            self.assertEqual(rows[0]["carton_width"], 320)
-            self.assertEqual(rows[0]["carton_height"], 330)
-            self.assertIn("SO-CARTON", rows[0]["remark"])
-            self.assertIn("订单数量：100", rows[0]["remark"])
-
-            carton_html = client.get("/admin/carton-purchases").get_data(as_text=True)
-            self.assertIn("纸箱采购管理", carton_html)
-            self.assertIn("JDX-001-40pcs", carton_html)
-            self.assertIn("预览采购单", carton_html)
-            self.assertIn("导出PDF", carton_html)
-            self.assertIn("长mm", carton_html)
-            self.assertIn("宽mm", carton_html)
-            self.assertIn("高mm", carton_html)
-            self.assertNotIn("供应商管理", carton_html)
-            self.assertNotIn("纸箱产品库", carton_html)
-            self.assertNotIn("预览对账单", carton_html)
+            self.assertEqual(len(rows), 0)
 
             preview_response = client.post(
                 "/admin/carton-purchases/purchase-order",
-                data={"record_id": [str(rows[0]["id"])]},
+                data={"record_id": ["1"]},
             )
-            self.assertEqual(preview_response.status_code, 200)
-            preview_html = preview_response.get_data(as_text=True)
-            self.assertIn("纸箱采购单预览", preview_html)
-            self.assertIn("JDX-001-40pcs", preview_html)
-            self.assertIn("310x320x330", preview_html)
-            self.assertIn("导出PDF", preview_html)
+            self.assertEqual(preview_response.status_code, 409)
 
             pdf_response = client.post(
                 "/admin/carton-purchases/purchase-order",
-                data={"record_id": [str(rows[0]["id"])], "download": "1"},
+                data={"record_id": ["1"], "download": "1"},
             )
-            self.assertEqual(pdf_response.status_code, 200)
-            self.assertEqual(pdf_response.mimetype, "application/pdf")
-            self.assertTrue(pdf_response.get_data().startswith(b"%PDF"))
+            self.assertEqual(pdf_response.status_code, 409)
 
         app.DB_PATH = original_db_path
         app.DATABASE_READY = original_database_ready

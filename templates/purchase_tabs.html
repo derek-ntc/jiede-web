@@ -1,5 +1,10 @@
 <nav class="purchase-tabs" aria-label="采购分类">
-  {% for key, label in category_labels.items() %}
+  {% if can_view_purchases %}
+  {% for key, label in [('raw_material', '原材料'), ('carton', '纸箱'), ('outsourcing', '外协'), ('other', '其他')] %}
     <a class="button {{ 'secondary' if key != category else '' }}" href="{{ url_for('purchase_orders', category=key.replace('_', '-')) }}" {% if key == category %}aria-current="page"{% endif %}>{{ label }}</a>
   {% endfor %}
+  {% endif %}
+  {% if can_manage_carton_purchases %}
+    <a class="button {{ '' if request.endpoint == 'admin_arrival_records' else 'secondary' }}" href="{{ url_for('admin_arrival_records') }}" {% if request.endpoint == 'admin_arrival_records' %}aria-current="page"{% endif %}>到货记录（历史）</a>
+  {% endif %}
 </nav>
