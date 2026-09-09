@@ -1,0 +1,5 @@
+<nav class="purchase-tabs" aria-label="采购分类">
+  {% for key, label in category_labels.items() %}
+    <a class="button {{ 'secondary' if key != category else '' }}" href="{{ url_for('purchase_orders', category=key.replace('_', '-')) }}" {% if key == category %}aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>

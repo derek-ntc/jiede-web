@@ -113,10 +113,20 @@ from pricing import (
     parse_money_minor,
 )
 from procurement import (
+    CATEGORY_VISIBLE_FIELDS,
+    PURCHASE_CATEGORY_LABELS,
+    PURCHASE_FIELD_LABELS,
+    PURCHASE_STATUS_LABELS,
+    cancel_purchase_order,
+    create_purchase_order,
     ensure_procurement_tables,
+    fetch_purchase_orders,
+    load_purchase_order,
     next_supplier_code,
+    normalize_purchase_order_payload,
     normalize_supplier_payload,
     supplier_snapshot,
+    update_purchase_order,
 )
 from reconciliation import (
     TAX_RATE_PPM,
@@ -11724,6 +11734,157 @@ def delete_common_info(info_id):
 
     flash("常用信息已删除", "success")
     return redirect(url_for("admin_common_info"))
+
+
+def purchase_order_filters_from_request() -> dict[str, object]:
+    return {key: request.args.get(key, "").strip() for key in (
+        "supplier_id", "order_no", "q", "purchased_from", "purchased_to", "expected_from", "expected_to", "status")}
+
+
+def purchase_category_from_slug(slug):
+    categories = {"raw-material": "raw_material", "carton": "carton", "outsourcing": "outsourcing", "other": "other"}
+    if slug not in categories:
+        abort(404)
+    return categories[slug]
+
+
+def purchase_page_context(category):
+    fields = list(CATEGORY_VISIBLE_FIELDS[category]) + ["quantity", "unit", "expected_at", "remark"]
+    if not user_can_view_purchase_prices():
+        fields = [field for field in fields if field != "unit_price"]
+    return dict(category=category, category_slug=category.replace("_", "-"), category_labels=PURCHASE_CATEGORY_LABELS,
+                status_labels=PURCHASE_STATUS_LABELS, field_labels=PURCHASE_FIELD_LABELS, fields=fields)
+
+
+def purchase_price_projection(order, items):
+    header = dict(order)
+    rows = [dict(row) for row in items]
+    if user_can_view_purchase_prices():
+        total = 0
+        missing = False
+        for row in rows:
+            amount = line_total_minor(row["unit_price_minor"], row["ordered_quantity"])
+            row["unit_price"] = format_money_minor(row["unit_price_minor"], "CNY")
+            row["line_total"] = format_money_minor(amount, "CNY")
+            missing = missing or amount is None
+            total += amount or 0
+        header["order_total"] = "未完整录价" if missing else format_money_minor(total, "CNY")
+    else:
+        for row in rows:
+            row.pop("unit_price_minor", None)
+            row.pop("line_total_minor", None)
+    for row in rows:
+        row["quantity"] = row["ordered_quantity"]
+    return header, rows
+
+
+def purchase_order_or_404(conn, order_id, category=None):
+    try:
+        order, items = load_purchase_order(conn, order_id)
+    except (LookupError, ValueError):
+        abort(404)
+    if category is not None and purchase_category_from_slug(category) != order["category"]:
+        abort(404)
+    return order, items
+
+
+@app.route("/admin/purchases/<category>")
+@permission_required("purchase_view")
+def purchase_orders(category):
+    category = purchase_category_from_slug(category)
+    filters = purchase_order_filters_from_request()
+    with get_db() as conn:
+        orders = []
+        for order in fetch_purchase_orders(conn, category, filters):
+            _, items = load_purchase_order(conn, order["id"])
+            orders.append(purchase_price_projection(order, items)[0])
+        suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
+    return render_template("purchase_orders.html", orders=orders, filters=filters, suppliers=suppliers, **purchase_page_context(category))
+
+
+def purchase_form_response(conn, category, order=None, items=None, error=None, submitted=None):
+    suppliers = conn.execute("SELECT id,name FROM suppliers WHERE active=1 ORDER BY name").fetchall()
+    profiles = conn.execute("SELECT * FROM purchase_delivery_profiles WHERE active=1 ORDER BY is_default DESC,id").fetchall()
+    if order is None:
+        order = dict(status="draft", purchased_at=datetime.now().date().isoformat())
+        default = next((profile for profile in profiles if profile["is_default"]), None)
+        if default:
+            order.update(delivery_profile_id=default["id"], delivery_address=default["delivery_address"], recipient=default["recipient"], recipient_phone=default["phone"], remark=default["default_remark"])
+        items = [{}]
+    else:
+        order, items = purchase_price_projection(order, items)
+    if submitted is not None:
+        for field in ("supplier_id", "delivery_profile_id", "purchased_at", "delivery_address", "recipient", "recipient_phone", "remark"):
+            if field in submitted:
+                order[field] = submitted[field]
+        visible = set(purchase_page_context(category)["fields"]) | {"id"}
+        indexed = {}
+        for key, value in submitted.items():
+            match = re.fullmatch(r"items\[(\d{1,4})\]\[([a-z_]+)\]", key)
+            if match and match[2] in visible:
+                indexed.setdefault(int(match[1]), {})[match[2]] = value
+        items = [indexed[index] for index in sorted(indexed)][:500] or [{}]
+    return render_template("purchase_order_form.html", order=order, items=items, suppliers=suppliers, profiles=profiles, error=error, **purchase_page_context(category)), 400 if error else 200
+
+
+@app.route("/admin/purchases/<category>/new", methods=["GET", "POST"])
+@permission_required("purchase_manage")
+def new_purchase_order(category):
+    category = purchase_category_from_slug(category)
+    with get_db() as conn:
+        if request.method == "POST":
+            raw = request.form.to_dict()
+            raw["category"] = category
+            try:
+                payload = normalize_purchase_order_payload(raw, can_view_prices=user_can_view_purchase_prices())
+                order_id = create_purchase_order(conn, payload, current_admin_username(), datetime.utcnow().isoformat(timespec="seconds"))
+            except ValueError as error:
+                return purchase_form_response(conn, category, error=str(error), submitted=raw)
+            return redirect(url_for("purchase_order_detail", order_id=order_id))
+        return purchase_form_response(conn, category)
+
+
+@app.route("/admin/purchases/<category>/<int:order_id>")
+@app.route("/admin/purchases/orders/<int:order_id>")
+@permission_required("purchase_view")
+def purchase_order_detail(order_id, category=None):
+    with get_db() as conn:
+        order, items = purchase_order_or_404(conn, order_id, category)
+    order, items = purchase_price_projection(order, items)
+    return render_template("purchase_order_detail.html", order=order, items=items, **purchase_page_context(order["category"]))
+
+
+@app.route("/admin/purchases/<category>/<int:order_id>/edit", methods=["GET", "POST"])
+@app.route("/admin/purchases/orders/<int:order_id>/edit", methods=["GET", "POST"])
+@permission_required("purchase_manage")
+def edit_purchase_order(order_id, category=None):
+    with get_db() as conn:
+        order, items = purchase_order_or_404(conn, order_id, category)
+        if order["status"] in {"cancelled", "received"}:
+            abort(400, description="已到齐或已取消的采购订单不能修改")
+        if request.method == "POST":
+            raw = request.form.to_dict()
+            raw["category"] = order["category"]
+            try:
+                payload = normalize_purchase_order_payload(raw, can_view_prices=user_can_view_purchase_prices())
+                update_purchase_order(conn, order_id, payload, current_admin_username(), datetime.utcnow().isoformat(timespec="seconds"))
+            except ValueError as error:
+                return purchase_form_response(conn, order["category"], order, items, str(error), submitted=raw)
+            return redirect(url_for("purchase_order_detail", order_id=order_id))
+        return purchase_form_response(conn, order["category"], order, items)
+
+
+@app.route("/admin/purchases/<category>/<int:order_id>/cancel", methods=["POST"])
+@app.route("/admin/purchases/orders/<int:order_id>/cancel", methods=["POST"])
+@permission_required("purchase_manage")
+def cancel_purchase_order_route(order_id, category=None):
+    with get_db() as conn:
+        purchase_order_or_404(conn, order_id, category)
+        try:
+            cancel_purchase_order(conn, order_id, current_admin_username(), datetime.utcnow().isoformat(timespec="seconds"))
+        except ValueError as error:
+            abort(400, description=str(error))
+    return redirect(url_for("purchase_order_detail", order_id=order_id))
 
 
 @app.route("/admin/purchase-followups", methods=["GET", "POST"])

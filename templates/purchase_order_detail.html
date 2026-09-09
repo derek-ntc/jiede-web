@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}采购订单 {{ order.order_no }}{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css') }}">{% endblock %}
+{% block content %}
+{% include "purchase_tabs.html" %}
+<section class="page-head"><div><h1>采购订单 {{ order.order_no }}</h1><p>{{ category_labels[category] }} · {{ status_labels[order.status] }} · {{ order.purchased_at }}</p></div>
+{% if can_manage_purchases and order.status not in ['received','cancelled'] %}<a class="button" href="{{ url_for('edit_purchase_order', order_id=order.id) }}">编辑订单</a><form method="post" action="{{ url_for('cancel_purchase_order_route', order_id=order.id) }}" onsubmit="return confirm('确定取消此采购订单？历史明细将保留。');"><button class="danger">取消订单</button></form>{% endif %}</section>
+<section class="panel"><h2>供应商资料（下单快照）</h2><p>{{ order.supplier_name }} · {{ order.supplier_code }}</p><p>{{ order.supplier_contact }} · {{ order.supplier_phone }} · {{ order.supplier_email }}</p><p>{{ order.supplier_address }}</p></section>
+<section class="panel"><div class="table-wrap"><table><thead><tr>{% for field in fields %}<th>{{ field_labels[field] }}</th>{% endfor %}{% if can_view_purchase_prices %}<th>金额（RMB／人民币）</th>{% endif %}</tr></thead><tbody>
+{% for item in items %}<tr>{% for field in fields %}<td>{{ item[field] if item[field] is not none else '' }}</td>{% endfor %}{% if can_view_purchase_prices %}<td>{{ item.line_total or '未录价' }}</td>{% endif %}</tr>{% endfor %}
+</tbody></table></div>{% if can_view_purchase_prices %}<p>合计（RMB／人民币）：{{ order.order_total }}</p>{% endif %}</section>
+<section class="panel"><h2>收货信息</h2><p>{{ order.delivery_address }}</p><p>收件人：{{ order.recipient }} · {{ order.recipient_phone }}</p><p>备注：{{ order.remark }}</p><p>创建：{{ order.created_by }} · {{ order.created_at }}；更新：{{ order.updated_by }} · {{ order.updated_at }}</p></section>
+{% endblock %}
