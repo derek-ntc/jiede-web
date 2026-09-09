@@ -224,6 +224,7 @@
                     <button class="secondary" type="submit">复制</button>
                   </form>
                   <form method="post" action="{{ url_for('delete_manual', manual_id=manual.id, q=query, supplier=selected_supplier, customer=selected_customer, sort=sort, direction=direction) }}" onsubmit="return confirm('确定删除这条产品资料吗？');">
+                    <input type="hidden" name="production_followup_csrf_token" value="{{ product_mutation_csrf_token }}">
                     <input type="hidden" name="return_q" value="{{ query }}">
                     <input type="hidden" name="return_supplier" value="{{ selected_supplier }}">
                     <input type="hidden" name="return_customer" value="{{ selected_customer }}">

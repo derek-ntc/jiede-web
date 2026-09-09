@@ -147,7 +147,9 @@ function renderAssemblyPreview(form, preview) {
     appendAssemblyCell(
       row,
       "库存状态",
-      item.shipped_quantity === 0 ? `本次不发，不扣库存（可用 ${item.available_inventory}）` : item.inventory_shortage_quantity > 0
+      item.preserves_existing_state
+        ? `保留原记录：已扣 ${item.inventory_deducted_quantity}，缺货 ${item.inventory_shortage_quantity}；当前库存 ${item.available_inventory} 不变`
+        : item.shipped_quantity === 0 ? `本次不发，不扣库存（可用 ${item.available_inventory}）` : item.inventory_shortage_quantity > 0
         ? `可用 ${item.available_inventory}，库存缺口 ${item.inventory_shortage_quantity}`
         : `可用库存 ${item.available_inventory}`
     );

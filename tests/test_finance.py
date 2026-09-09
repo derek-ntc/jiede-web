@@ -1065,6 +1065,8 @@ class FinanceShipmentLockTests(FinanceDomainTestCase):
             session["admin_logged_in"] = True
             session["admin_username"] = username
             session["admin_role"] = "operator"
+            session["production_followup_csrf_token"] = "finance-lock-csrf"
+        self.client.environ_base["HTTP_X_CSRF_TOKEN"] = "finance-lock-csrf"
 
     def create_claim(self, source_type, source_id, issued=False):
         with app.get_db() as conn:

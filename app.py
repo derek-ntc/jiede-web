@@ -4563,6 +4563,40 @@ def _excluded_inventory_quantity(conn, batch_id, manual_id):
     return max(0, int(row["quantity"] or 0))
 
 
+def assembly_shipment_preview_warnings(items):
+    warnings = []
+    for item in items:
+        no_order_quantity = int(item.get("no_order_quantity") or 0)
+        if no_order_quantity:
+            warnings.append(
+                {
+                    "code": "no_order",
+                    "manual_id": int(item["manual_id"]),
+                    "drawing_no": item["drawing_no"],
+                    "quantity": no_order_quantity,
+                    "message": (
+                        f"配件 {item['drawing_no']}：{no_order_quantity} 个没有可匹配订单，"
+                        "将作为直接发货保存"
+                    ),
+                }
+            )
+        shortage = int(item.get("inventory_shortage_quantity") or 0)
+        if shortage:
+            warnings.append(
+                {
+                    "code": "inventory_shortage",
+                    "manual_id": int(item["manual_id"]),
+                    "drawing_no": item["drawing_no"],
+                    "quantity": shortage,
+                    "message": (
+                        f"配件 {item['drawing_no']}：库存不足 {shortage} 个，"
+                        "确认后库存将扣到 0"
+                    ),
+                }
+            )
+    return warnings
+
+
 def build_assembly_shipment_preview(
     conn,
     customer,
@@ -4695,33 +4729,7 @@ def build_assembly_shipment_preview(
             "allocations": allocations,
         }
         preview["items"].append(item)
-        if no_order_quantity:
-            preview["warnings"].append(
-                {
-                    "code": "no_order",
-                    "manual_id": manual_id,
-                    "drawing_no": item["drawing_no"],
-                    "quantity": no_order_quantity,
-                    "message": (
-                        f"配件 {item['drawing_no']}：{no_order_quantity} 个没有可匹配订单，"
-                        "将作为直接发货保存"
-                    ),
-                }
-            )
-        if inventory["shortage_quantity"]:
-            shortage = inventory["shortage_quantity"]
-            preview["warnings"].append(
-                {
-                    "code": "inventory_shortage",
-                    "manual_id": manual_id,
-                    "drawing_no": item["drawing_no"],
-                    "quantity": shortage,
-                    "message": (
-                        f"配件 {item['drawing_no']}：库存不足 {shortage} 个，"
-                        "确认后库存将扣到 0"
-                    ),
-                }
-            )
+    preview["warnings"] = assembly_shipment_preview_warnings(preview["items"])
     preview["preview_token"] = preview_token(preview)
     return preview
 
@@ -5708,13 +5716,7 @@ def selectively_replace_assembly_shipment(
         manual_id
         for manual_id, old_item in existing_items.items()
         if manual_id in preview_items
-        and int(old_item["shipped_quantity"]) == int(preview_items[manual_id]["shipped_quantity"])
-        and str(old_item["source_kind"] or "bom")
-        == str(preview_items[manual_id].get("source_kind") or "bom")
-        and int(old_item["quantity_per_set"] or 0)
-        == int(preview_items[manual_id].get("quantity_per_set") or 0)
-        and int(old_item["calculated_quantity"] or 0)
-        == int(preview_items[manual_id].get("calculated_quantity") or 0)
+        and _assembly_item_materially_unchanged(old_item, preview_items[manual_id])
     }
     changed_existing_items = [
         item
@@ -15420,6 +15422,19 @@ def _parse_assembly_shipment_remarks(form):
     return _normalize_assembly_remarks(dict(zip(manual_ids, remarks)))
 
 
+def _assembly_item_materially_unchanged(old_item, preview_item):
+    return (
+        int(old_item["shipped_quantity"])
+        == int(preview_item["shipped_quantity"])
+        and str(old_item["source_kind"] or "bom")
+        == str(preview_item.get("source_kind") or "bom")
+        and int(old_item["quantity_per_set"] or 0)
+        == int(preview_item.get("quantity_per_set") or 0)
+        and int(old_item["calculated_quantity"] or 0)
+        == int(preview_item.get("calculated_quantity") or 0)
+    )
+
+
 def _assembly_edit_preview(conn, batch, overrides=None, selected_manual_ids=None, remarks=None):
     if selected_manual_ids is None:
         selected_manual_ids = [int(item["manual_id"]) for item in batch["items"]]
@@ -15434,7 +15449,7 @@ def _assembly_edit_preview(conn, batch, overrides=None, selected_manual_ids=None
             for item in batch["items"]
             if int(item["manual_id"]) in selected_manual_ids
         }
-    return build_assembly_shipment_preview(
+    preview = build_assembly_shipment_preview(
         conn,
         batch["customer"],
         batch["assembly_drawing_no"],
@@ -15444,6 +15459,35 @@ def _assembly_edit_preview(conn, batch, overrides=None, selected_manual_ids=None
         selected_manual_ids=selected_manual_ids,
         remarks=remarks,
     )
+    existing_items = {int(item["manual_id"]): item for item in batch["items"]}
+    for item in preview["items"]:
+        old_item = existing_items.get(int(item["manual_id"]))
+        if old_item is None or not _assembly_item_materially_unchanged(
+            old_item, item
+        ):
+            continue
+        item["available_inventory"] = max(
+            0, inventory_total_for_manual(conn, int(item["manual_id"]))
+        )
+        item["preserves_existing_state"] = True
+        item["inventory_deducted_quantity"] = int(
+            old_item["inventory_deducted_quantity"] or 0
+        )
+        item["inventory_shortage_quantity"] = int(
+            old_item["inventory_shortage_quantity"] or 0
+        )
+        item["no_order_quantity"] = int(old_item["no_order_quantity"] or 0)
+        item["allocations"] = [
+            {
+                "order_id": allocation["order_id"],
+                "order_no": allocation["order_no"],
+                "quantity": int(allocation["quantity"]),
+            }
+            for allocation in old_item["allocations"]
+        ]
+    preview["warnings"] = assembly_shipment_preview_warnings(preview["items"])
+    preview["preview_token"] = preview_token(preview)
+    return preview
 
 
 def _assembly_form_selection(form):
@@ -18874,6 +18918,7 @@ def batch_delete_manuals():
 @app.route("/admin/<int:manual_id>/delete", methods=["POST"])
 @permission_required("product_edit")
 def delete_manual(manual_id):
+    require_production_followup_csrf()
     redirect_args = product_list_return_args(request.form)
     try:
         delete_manuals([manual_id])

@@ -286,6 +286,8 @@ class AssemblyAppTestCase(unittest.TestCase):
             session["admin_logged_in"] = True
             session["admin_username"] = "admin"
             session["admin_role"] = "admin"
+            session["production_followup_csrf_token"] = "test-assembly-csrf"
+        self.client.environ_base["HTTP_X_CSRF_TOKEN"] = "test-assembly-csrf"
 
     def tearDown(self):
         app.DB_PATH = self.original_db_path
@@ -3003,6 +3005,12 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
             (2, 3),
         )
         self.stock_product(manual_id, 3)
+        new_order_id = self.create_order(
+            manual_id,
+            "SO-P-EDIT-METADATA-EARLY",
+            5,
+            planned_ship_at="2026-08-01",
+        )
 
         preview_response = self.client.post(
             f"/admin/shipped-orders/assembly/{batch_id}/edit",
@@ -3013,7 +3021,29 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
         )
         self.assertEqual(preview_response.status_code, 200)
         preview = preview_response.get_json()
-        self.assertEqual(preview["items"][0]["inventory_deducted_quantity"], 5)
+        preview_item = preview["items"][0]
+        self.assertTrue(preview_item["preserves_existing_state"])
+        self.assertEqual(preview_item["available_inventory"], 3)
+        self.assertEqual(
+            (
+                preview_item["inventory_deducted_quantity"],
+                preview_item["inventory_shortage_quantity"],
+            ),
+            (2, 3),
+        )
+        self.assertEqual(
+            [
+                (row["order_id"], row["quantity"])
+                for row in preview_item["allocations"]
+            ],
+            [
+                (row["order_id"], row["quantity"])
+                for row in before["allocations"]
+            ],
+        )
+        self.assertIn(
+            "inventory_shortage", {warning["code"] for warning in preview["warnings"]}
+        )
 
         response = self.post_edit(
             batch_id,
@@ -3022,7 +3052,7 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
         )
 
         self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
-        after = self.batch_state(batch_id, manual_id, [order_id])
+        after = self.batch_state(batch_id, manual_id, [order_id, new_order_id])
         item = after["items"][0]
         self.assertEqual(item["id"], original_item["id"])
         self.assertEqual(item["remark"], "仅修改备注")
@@ -3043,6 +3073,12 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
         )
         self.assertEqual(after["batch"]["shipped_at"], "2026-08-31")
         self.assertEqual(after["batch"]["logistics_no"], "修改后备注")
+        self.assertEqual(
+            {
+                row["id"]: row["shipped_quantity"] for row in after["orders"]
+            },
+            {order_id: 5, new_order_id: 0},
+        )
 
     def test_mixed_edit_rebuilds_only_changed_row_and_retains_unchanged_shortage(self):
         retained = self.create_product("P-EDIT-RETAINED", "客户A")

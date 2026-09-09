@@ -850,6 +850,8 @@ class ProductPageTestCase(unittest.TestCase):
             session["admin_logged_in"] = True
             session["admin_username"] = username
             session["admin_role"] = "operator"
+            session["production_followup_csrf_token"] = "product-page-csrf"
+        self.client.environ_base["HTTP_X_CSRF_TOKEN"] = "product-page-csrf"
 
     def valid_basic_form(self, **overrides):
         data = {

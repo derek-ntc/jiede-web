@@ -372,6 +372,38 @@ class ProductBatchAssemblyTests(unittest.TestCase):
         with app.get_db() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM manuals").fetchone()[0], 0)
 
+    def test_single_delete_requires_valid_csrf_and_page_supplies_token(self):
+        page = self.client.get("/admin/products")
+        self.assertIn(
+            'name="production_followup_csrf_token" value="test-product-csrf"',
+            page.get_data(as_text=True),
+        )
+        self.client.environ_base.pop("HTTP_X_CSRF_TOKEN")
+
+        for data in (
+            {},
+            {"production_followup_csrf_token": "wrong-token"},
+        ):
+            with self.subTest(data=data):
+                response = self.client.post(
+                    f"/admin/{self.product_a}/delete", data=data
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assert_products_exist(self.product_a, self.product_b)
+
+        response = self.client.post(
+            f"/admin/{self.product_a}/delete",
+            data={"production_followup_csrf_token": "test-product-csrf"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assert_products_exist(self.product_b)
+        with app.get_db() as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT id FROM manuals WHERE id = ?", (self.product_a,)
+                ).fetchone()
+            )
+
     def test_batch_delete_restores_quarantined_files_when_database_commit_fails(self):
         self.attach_file(self.product_a, "part-a.pdf")
         with app.get_db() as conn:
