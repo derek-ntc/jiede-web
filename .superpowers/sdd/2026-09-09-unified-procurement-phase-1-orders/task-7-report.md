@@ -1,0 +1,131 @@
+# Task 7 — Phase 1 full verification
+
+## Outcome and scope
+
+Phase 1 verification passed on commit `cbfb55f` before this documentation-only
+change. Work stayed in the designated worktree plus synthetic files under
+`/private/tmp`. No deployment, push, NAS/VPS access, production database access,
+or read of `data/manuals.db` was performed. The only application server started
+was a temporary Flask development server bound to `127.0.0.1:5077` and pointed
+at the isolated rehearsal database; it was stopped after browser acceptance.
+
+No production-code defect was found. Temporary QA helpers were removed before
+this report, leaving only the plan, progress ledger, and this report changed.
+
+## Complete automated regression
+
+Fresh final-code Python command:
+
+```sh
+PATH="/Users/derek/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/poppler/bin:$PATH" \
+  .venv/bin/python -m unittest discover -s tests -v
+```
+
+Result: **672 tests in 64.972 seconds; OK, skipped=1** — 671 passed and
+zero failed/errors. The sole skip remains the pre-existing opt-in
+`test_shipping_high_contrast_colors_in_real_browser`, which requires
+`JIEDE_BROWSER_TESTS=1`. Procurement export tests ran. Existing UTC deprecation
+and unrelated resource warnings remain baseline output. Full log:
+`/private/tmp/jiede-procurement-task7-full-python.log`.
+
+Fresh JavaScript command used the real repository glob (one test file):
+
+```sh
+node --test tests/js/*.test.js
+```
+
+Result: **5 tests, 5 passed, 0 failed/skipped/todo** in 70.975 ms. Log:
+`/private/tmp/jiede-procurement-task7-node.log`.
+
+## Isolated startup migration and read-only reconciliation
+
+The final fixture directory is
+`/private/tmp/jiede-procurement-task7-qa.RsDTdJ/`. It was constructed from the
+repository's synthetic migration fixture, not copied from any user database.
+Its lock file was explicitly created before database initialization. Both real
+`app.init_db()` calls used that exact lock inode.
+
+- Startup 1 returned `orders_created=4`; startup 2 returned
+  `orders_created=0`. Unified order count stayed 4 after the second startup.
+- The two in-process reports were identical. The actual CLI was then run twice
+  with explicit `--database` and `--lock-path`; both canonical JSON outputs were
+  byte-identical.
+- Before and after both CLI reads, the database SHA-256 remained
+  `1bdd5dc94fe8e1477c5fbc51defbde048f63d50c001d74c29f3d5905db09adf7`,
+  inode `192668400`, mtime `1788972454`, size `724992`. The pre-created lock
+  remained the same inode `192668399`, empty-file SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+  mtime `1788972454`, size 0. This is direct read-only evidence.
+- `PRAGMA foreign_key_check`: 0 rows. Duplicate legacy source keys: 0.
+- Carton sources: 2/2 migrated; quantity 14 -> 14; amount 3,920 -> 3,920
+  minor units; no unmigrated/conflicted rows.
+- Followup sources: 2/2 migrated; quantity 7 -> 7; both price values remain
+  absent; no unmigrated/conflicted rows.
+- Arrival source: 1 row, quantity 5 and amount 1,005 minor units, explicitly
+  deferred to Phase 2 with no fabricated Phase 1 order/inventory row.
+- Supplier legacy coverage: 14/14 links across all nine source tables; 0
+  unlinked. Four links use the inactive unknown supplier. Eight expected
+  supplier-field conflicts are reported; there are no blocking conflicts.
+- Legacy attachment coverage: 1/1 linked. Product inventory balances and
+  transactions remained empty during migration.
+
+Evidence files: `startup-rehearsal.json`, `report-1.json`, `report-2.json`, and
+their lock diagnostics in the fixture directory.
+
+## Local HTTP and real-browser acceptance
+
+The HTTP acceptance used the same isolated database and the real Flask routes.
+All mutations were synthetic test records.
+
+- Supplier CRUD: created and edited a supplier, physically deleted an unused
+  supplier, deactivated a referenced supplier, and restored it. Final referenced
+  supplier state is `T7-SUP / Task7供应商已编辑 / 王五 / active`.
+- Company delivery data: created, edited, deactivated, and restored a profile;
+  the final recipient/default remark are `赵六已编辑 / 上午送达`.
+- Four category routes created real orders. Raw material, carton, and
+  outsourcing each retained two items; other procurement retained 70 items.
+  Each detail route returned 200 and rendered its category-specific content.
+- Combined supplier/order/item/date/status-capable list filters were exercised
+  with a positive exact match (`PO-20260910-0004`) and a negative item search.
+- Permission acceptance proved a price-blind purchase manager sees no price in
+  HTML or XLSX, and an unrelated operator is redirected from purchase and
+  supplier pages.
+- The fresh XLSX response reopened as sheet `采购订单` with landscape
+  orientation, A4 (`paperSize=9`), `fitToWidth=1`, `fitToHeight=0`, print area
+  `'采购订单'!$A$1:$F$83`, and repeated row `$9:$9`.
+- The fresh PDF response was `application/pdf` and `pdfinfo` reported 5 pages
+  for the 70-line order, proving continuation pagination on the final code.
+- `/admin/purchase-followups` redirects to unified other procurement and
+  `/admin/carton-purchases` redirects to unified carton procurement. The
+  historical arrival page remains available with HTTP 200 as required by the
+  Phase 1 ruling.
+- The canonical customer page remained HTTP 200 and its business-partner alias
+  redirected to it. A full-row customer snapshot was byte-for-value identical
+  before and after procurement acceptance.
+- A product-inventory sentinel balance of 37 units remained exactly unchanged,
+  and inventory transactions remained empty after all four purchase orders.
+
+The real in-app browser then logged in through `/admin/login` and visibly
+inspected: the dashboard unified procurement/business-partner navigation;
+supplier management; company delivery profiles; the other-procurement list with
+all four category tabs, historical-arrival tab, and filters; the 70-row order
+detail with supplier/delivery snapshots and Excel/PDF actions; and the unchanged
+customer page. Server logs show 200 responses for those pages and the expected
+302 login transition. The temporary browser tab and server were closed.
+
+Fresh HTTP evidence is in `http-acceptance.json`; generated artifacts are
+`acceptance-order.xlsx` and `acceptance-order.pdf` in the fixture directory.
+
+## Honest visual boundary
+
+The fresh browser run used the in-app browser's compact viewport, so it is a
+visible routing/content check rather than a desktop print-preview review. This
+Task 7 run did not reopen the generated workbook in Microsoft Excel or manually
+inspect every page of the fresh five-page PDF. For those visual details it uses
+the accepted Task 5 evidence already recorded in this ledger: 49 final pages
+viewed by the implementer plus 32 pages independently reviewed, covering all
+four categories, price-visible/hidden variants, long pagination, CJK rendering,
+large exact money, and sanitized control characters. Per the Task 7 brief, the
+Spreadsheet/PDF one-time markers were not repeated. Target-VPS/browser-specific
+font substitution and physical printer output remain deployment acceptance,
+which was explicitly out of scope.
