@@ -8,6 +8,7 @@
       <p>维护统一供应商档案。停用供应商保留历史采购记录，不能用于后续采购。</p>
     </div>
     <div class="head-stat"><strong>{{ suppliers|length }}</strong><span>{% if query %}条搜索结果{% else %}个供应商{% endif %}</span></div>
+    <a class="button secondary" href="{{ url_for('purchase_delivery_profiles') }}">公司收货模板</a>
   </section>
 
   <section class="panel">

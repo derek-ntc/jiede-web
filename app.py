@@ -10650,6 +10650,9 @@ def purchase_delivery_profiles():
         except ValueError as error:
             flash(str(error), "error")
             return redirect(url_for("purchase_delivery_profiles"))
+        except sqlite3.IntegrityError:
+            flash("收货模板保存失败，请重试", "error")
+            return redirect(url_for("purchase_delivery_profiles"))
         flash("收货模板已新增", "success")
         return redirect(url_for("purchase_delivery_profiles"))
 
@@ -10666,13 +10669,17 @@ def edit_purchase_delivery_profile(profile_id):
     try:
         payload = _delivery_profile_payload(request.form)
         now = datetime.utcnow().isoformat(timespec="seconds")
+        inactive_default_blocked = False
         with get_db() as conn:
             profile = conn.execute(
                 "SELECT active FROM purchase_delivery_profiles WHERE id = ?", (profile_id,)
             ).fetchone()
             if profile is None:
                 abort(404)
-            if payload["is_default"] and profile["active"]:
+            if not profile["active"]:
+                inactive_default_blocked = bool(payload["is_default"])
+                payload["is_default"] = 0
+            elif payload["is_default"]:
                 conn.execute(
                     "UPDATE purchase_delivery_profiles SET is_default = 0 WHERE active = 1 AND is_default = 1"
                 )
@@ -10691,6 +10698,11 @@ def edit_purchase_delivery_profile(profile_id):
     except ValueError as error:
         flash(str(error), "error")
         return redirect(url_for("purchase_delivery_profiles"))
+    except sqlite3.IntegrityError:
+        flash("收货模板保存失败，请重试", "error")
+        return redirect(url_for("purchase_delivery_profiles"))
+    if inactive_default_blocked:
+        flash("停用的收货模板不能设为默认", "error")
     flash("收货模板已更新", "success")
     return redirect(url_for("purchase_delivery_profiles"))
 
@@ -10716,13 +10728,17 @@ def deactivate_purchase_delivery_profile(profile_id):
 @app.route("/admin/business-partners/purchase-delivery-profiles/<int:profile_id>/reactivate", methods=["POST"])
 @permission_required("supplier_manage")
 def reactivate_purchase_delivery_profile(profile_id):
-    with get_db() as conn:
-        updated = conn.execute(
-            "UPDATE purchase_delivery_profiles SET active = 1, updated_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(timespec="seconds"), profile_id),
-        )
-        if updated.rowcount == 0:
-            abort(404)
+    try:
+        with get_db() as conn:
+            updated = conn.execute(
+                "UPDATE purchase_delivery_profiles SET active = 1, is_default = 0, updated_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(timespec="seconds"), profile_id),
+            )
+            if updated.rowcount == 0:
+                abort(404)
+    except sqlite3.IntegrityError:
+        flash("收货模板恢复失败，请重试", "error")
+        return redirect(url_for("purchase_delivery_profiles"))
     flash("收货模板已恢复启用", "success")
     return redirect(url_for("purchase_delivery_profiles"))
 

@@ -121,6 +121,16 @@ class SupplierManagementTests(unittest.TestCase):
                 "SELECT id FROM purchase_delivery_profiles WHERE name = ?", (name,)
             ).fetchone()["id"]
 
+    def profile_data(self, name, default=False):
+        return {
+            "name": name,
+            "delivery_address": f"{name}地址",
+            "recipient": "收货人",
+            "phone": "0574-0000",
+            "default_remark": "工作日送达",
+            "is_default": "on" if default else "",
+        }
+
     def default_profile_ids(self):
         with app.get_db() as conn:
             return [
@@ -154,6 +164,17 @@ class SupplierManagementTests(unittest.TestCase):
                 response = self.client.get(url)
                 self.assertEqual(response.status_code, 302)
                 self.assertTrue(response.headers["Location"].endswith("/admin"))
+
+    def test_supplier_only_user_can_discover_delivery_profile_entry_but_unrelated_user_cannot(self):
+        profile_url = "/admin/business-partners/purchase-delivery-profiles"
+        self.login_as("supplier-manager")
+        supplier_page = self.client.get("/admin/business-partners/suppliers")
+        self.assertEqual(supplier_page.status_code, 200)
+        self.assertIn(f'href="{profile_url}"', supplier_page.get_data(as_text=True))
+
+        self.login_as("unrelated")
+        self.assertEqual(self.client.get(profile_url).status_code, 302)
+        self.assertNotIn(profile_url, self.client.get("/admin").get_data(as_text=True))
 
     def test_supplier_create_normalizes_fields_and_generates_first_available_code(self):
         supplier_id = self.create_supplier("  供方甲  ")
@@ -233,6 +254,34 @@ class SupplierManagementTests(unittest.TestCase):
         second = self.create_profile("二厂", default=True)
         self.assertEqual(self.default_profile_ids(), [second])
         self.assertNotEqual(first, second)
+
+    def test_inactive_profile_cannot_become_default_or_conflict_on_reactivation(self):
+        active_default = self.create_profile("默认 A", default=True)
+        inactive = self.create_profile("停用 B")
+        self.assertEqual(
+            self.client.post(
+                f"/admin/business-partners/purchase-delivery-profiles/{inactive}/delete"
+            ).status_code,
+            302,
+        )
+
+        edit_response = self.client.post(
+            f"/admin/business-partners/purchase-delivery-profiles/{inactive}/edit",
+            data=self.profile_data("停用 B", default=True),
+            follow_redirects=True,
+        )
+        self.assertIn("停用的收货模板不能设为默认", edit_response.get_data(as_text=True))
+        reactivation = self.client.post(
+            f"/admin/business-partners/purchase-delivery-profiles/{inactive}/reactivate"
+        )
+        self.assertNotEqual(reactivation.status_code, 500)
+        self.assertEqual(reactivation.status_code, 302)
+        self.assertEqual(self.default_profile_ids(), [active_default])
+        with app.get_db() as conn:
+            profile = conn.execute(
+                "SELECT active, is_default FROM purchase_delivery_profiles WHERE id = ?", (inactive,)
+            ).fetchone()
+        self.assertEqual((profile["active"], profile["is_default"]), (1, 0))
 
 
 if __name__ == "__main__":

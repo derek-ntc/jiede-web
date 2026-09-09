@@ -26,7 +26,7 @@
         <td data-label="电话"><input form="delivery-profile-form-{{ profile.id }}" name="phone" value="{{ profile.phone }}"></td>
         <td data-label="默认说明"><input form="delivery-profile-form-{{ profile.id }}" name="default_remark" value="{{ profile.default_remark }}"></td>
         <td class="actions" data-label="操作"><div class="action-buttons">
-          <form id="delivery-profile-form-{{ profile.id }}" method="post" action="{{ url_for('edit_purchase_delivery_profile', profile_id=profile.id) }}"><label><input type="checkbox" name="is_default" {% if profile.is_default %}checked{% endif %}> 默认</label></form>
+          <form id="delivery-profile-form-{{ profile.id }}" method="post" action="{{ url_for('edit_purchase_delivery_profile', profile_id=profile.id) }}">{% if profile.active %}<label><input type="checkbox" name="is_default" {% if profile.is_default %}checked{% endif %}> 默认</label>{% endif %}</form>
           <button form="delivery-profile-form-{{ profile.id }}" type="submit">保存</button>
           {% if profile.active %}<form method="post" action="{{ url_for('deactivate_purchase_delivery_profile', profile_id=profile.id) }}"><button class="danger" type="submit">停用</button></form>{% else %}<form method="post" action="{{ url_for('reactivate_purchase_delivery_profile', profile_id=profile.id) }}"><button type="submit">恢复</button></form>{% endif %}
         </div></td>
