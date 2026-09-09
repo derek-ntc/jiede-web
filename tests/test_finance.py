@@ -314,6 +314,19 @@ class FinanceDomainTestCase(unittest.TestCase):
 
 
 class FinanceSourceTests(FinanceDomainTestCase):
+    def test_supplemental_sources_are_available_only_when_priced_and_positive(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            _, priced = insert_supplemental(conn, self.manual_a, price=0, currency='CNY')
+            _, unpriced = insert_supplemental(conn, self.manual_a, price=None, token='unpriced')
+            conn.execute('UPDATE assembly_shipment_items SET shipped_quantity=0 WHERE id=?', (self.assembly_a_cny,))
+            sources = app.fetch_available_finance_sources(conn, '客户A')
+            refs = {(s['source_type'], s['source_id']) for s in sources}
+            self.assertIn(('supplemental', priced), refs)
+            self.assertNotIn(('supplemental', unpriced), refs)
+            self.assertNotIn(('assembly_item', self.assembly_a_cny), refs)
+            self.assertIsNone(app._fetch_finance_source(conn, 'assembly_item', self.assembly_a_cny))
+
     def test_available_sources_are_normalized_and_exclude_unpriced_and_claimed(self):
         now = "2026-09-03T10:00:00"
         with app.get_db() as conn:

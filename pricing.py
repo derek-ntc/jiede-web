@@ -60,6 +60,8 @@ def format_money_minor(value: int | None, currency: str) -> str:
 def line_total_minor(unit_price_minor: int | None, quantity: int) -> int | None:
     if quantity < 0:
         raise ValueError("数量不能为负数")
+    if quantity == 0:
+        return 0
     if unit_price_minor is None:
         return None
     total = unit_price_minor * quantity

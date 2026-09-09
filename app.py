@@ -141,8 +141,10 @@ from shipping_workflow import (
     load_delivery_note,
     parse_recipient_overrides,
     start_delivery_operation,
+    supplemental_source_select,
     current_specification_snapshots,
     ensure_shipping_workflow_tables,
+    ensure_supplemental_source_type,
     normalize_recipient_fields,
 )
 
@@ -543,6 +545,7 @@ def init_db():
     INSPECTION_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     PRODUCTION_DRAWINGS_DIR.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS manuals (
@@ -1309,10 +1312,11 @@ def ensure_finance_tables(conn):
             line_total_minor INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (invoice_id) REFERENCES finance_invoices(id) ON DELETE CASCADE,
-            CHECK (source_type IN ('ordinary', 'assembly_item'))
+            CHECK (source_type IN ('ordinary', 'assembly_item', 'supplemental'))
         )
         """
     )
+    ensure_supplemental_source_type(conn, 'finance_invoice_items')
 
 
 def ensure_reconciliation_tables(conn):
@@ -1420,10 +1424,11 @@ def ensure_reconciliation_tables(conn):
             remark TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             FOREIGN KEY (statement_id) REFERENCES reconciliation_statements(id) ON DELETE CASCADE,
-            CHECK (source_type IN ('ordinary', 'assembly_item'))
+            CHECK (source_type IN ('ordinary', 'assembly_item', 'supplemental'))
         )
         """
     )
+    ensure_supplemental_source_type(conn, 'reconciliation_statement_items')
     now = datetime.utcnow().isoformat(timespec="seconds")
     conn.execute(
         """
@@ -6115,7 +6120,7 @@ def fetch_shipment_by_photo_token(conn, token):
     ).fetchone()
 
 
-FINANCE_SOURCE_TYPES = frozenset({"ordinary", "assembly_item"})
+FINANCE_SOURCE_TYPES = frozenset({"ordinary", "assembly_item", "supplemental"})
 FINANCE_STATUS_LABELS = {
     "pending": "待开票",
     "invoiced": "已开票",
@@ -6151,6 +6156,8 @@ def parse_finance_source_refs(raw_refs):
 
 
 def _finance_source_select(source_type):
+    if source_type == 'supplemental':
+        return supplemental_source_select()
     if source_type == "ordinary":
         return """
             SELECT 'ordinary' AS source_type,
@@ -6175,6 +6182,7 @@ def _finance_source_select(source_type):
               ON product_orders.id = product_order_shipments.order_id
             JOIN manuals
               ON manuals.id = product_orders.manual_id
+            WHERE product_order_shipments.shipped_quantity > 0
         """
     if source_type == "assembly_item":
         return """
@@ -6201,6 +6209,7 @@ def _finance_source_select(source_type):
             FROM assembly_shipment_items
             JOIN assembly_shipment_batches
               ON assembly_shipment_batches.id = assembly_shipment_items.batch_id
+            WHERE assembly_shipment_items.shipped_quantity > 0
         """
     raise ValueError("发货记录来源无效")
 
@@ -6227,7 +6236,7 @@ def fetch_available_finance_sources(conn, customer_name, currency=""):
     if currency:
         normalized_currency = normalize_currency(currency)
     sources = []
-    for source_type in ("ordinary", "assembly_item"):
+    for source_type in ("ordinary", "assembly_item", "supplemental"):
         params = [customer_name]
         currency_condition = ""
         if normalized_currency:
@@ -6550,7 +6559,7 @@ def assert_finance_sources_mutable(conn, refs):
             )
 
 
-RECONCILIATION_SOURCE_TYPES = frozenset({"ordinary", "assembly_item"})
+RECONCILIATION_SOURCE_TYPES = frozenset({"ordinary", "assembly_item", "supplemental"})
 RECONCILIATION_STATUS_LABELS = {
     "pending": "待客户处理",
     "confirmed": "已确认",
@@ -6609,6 +6618,8 @@ def _normalize_reconciliation_source_refs(source_refs, require_nonempty=True):
 
 
 def _reconciliation_source_select(source_type):
+    if source_type == 'supplemental':
+        return supplemental_source_select()
     if source_type == "ordinary":
         return """
             SELECT 'ordinary' AS source_type,
@@ -6640,6 +6651,7 @@ def _reconciliation_source_select(source_type):
               ON product_orders.id = product_order_shipments.order_id
             JOIN manuals
               ON manuals.id = product_orders.manual_id
+            WHERE product_order_shipments.shipped_quantity > 0
         """
     if source_type == "assembly_item":
         return """
@@ -6680,6 +6692,7 @@ def _reconciliation_source_select(source_type):
               ON assembly_shipment_batches.id = assembly_shipment_items.batch_id
             JOIN manuals
               ON manuals.id = assembly_shipment_items.manual_id
+            WHERE assembly_shipment_items.shipped_quantity > 0
         """
     raise ValueError("发货记录来源无效")
 

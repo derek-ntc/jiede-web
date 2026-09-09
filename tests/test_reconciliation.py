@@ -317,6 +317,17 @@ class ReconciliationDomainTestCase(unittest.TestCase):
 
 
 class ReconciliationCreationTests(ReconciliationDomainTestCase):
+    def test_supplemental_snapshot_inclusion_and_zero_assembly_exclusion(self):
+        from tests.test_supplemental_shipments import insert_supplemental
+        with app.get_db() as conn:
+            _, sid = insert_supplemental(conn, self.manual_a, price=11300, currency='CNY')
+            result = app.create_reconciliation_statement(conn, [('supplemental', sid)], 'finance')
+            item = app.fetch_reconciliation_statement_items(conn, result['statement_id'])[0]
+            self.assertEqual((item['drawing_no'], item['quantity'], item['amount_incl_tax_minor'], item['remark']),
+                             ('SUP-100', 2, 22600, '行备注'))
+            conn.execute('UPDATE assembly_shipment_items SET shipped_quantity=0 WHERE id=?', (self.assembly_a_cny,))
+            self.assertIsNone(app._fetch_reconciliation_source(conn, 'assembly_item', self.assembly_a_cny))
+
     def test_create_statement_snapshots_mixed_sources_and_exact_totals(self):
         with app.get_db() as conn:
             result = app.create_reconciliation_statement(

@@ -328,6 +328,8 @@ class ShippingWorkflowFieldTests(AssemblyAppTestCase):
                 "SELECT note_id FROM delivery_note_sources WHERE source_type='ordinary' AND source_id=?",
                 (shipment_id,),
             ).fetchone()[0]
+            # Model an actual historical note: new notes now freeze lines.
+            conn.execute('DELETE FROM delivery_note_items WHERE note_id=?', (note_id,))
             note = app.load_delivery_note(conn, note_id)
 
         label = "当前规格，历史未保存"

@@ -571,6 +571,9 @@ class ShipmentPriceVisibilityTests(ShipmentPriceTestCase):
             " ".join(statement.lower().split())
             for statement in statements
             if statement.lstrip().lower().startswith("select")
+            # Startup reads CREATE TABLE definitions to verify migrations;
+            # those schema reads do not select finance/customer price records.
+            and not statement.lstrip().lower().startswith("select sql from sqlite_master")
         ]
         self.assertTrue(price_selects)
         for statement in price_selects:
@@ -607,7 +610,7 @@ class ShipmentPriceVisibilityTests(ShipmentPriceTestCase):
                 html = response.get_data(as_text=True)
                 for statement in statements:
                     normalized = " ".join(statement.lower().split())
-                    if normalized.startswith("select"):
+                    if normalized.startswith("select") and not normalized.startswith("select sql from sqlite_master"):
                         self.assertNotIn("unit_price_minor", normalized)
                         self.assertNotRegex(normalized, r"\bcurrency\b")
                         self.assertNotIn("finance_", normalized)

@@ -286,7 +286,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.assertEqual(self.client.post('/admin/shipped-orders/new', data=data).status_code, 302)
         self.assertEqual(len(self.note_rows()), 1)
 
-    def test_ordinary_edit_updates_note_and_delete_invalidates_download(self):
+    def test_ordinary_edit_keeps_snapshot_and_delete_invalidates_download(self):
         data = self.ordinary_data()
         data['shipped_quantity'] = '2'
         self.client.post('/admin/shipped-orders/new', data=data)
@@ -297,7 +297,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.client.post(f'/admin/shipped-orders/{sid}/edit', data={'shipped_quantity': '3', 'shipped_at': '2026-09-09'})
         with app.get_db() as conn:
             note = shipping_workflow.load_delivery_note(conn, note_id)
-        self.assertEqual(note['items'][0]['shipped_quantity'], 3)
+        self.assertEqual(note['items'][0]['shipped_quantity'], 2)
         self.assertNotEqual(note['updated_at'], '2000-01-01')
         self.client.post(f'/admin/shipped-orders/{sid}/delete')
         self.assertEqual(self.client.get(f'/admin/delivery-notes/{note_id}.pdf').status_code, 410)
@@ -334,7 +334,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
             self.assertNotEqual(conn.execute('SELECT id FROM assembly_shipment_items').fetchone()[0], item_id)
             note = shipping_workflow.load_delivery_note(conn, note_id)
         self.assertEqual(note['invalidated'], 0)
-        self.assertEqual(note['items'][0]['shipped_quantity'], 3)
+        self.assertEqual(note['items'][0]['shipped_quantity'], 2)
         self.assertEqual(note['recipient_name'], '张师傅')
         self.assertEqual(self.client.get(f'/admin/delivery-notes/{note_id}.pdf').status_code, 200)
         self.client.post(f'/admin/shipped-orders/assembly/{batch_id}/delete')
@@ -550,6 +550,8 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.assertEqual(response.status_code, 201, response.get_json())
         note_id = self.note_rows()[0]['id']
         with app.get_db() as conn:
+            # Historical notes without line snapshots still read live allocations.
+            conn.execute('DELETE FROM delivery_note_items WHERE note_id=?', (note_id,))
             item = conn.execute('SELECT id FROM assembly_shipment_items').fetchone()
             conn.execute(
                 'UPDATE assembly_shipment_allocations SET quantity=6 WHERE item_id=?',
@@ -576,6 +578,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.assertEqual(response.status_code, 201, response.get_json())
         note_id = self.note_rows()[0]['id']
         with app.get_db() as conn:
+            conn.execute('DELETE FROM delivery_note_items WHERE note_id=?', (note_id,))
             item_id = conn.execute('SELECT id FROM assembly_shipment_items').fetchone()[0]
             conn.execute('UPDATE assembly_shipment_items SET specification_snapshot=NULL WHERE id=?', (item_id,))
             conn.execute("UPDATE manuals SET supplier='当前组装规格' WHERE id=?", (self.product,))
