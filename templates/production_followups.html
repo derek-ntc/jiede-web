@@ -5,7 +5,7 @@
   <section class="page-head">
     <div>
       <h1>生产跟进</h1>
-      <p>跟进激光、折弯、焊接的生产完成情况。</p>
+      <p>按每张工艺卡的实际步骤跟进生产完成情况。</p>
     </div>
     <div class="head-stat">
       <strong>{{ followups|length }}</strong>
@@ -90,9 +90,7 @@
           <col style="width: 170px;">
           <col style="width: 240px;">
           <col style="width: 260px;">
-          <col style="width: 120px;">
-          <col style="width: 120px;">
-          <col style="width: 120px;">
+          <col style="width: 560px;">
           <col style="width: 120px;">
           <col style="width: 110px;">
         </colgroup>
@@ -104,9 +102,7 @@
             <th>产品图号</th>
             <th>产品名称</th>
             <th>图纸</th>
-            <th>激光</th>
-            <th>折弯</th>
-            <th>焊接</th>
+            <th>生产工艺</th>
             <th>工艺卡片</th>
             <th>操作</th>
           </tr>
@@ -114,7 +110,7 @@
         <tbody>
           {% for item in followups %}
             {% set row = item.row %}
-            <tr class="{% if row.laser_completed_at and row.bending_completed_at and row.welding_completed_at %}order-completed{% endif %}">
+            <tr class="{% if item.processes and not (item.processes | rejectattr('completed_at') | list) %}order-completed{% endif %}">
               <td data-label="批次号">{{ row.batch_no }}</td>
               <td data-label="下单时间">{{ row.ordered_at }}</td>
               <td data-label="客户">
@@ -152,32 +148,86 @@
                   {% endfor %}
                 </div>
               </td>
-              {% for stage in ["laser", "bending", "welding"] %}
-                {% set completed_at = row[stage ~ "_completed_at"] %}
-                <td data-label="{{ stage_labels[stage] }}">
-                  {% if completed_at %}
-                    {% if can_manage_production_followups and stage_can_revert(row, stage) %}
-                      <form method="post" action="{{ url_for('complete_production_stage', followup_id=row.id, stage=stage) }}" onsubmit="return confirm('确定把{{ stage_labels[stage] }}改回未完成吗？');">
-                        <input type="hidden" name="filter_q" value="{{ query }}">
-                        <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
-                        <button class="production-stage-button is-complete" type="submit">完成</button>
-                      </form>
-                    {% else %}
-                      <button class="production-stage-button is-complete" type="button" disabled>完成</button>
-                    {% endif %}
-                  {% elif can_manage_production_followups and stage_can_complete(row, stage) %}
-                    <form method="post" action="{{ url_for('complete_production_stage', followup_id=row.id, stage=stage) }}">
-                      <input type="hidden" name="filter_q" value="{{ query }}">
-                      <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
-                      <button class="production-stage-button" type="submit">{{ stage_labels[stage] }}</button>
-                    </form>
+              <td data-label="生产工艺">
+                <ol class="production-process-list">
+                  {% for step in item.processes %}
+                    <li class="production-process-row{% if step.completed_at %} is-complete{% endif %}">
+                      <span class="production-process-number">{{ loop.index }}</span>
+                      <div class="production-process-summary">
+                        <strong>{{ step.name }}</strong>
+                        {% if step.completed_at %}
+                          <span class="production-process-meta">已完成 · {{ step.completed_at.replace("T", " ")[:16] }}{% if step.completed_by %} · {{ step.completed_by }}{% endif %}</span>
+                        {% elif step.can_complete %}
+                          <span class="production-process-meta">当前待完成</span>
+                        {% else %}
+                          <span class="production-process-meta">待前序工艺完成</span>
+                        {% endif %}
+                      </div>
+                      {% if can_manage_production_followups %}
+                        <div class="production-process-actions">
+                          {% if step.completed_at %}
+                            {% if step.can_revert %}
+                              <form method="post" action="{{ url_for('revert_production_followup_process', followup_id=row.id, step_id=step.id) }}" onsubmit="return confirm('确定撤回{{ step.name }}吗？');">
+                                <input type="hidden" name="filter_q" value="{{ query }}">
+                                <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                                <button class="secondary compact-button" type="submit">撤回</button>
+                              </form>
+                            {% else %}
+                              <button class="secondary compact-button" type="button" disabled>撤回</button>
+                            {% endif %}
+                          {% elif step.can_complete %}
+                            <form method="post" action="{{ url_for('complete_production_followup_process', followup_id=row.id, step_id=step.id) }}">
+                              <input type="hidden" name="filter_q" value="{{ query }}">
+                              <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                              <button class="compact-button" type="submit">完成</button>
+                            </form>
+                          {% else %}
+                            <button class="secondary compact-button" type="button" disabled>完成</button>
+                          {% endif %}
+
+                          {% if not step.completed_at %}
+                            {% if step.can_move_up %}
+                              <form method="post" action="{{ url_for('move_production_followup_process', followup_id=row.id, step_id=step.id) }}">
+                                <input type="hidden" name="direction" value="up">
+                                <input type="hidden" name="filter_q" value="{{ query }}">
+                                <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                                <button class="secondary compact-button" type="submit" aria-label="上移{{ step.name }}">↑</button>
+                              </form>
+                            {% else %}
+                              <button class="secondary compact-button" type="button" disabled aria-label="不可上移{{ step.name }}">↑</button>
+                            {% endif %}
+                            {% if step.can_move_down %}
+                              <form method="post" action="{{ url_for('move_production_followup_process', followup_id=row.id, step_id=step.id) }}">
+                                <input type="hidden" name="direction" value="down">
+                                <input type="hidden" name="filter_q" value="{{ query }}">
+                                <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                                <button class="secondary compact-button" type="submit" aria-label="下移{{ step.name }}">↓</button>
+                              </form>
+                            {% else %}
+                              <button class="secondary compact-button" type="button" disabled aria-label="不可下移{{ step.name }}">↓</button>
+                            {% endif %}
+                            <form method="post" action="{{ url_for('delete_production_followup_process', followup_id=row.id, step_id=step.id) }}" onsubmit="return confirm('确定删除{{ step.name }}吗？');">
+                              <input type="hidden" name="filter_q" value="{{ query }}">
+                              <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                              <button class="danger compact-button" type="submit">删除</button>
+                            </form>
+                          {% endif %}
+                        </div>
+                      {% endif %}
+                    </li>
                   {% else %}
-                    <button class="production-stage-button secondary" type="button" disabled>
-                      {% if stage_can_complete(row, stage) %}待操作{% else %}{{ stage_waiting_text(row, stage) }}{% endif %}
-                    </button>
-                  {% endif %}
-                </td>
-              {% endfor %}
+                    <li class="empty-text">暂无生产工艺</li>
+                  {% endfor %}
+                </ol>
+                {% if can_manage_production_followups %}
+                  <form method="post" action="{{ url_for('add_production_followup_process', followup_id=row.id) }}" class="production-process-add-form">
+                    <input type="hidden" name="filter_q" value="{{ query }}">
+                    <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                    <input type="text" name="name" maxlength="100" required placeholder="新工艺名称" aria-label="{{ row.batch_no }} 新工艺名称">
+                    <button class="secondary compact-button" type="submit">新增</button>
+                  </form>
+                {% endif %}
+              </td>
               <td data-label="工艺卡片">
                 <a class="button secondary compact-button" href="{{ url_for('preview_production_process_card', followup_id=row.id) }}" target="_blank">预览</a>
               </td>
@@ -195,7 +245,7 @@
             </tr>
           {% else %}
             <tr>
-              <td colspan="11" class="empty">暂无生产跟进</td>
+              <td colspan="9" class="empty">暂无生产跟进</td>
             </tr>
           {% endfor %}
         </tbody>

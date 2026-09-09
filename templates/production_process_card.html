@@ -47,21 +47,24 @@
               <th>工序</th>
               <th>状态</th>
               <th>完成时间</th>
-              <th>操作人/备注</th>
+              <th>操作人</th>
             </tr>
           </thead>
           <tbody>
-            {% for stage in ["laser", "bending", "welding"] %}
-              {% set completed_at = row[stage ~ "_completed_at"] %}
+            {% for step in followup.processes %}
               <tr>
-                <td>{{ stage_labels[stage] }}</td>
+                <td>{{ step.name }}</td>
                 <td>
-                  <span class="process-stage-check{% if completed_at %} is-checked{% endif %}" aria-label="{{ '完成' if completed_at else '待完成' }}">
-                    {% if completed_at %}✓{% endif %}
+                  <span class="process-stage-check{% if step.completed_at %} is-checked{% endif %}" aria-label="{{ '完成' if step.completed_at else '待完成' }}">
+                    {% if step.completed_at %}✓{% endif %}
                   </span>
                 </td>
-                <td>{{ completed_at|datetime if completed_at else "" }}</td>
-                <td></td>
+                <td>{{ step.completed_at.replace("T", " ")[:16] if step.completed_at else "" }}</td>
+                <td>{{ step.completed_by }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="4" class="empty-text">无生产工艺</td>
               </tr>
             {% endfor %}
           </tbody>

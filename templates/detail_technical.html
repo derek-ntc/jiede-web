@@ -72,6 +72,63 @@
     {% endif %}
   </section>
 
+  <section class="panel" id="default-production-processes">
+    <div class="section-head">
+      <div>
+        <h2>默认生产工艺</h2>
+        <p class="field-help">新建生产跟进时会按当前顺序复制这些工艺，已有工艺卡不会随后续修改而变化。</p>
+      </div>
+    </div>
+    {% if can_edit_products %}
+      <form method="post" action="{{ url_for('save_product_process_template', manual_id=manual.id) }}" class="process-template-editor" data-process-template-editor>
+        <ol class="process-template-rows" data-process-template-rows>
+          {% for step in process_template %}
+            <li class="process-template-row" data-process-template-row>
+              <span class="process-template-order" aria-hidden="true"></span>
+              <label>
+                <span class="sr-only">生产工艺名称</span>
+                <input type="text" name="process_name" value="{{ step.name }}" maxlength="100" required aria-label="生产工艺名称">
+              </label>
+              <div class="process-template-actions">
+                <button class="secondary compact-button" type="button" data-move-process-up aria-label="上移{{ step.name }}">上移</button>
+                <button class="secondary compact-button" type="button" data-move-process-down aria-label="下移{{ step.name }}">下移</button>
+                <button class="danger compact-button" type="button" data-remove-process-step aria-label="删除{{ step.name }}">删除</button>
+              </div>
+            </li>
+          {% endfor %}
+        </ol>
+        <p class="empty-text process-template-empty" data-process-template-empty{% if process_template %} hidden{% endif %}>已明确设置为无默认工艺。</p>
+        <p class="form-error" data-process-template-error role="alert" hidden></p>
+        <div class="form-actions process-template-footer">
+          <button class="secondary" type="button" data-add-process-step>新增工艺</button>
+          <button type="submit">保存默认工艺</button>
+        </div>
+        <template data-process-step-template>
+          <li class="process-template-row" data-process-template-row>
+            <span class="process-template-order" aria-hidden="true"></span>
+            <label>
+              <span class="sr-only">生产工艺名称</span>
+              <input type="text" name="process_name" maxlength="100" required aria-label="生产工艺名称">
+            </label>
+            <div class="process-template-actions">
+              <button class="secondary compact-button" type="button" data-move-process-up>上移</button>
+              <button class="secondary compact-button" type="button" data-move-process-down>下移</button>
+              <button class="danger compact-button" type="button" data-remove-process-step>删除</button>
+            </div>
+          </li>
+        </template>
+      </form>
+    {% elif process_template %}
+      <ol class="process-template-readonly">
+        {% for step in process_template %}
+          <li>{{ step.name }}</li>
+        {% endfor %}
+      </ol>
+    {% else %}
+      <p class="empty-text">无默认生产工艺</p>
+    {% endif %}
+  </section>
+
   <section class="panel" id="work-instruction">
     <h2>作业指导书</h2>
     {% if manual.description_html %}
@@ -105,4 +162,80 @@
       <p class="empty-text">暂无检验要求</p>
     {% endif %}
   </section>
+{% endblock %}
+{% block scripts %}
+  <script>
+    document.querySelectorAll("[data-process-template-editor]").forEach((editor) => {
+      const list = editor.querySelector("[data-process-template-rows]");
+      const template = editor.querySelector("[data-process-step-template]");
+      const empty = editor.querySelector("[data-process-template-empty]");
+      const error = editor.querySelector("[data-process-template-error]");
+      const addButton = editor.querySelector("[data-add-process-step]");
+
+      function clearError() {
+        error.textContent = "";
+        error.hidden = true;
+      }
+
+      function refreshRows() {
+        const rows = Array.from(list.querySelectorAll("[data-process-template-row]"));
+        rows.forEach((row, index) => {
+          row.querySelector("[data-move-process-up]").disabled = index === 0;
+          row.querySelector("[data-move-process-down]").disabled = index === rows.length - 1;
+        });
+        empty.hidden = rows.length !== 0;
+      }
+
+      function bindRow(row) {
+        row.querySelector("input").addEventListener("input", clearError);
+        row.querySelector("[data-remove-process-step]").addEventListener("click", () => {
+          row.remove();
+          clearError();
+          refreshRows();
+        });
+        row.querySelector("[data-move-process-up]").addEventListener("click", () => {
+          const previous = row.previousElementSibling;
+          if (previous) list.insertBefore(row, previous);
+          clearError();
+          refreshRows();
+        });
+        row.querySelector("[data-move-process-down]").addEventListener("click", () => {
+          const following = row.nextElementSibling;
+          if (following) list.insertBefore(following, row);
+          clearError();
+          refreshRows();
+        });
+      }
+
+      list.querySelectorAll("[data-process-template-row]").forEach(bindRow);
+      addButton.addEventListener("click", () => {
+        const row = template.content.firstElementChild.cloneNode(true);
+        bindRow(row);
+        list.appendChild(row);
+        refreshRows();
+        row.querySelector("input").focus();
+      });
+      editor.addEventListener("submit", (event) => {
+        const inputs = Array.from(list.querySelectorAll('input[name="process_name"]'));
+        const names = inputs.map((input) => input.value.trim());
+        const duplicate = names.find((name, index) =>
+          name && names.findIndex((candidate) => candidate.toLocaleLowerCase() === name.toLocaleLowerCase()) !== index
+        );
+        if (names.some((name) => !name)) {
+          event.preventDefault();
+          error.textContent = "生产工艺名称不能为空";
+          error.hidden = false;
+          return;
+        }
+        if (duplicate) {
+          event.preventDefault();
+          error.textContent = "同一产品的生产工艺名称不能重复";
+          error.hidden = false;
+          return;
+        }
+        inputs.forEach((input, index) => { input.value = names[index]; });
+      });
+      refreshRows();
+    });
+  </script>
 {% endblock %}

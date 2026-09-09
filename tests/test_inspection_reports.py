@@ -557,7 +557,7 @@ class InspectionReportTests(unittest.TestCase):
         app.DB_PATH = original_db_path
         app.DATABASE_READY = original_database_ready
 
-    def test_production_followup_page_keeps_stage_columns_and_shows_selected_files_ui(self):
+    def test_production_followup_page_shows_process_cards_and_selected_files_ui(self):
         original_db_path = app.DB_PATH
         original_database_ready = app.DATABASE_READY
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -612,13 +612,14 @@ class InspectionReportTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn('class="production-followup-inputs"', html)
-            self.assertIn("<th>激光</th>", html)
-            self.assertIn("<th>折弯</th>", html)
-            self.assertIn("<th>焊接</th>", html)
+            self.assertIn("<th>生产工艺</th>", html)
+            self.assertIn("<strong>激光</strong>", html)
+            self.assertIn("<strong>折弯</strong>", html)
+            self.assertIn("<strong>焊接</strong>", html)
             self.assertIn("<th>操作</th>", html)
             self.assertIn("order-completed", html)
             self.assertIn("/admin/production-followups/2/delete", html)
-            self.assertNotIn("<th>工序进度</th>", html)
+            self.assertNotIn("<th>激光</th>", html)
             self.assertIn("data-production-drawing-input", html)
             self.assertIn("data-selected-production-drawings", html)
 

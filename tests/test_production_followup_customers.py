@@ -157,6 +157,193 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertIn("客户A专用产品", html)
         self.assertNotIn("客户B专用产品", html)
 
+        product_name_response = self.client.get(
+            "/admin/production-followups",
+            query_string={"customer": "客户A", "q": "另一产品"},
+        )
+        product_name_html = product_name_response.get_data(as_text=True)
+        self.assertIn("客户A另一产品", product_name_html)
+        self.assertNotIn("客户A专用产品", product_name_html)
+
+    def test_production_list_renders_snapshot_processes_and_filter_preserving_actions(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["下料", "钻孔", "包装"],
+                now="2026-09-09T09:00:00",
+            )
+            steps = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+
+        response = self.client.get(
+            "/admin/production-followups",
+            query_string={"customer": "客户A", "q": "P1"},
+        )
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("下料", html)
+        self.assertIn("钻孔", html)
+        self.assertIn("包装", html)
+        self.assertIn(
+            f'/admin/production-followups/1/processes/{steps[0]["id"]}/complete',
+            html,
+        )
+        self.assertNotIn(
+            f'/admin/production-followups/1/processes/{steps[1]["id"]}/complete',
+            html,
+        )
+        self.assertIn(
+            f'/admin/production-followups/1/processes/{steps[1]["id"]}/move',
+            html,
+        )
+        self.assertIn('/admin/production-followups/1/processes', html)
+        self.assertIn('name="filter_q" value="P1"', html)
+        self.assertIn('name="filter_customer" value="客户A"', html)
+        self.assertNotIn('/admin/production-followups/1/laser', html)
+        self.assertNotIn("待激光", html)
+        self.assertNotIn("待折弯", html)
+
+    def test_production_list_backfills_and_renders_a_legacy_followup_card(self):
+        app.DATABASE_READY = True
+        response = self.client.get(
+            "/admin/production-followups",
+            query_string={"customer": "__unassigned__", "q": "OLD"},
+        )
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(html.index("<strong>激光</strong>"), html.index("<strong>折弯</strong>"))
+        self.assertLess(html.index("<strong>折弯</strong>"), html.index("<strong>焊接</strong>"))
+        with app.get_db() as conn:
+            marker = conn.execute(
+                "SELECT process_snapshot_created FROM production_followups WHERE id = 4"
+            ).fetchone()["process_snapshot_created"]
+            steps = production_processes.load_followup_process_card(conn, 4)
+        self.assertEqual(marker, 1)
+        self.assertEqual([step["name"] for step in steps], ["激光", "折弯", "焊接"])
+
+    def test_process_routes_delegate_add_move_complete_revert_and_delete_rules(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["下料", "检验"],
+                now="2026-09-09T09:00:00",
+            )
+            initial = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+
+        add_response = self.client.post(
+            "/admin/production-followups/1/processes",
+            data={
+                "name": "  包装  ",
+                "filter_q": "P1",
+                "filter_customer": "客户A",
+            },
+        )
+        location = urlsplit(add_response.headers["Location"])
+        self.assertEqual(location.path, "/admin/production-followups")
+        self.assertEqual(
+            parse_qs(location.query),
+            {"q": ["P1"], "customer": ["客户A"]},
+        )
+        with app.get_db() as conn:
+            after_add = production_processes.load_followup_process_card(conn, 1)
+        added = after_add[-1]
+        self.assertEqual([step["name"] for step in after_add], ["下料", "检验", "包装"])
+
+        self.client.post(
+            f'/admin/production-followups/1/processes/{added["id"]}/move',
+            data={"direction": "up"},
+        )
+        denied_completion = self.client.post(
+            f'/admin/production-followups/1/processes/{initial[1]["id"]}/complete',
+            follow_redirects=True,
+        )
+        self.assertIn("只能完成第一项未完成工艺", denied_completion.get_data(as_text=True))
+
+        self.client.post(
+            f'/admin/production-followups/1/processes/{initial[0]["id"]}/complete'
+        )
+        denied_delete = self.client.post(
+            f'/admin/production-followups/1/processes/{initial[0]["id"]}/delete',
+            follow_redirects=True,
+        )
+        self.assertIn("已完成工艺必须先撤回再删除", denied_delete.get_data(as_text=True))
+
+        self.client.post(
+            f'/admin/production-followups/1/processes/{initial[0]["id"]}/revert'
+        )
+        self.client.post(
+            f'/admin/production-followups/1/processes/{initial[1]["id"]}/delete'
+        )
+
+        with app.get_db() as conn:
+            final = production_processes.load_followup_process_card(conn, 1)
+        self.assertEqual(
+            [(step["name"], step["completed_at"], step["completed_by"]) for step in final],
+            [("下料", "", ""), ("包装", "", "")],
+        )
+
+    def test_process_routes_return_not_found_for_an_unknown_followup(self):
+        response = self.client.post(
+            "/admin/production-followups/999999/processes",
+            data={"name": "下料"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_printable_process_card_renders_two_copies_of_every_snapshot_step(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["下料", "钻孔", "检验", "包装"],
+                now="2026-09-09T09:00:00",
+            )
+            steps = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+            production_processes.complete_followup_process_step(
+                conn,
+                1,
+                steps[0]["id"],
+                "operator-a",
+                completed_at="2026-09-09T10:10:00+08:00",
+            )
+            production_processes.complete_followup_process_step(
+                conn,
+                1,
+                steps[1]["id"],
+                "operator-b",
+                completed_at="2026-09-09T10:20:00+08:00",
+            )
+
+        response = self.client.get("/admin/production-followups/1/process-card")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(html.count('<article class="process-card">'), 2)
+        for process_name in ["下料", "钻孔", "检验", "包装"]:
+            self.assertEqual(html.count(f"<td>{process_name}</td>"), 2)
+        self.assertEqual(html.count("operator-a"), 2)
+        self.assertEqual(html.count("operator-b"), 2)
+        self.assertEqual(html.count("2026-09-09 10:10"), 2)
+        self.assertEqual(html.count("2026-09-09 10:20"), 2)
+
     def test_product_lookup_is_customer_scoped_permission_guarded_and_price_safe(self):
         response = self.client.get(
             "/admin/production-followups/products",

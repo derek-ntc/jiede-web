@@ -366,6 +366,38 @@ def _card_step(card, step_id):
     raise ValueError("生产工艺不存在")
 
 
+def followup_process_card_actions(card):
+    """Return ordered card rows decorated with the transitions currently allowed."""
+    rows = [dict(step) for step in card]
+    first_uncompleted = next(
+        (step for step in rows if not step["completed_at"]), None
+    )
+    completed = [step for step in rows if step["completed_at"]]
+    last_completed = completed[-1] if completed else None
+    for position, step in enumerate(rows):
+        is_completed = bool(step["completed_at"])
+        previous = rows[position - 1] if position > 0 else None
+        following = rows[position + 1] if position + 1 < len(rows) else None
+        step["can_complete"] = bool(
+            first_uncompleted and first_uncompleted["id"] == step["id"]
+        )
+        step["can_revert"] = bool(
+            last_completed and last_completed["id"] == step["id"]
+        )
+        step["can_delete"] = not is_completed
+        step["can_move_up"] = bool(
+            not is_completed and previous and not previous["completed_at"]
+        )
+        step["can_move_down"] = bool(
+            not is_completed and following and not following["completed_at"]
+        )
+    return rows
+
+
+def _card_action(card, step_id):
+    return _card_step(followup_process_card_actions(card), step_id)
+
+
 def _update_followup_timestamp(conn, followup_id, timestamp):
     updated = conn.execute(
         """
@@ -407,13 +439,10 @@ def complete_followup_process_step(
         raise ValueError("生产工艺操作人不能为空")
     with _savepoint(conn, "complete_followup_process_step"):
         card = load_followup_process_card(conn, followup_id)
-        step = _card_step(card, step_id)
+        step = _card_action(card, step_id)
         if step["completed_at"]:
             raise ValueError("该生产工艺已经完成")
-        first_uncompleted = next(
-            (candidate for candidate in card if not candidate["completed_at"]), None
-        )
-        if first_uncompleted is None or first_uncompleted["id"] != step["id"]:
+        if not step["can_complete"]:
             raise ValueError("只能完成第一项未完成工艺")
         conn.execute(
             """
@@ -433,11 +462,10 @@ def revert_followup_process_step(conn, followup_id, step_id, *, now=None):
     timestamp = now or _beijing_now()
     with _savepoint(conn, "revert_followup_process_step"):
         card = load_followup_process_card(conn, followup_id)
-        step = _card_step(card, step_id)
+        step = _card_action(card, step_id)
         if not step["completed_at"]:
             raise ValueError("该生产工艺尚未完成")
-        completed = [candidate for candidate in card if candidate["completed_at"]]
-        if not completed or completed[-1]["id"] != step["id"]:
+        if not step["can_revert"]:
             raise ValueError("只能撤回最后一项已完成工艺")
         conn.execute(
             """
@@ -505,8 +533,8 @@ def delete_followup_process_step(conn, followup_id, step_id, *, now=None):
     timestamp = now or _beijing_now()
     with _savepoint(conn, "delete_followup_process_step"):
         card = load_followup_process_card(conn, followup_id)
-        step = _card_step(card, step_id)
-        if step["completed_at"]:
+        step = _card_action(card, step_id)
+        if not step["can_delete"]:
             raise ValueError("已完成工艺必须先撤回再删除")
         conn.execute(
             """
@@ -528,7 +556,7 @@ def move_followup_process_step(
     timestamp = now or _beijing_now()
     with _savepoint(conn, "move_followup_process_step"):
         card = load_followup_process_card(conn, followup_id)
-        step = _card_step(card, step_id)
+        step = _card_action(card, step_id)
         if step["completed_at"]:
             raise ValueError("已完成工艺顺序不能调整")
         position = next(
@@ -537,9 +565,9 @@ def move_followup_process_step(
         target_position = position - 1 if direction == "up" else position + 1
         if not 0 <= target_position < len(card):
             raise ValueError("生产工艺已经位于可移动边界")
-        target = card[target_position]
-        if target["completed_at"]:
+        if not step[f"can_move_{direction}"]:
             raise ValueError("未完成工艺不能跨越已完成工艺")
+        target = card[target_position]
         conn.execute(
             """
             UPDATE production_followup_process_steps

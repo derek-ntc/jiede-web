@@ -120,10 +120,16 @@ from reconciliation import (
 )
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
 from production_processes import (
+    add_followup_process_step,
     complete_followup_process_step,
     create_followup_process_snapshot,
+    delete_followup_process_step,
     ensure_production_process_tables,
+    followup_process_card_actions,
+    load_manual_process_template,
+    move_followup_process_step,
     revert_followup_process_step,
+    save_manual_process_template,
 )
 from shipping_workflow import (
     DeliveryOperationConflict,
@@ -2994,6 +3000,26 @@ def production_stage_waiting_text(row, stage):
 
 
 def fetch_production_followups(conn, query="", customer=""):
+    process_table = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'production_followup_process_steps'
+        """
+    ).fetchone()
+    if process_table is None:
+        ensure_production_process_tables(conn)
+    else:
+        pending_snapshot = conn.execute(
+            """
+            SELECT 1
+            FROM production_followups
+            WHERE process_snapshot_created = 0
+            LIMIT 1
+            """
+        ).fetchone()
+        if pending_snapshot is not None:
+            ensure_production_process_tables(conn)
     query = (query or "").strip()
     customer = (customer or "").strip()
     params = []
@@ -3050,10 +3076,27 @@ def fetch_production_followups(conn, query="", customer=""):
     files_by_followup = {followup_id: [] for followup_id in followup_ids}
     for file_row in file_rows:
         files_by_followup.setdefault(file_row["followup_id"], []).append(file_row)
+    process_rows = conn.execute(
+        f"""
+        SELECT *
+        FROM production_followup_process_steps
+        WHERE followup_id IN ({placeholders})
+        ORDER BY followup_id, sort_order, id
+        """,
+        followup_ids,
+    ).fetchall()
+    processes_by_followup = {followup_id: [] for followup_id in followup_ids}
+    for process_row in process_rows:
+        processes_by_followup.setdefault(process_row["followup_id"], []).append(
+            process_row
+        )
     return [
         {
             "row": row,
             "files": files_by_followup.get(row["id"], []),
+            "processes": followup_process_card_actions(
+                processes_by_followup.get(row["id"], [])
+            ),
         }
         for row in rows
     ]
@@ -9272,10 +9315,6 @@ def production_followups():
         selected_customer=selected_customer,
         production_followup_csrf_token=production_followup_csrf_token(),
         today=datetime.now().date().isoformat(),
-        stage_labels=PRODUCTION_STAGE_LABELS,
-        stage_can_complete=production_stage_can_complete,
-        stage_can_revert=production_stage_can_revert,
-        stage_waiting_text=production_stage_waiting_text,
     )
 
 
@@ -9316,6 +9355,97 @@ def update_production_followup_customer(followup_id):
         )
     flash("生产跟进客户已更新", "success")
     return production_followup_redirect()
+
+
+def production_process_action_result(followup_id, action, success_message):
+    try:
+        with get_db() as conn:
+            followup = conn.execute(
+                "SELECT id FROM production_followups WHERE id = ?",
+                (followup_id,),
+            ).fetchone()
+            if followup is None:
+                abort(404)
+            action(conn)
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash(success_message, "success")
+    return production_followup_redirect()
+
+
+@app.route(
+    "/admin/production-followups/<int:followup_id>/processes",
+    methods=["POST"],
+)
+@permission_required("production_followups_manage")
+def add_production_followup_process(followup_id):
+    name = request.form.get("name", "")
+    return production_process_action_result(
+        followup_id,
+        lambda conn: add_followup_process_step(conn, followup_id, name),
+        "生产工艺已新增",
+    )
+
+
+@app.route(
+    "/admin/production-followups/<int:followup_id>/processes/<int:step_id>/delete",
+    methods=["POST"],
+)
+@permission_required("production_followups_manage")
+def delete_production_followup_process(followup_id, step_id):
+    return production_process_action_result(
+        followup_id,
+        lambda conn: delete_followup_process_step(conn, followup_id, step_id),
+        "生产工艺已删除",
+    )
+
+
+@app.route(
+    "/admin/production-followups/<int:followup_id>/processes/<int:step_id>/move",
+    methods=["POST"],
+)
+@permission_required("production_followups_manage")
+def move_production_followup_process(followup_id, step_id):
+    direction = request.form.get("direction", "")
+    return production_process_action_result(
+        followup_id,
+        lambda conn: move_followup_process_step(
+            conn, followup_id, step_id, direction
+        ),
+        "生产工艺顺序已更新",
+    )
+
+
+@app.route(
+    "/admin/production-followups/<int:followup_id>/processes/<int:step_id>/complete",
+    methods=["POST"],
+)
+@permission_required("production_followups_manage")
+def complete_production_followup_process(followup_id, step_id):
+    return production_process_action_result(
+        followup_id,
+        lambda conn: complete_followup_process_step(
+            conn,
+            followup_id,
+            step_id,
+            current_admin_username(),
+        ),
+        "生产工艺已完成",
+    )
+
+
+@app.route(
+    "/admin/production-followups/<int:followup_id>/processes/<int:step_id>/revert",
+    methods=["POST"],
+)
+@permission_required("production_followups_manage")
+def revert_production_followup_process(followup_id, step_id):
+    return production_process_action_result(
+        followup_id,
+        lambda conn: revert_followup_process_step(conn, followup_id, step_id),
+        "生产工艺已撤回",
+    )
 
 
 @app.route("/admin/production-followups/<int:followup_id>/<stage>", methods=["POST"])
@@ -9410,12 +9540,17 @@ def delete_production_followup(followup_id):
 def preview_production_process_card(followup_id):
     with get_db() as conn:
         followup = fetch_production_followup_detail(conn, followup_id)
+        if followup is not None:
+            followup["processes"] = create_followup_process_snapshot(
+                conn,
+                followup_id,
+                followup["row"]["manual_id"],
+            )
     if followup is None:
         abort(404)
     return render_template(
         "production_process_card.html",
         followup=followup,
-        stage_labels=PRODUCTION_STAGE_LABELS,
         generated_at=datetime.now().strftime("%Y-%m-%d"),
     )
 
@@ -9577,6 +9712,9 @@ def manual_technical(manual_id):
         files = get_manual_files(conn, manual_id)
         inspection_requirements = get_manual_inspection_requirements(conn, manual_id)
         materials = get_product_materials(conn, manual_id)
+        process_template = (
+            load_manual_process_template(conn, manual_id) if manual else []
+        )
     if manual is None:
         abort(404)
     return render_template(
@@ -9585,6 +9723,29 @@ def manual_technical(manual_id):
         files=files,
         inspection_requirements=inspection_requirements,
         materials=materials,
+        process_template=process_template,
+    )
+
+
+@app.route("/admin/<int:manual_id>/process-template", methods=["POST"])
+@permission_required("product_edit")
+def save_product_process_template(manual_id):
+    process_names = request.form.getlist("process_name")
+    try:
+        with get_db() as conn:
+            if fetch_manual_by_id(conn, manual_id) is None:
+                abort(404)
+            save_manual_process_template(conn, manual_id, process_names)
+    except ValueError as error:
+        flash(str(error), "error")
+    else:
+        flash("默认生产工艺已保存", "success")
+    return redirect(
+        url_for(
+            "manual_technical",
+            manual_id=manual_id,
+            _anchor="default-production-processes",
+        )
     )
 
 

@@ -19,6 +19,12 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
         with app.get_db() as conn:
             self.manual_id = self._insert_manual(conn, "P-100", "产品甲")
 
+        self.client = app.app.test_client()
+        with self.client.session_transaction() as session:
+            session["admin_logged_in"] = True
+            session["admin_username"] = "admin"
+            session["admin_role"] = "admin"
+
     def tearDown(self):
         app.DB_PATH = self.original_db_path
         app.DATABASE_READY = self.original_database_ready
@@ -156,6 +162,97 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
                 production_processes.load_manual_process_template(conn, self.manual_id),
                 [],
             )
+
+    def test_product_technical_page_saves_and_renders_ordered_process_template(self):
+        response = self.client.post(
+            f"/admin/{self.manual_id}/process-template",
+            data={"process_name": ["下料", "  钻孔  ", "包装"]},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            f"/manual/{self.manual_id}/technical#default-production-processes",
+        )
+        with app.get_db() as conn:
+            saved = production_processes.load_manual_process_template(
+                conn, self.manual_id
+            )
+        self.assertEqual(
+            [(step["name"], step["sort_order"]) for step in saved],
+            [("下料", 0), ("钻孔", 1), ("包装", 2)],
+        )
+
+        page = self.client.get(f"/manual/{self.manual_id}/technical")
+        html = page.get_data(as_text=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("默认生产工艺", html)
+        self.assertLess(html.index('value="下料"'), html.index('value="钻孔"'))
+        self.assertLess(html.index('value="钻孔"'), html.index('value="包装"'))
+        self.assertIn("data-add-process-step", html)
+        self.assertIn("data-move-process-up", html)
+        self.assertIn("data-move-process-down", html)
+        self.assertIn("data-remove-process-step", html)
+        self.assertIn("保存默认工艺", html)
+
+    def test_product_technical_page_can_deliberately_save_an_empty_template(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.manual_id,
+                ["下料", "包装"],
+                now="2026-09-09T10:00:00",
+            )
+
+        response = self.client.post(
+            f"/admin/{self.manual_id}/process-template",
+            data={},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("默认生产工艺已保存", response.get_data(as_text=True))
+        with app.get_db() as conn:
+            config = conn.execute(
+                "SELECT manual_id FROM manual_process_configs WHERE manual_id = ?",
+                (self.manual_id,),
+            ).fetchone()
+            saved = production_processes.load_manual_process_template(
+                conn, self.manual_id
+            )
+        self.assertIsNotNone(config)
+        self.assertEqual(saved, [])
+
+    def test_product_process_template_route_reports_validation_without_overwriting(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.manual_id,
+                ["下料", "包装"],
+                now="2026-09-09T10:00:00",
+            )
+
+        response = self.client.post(
+            f"/admin/{self.manual_id}/process-template",
+            data={"process_name": ["Cut", " cut "]},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("生产工艺名称不能重复", response.get_data(as_text=True))
+        with app.get_db() as conn:
+            saved = production_processes.load_manual_process_template(
+                conn, self.manual_id
+            )
+        self.assertEqual([step["name"] for step in saved], ["下料", "包装"])
+
+    def test_product_process_template_route_rejects_an_unknown_product(self):
+        response = self.client.post(
+            "/admin/999999/process-template",
+            data={"process_name": ["下料"]},
+        )
+
+        self.assertEqual(response.status_code, 404)
 
     def test_template_save_normalizes_names_and_rejects_casefold_duplicates_atomically(self):
         with app.get_db() as conn:
