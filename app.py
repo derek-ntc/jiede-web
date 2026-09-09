@@ -153,6 +153,18 @@ from shipping_workflow import (
 )
 
 
+PROCUREMENT_PERMISSION_COLUMNS = {
+    "can_view_purchases": "purchase_view",
+    "can_manage_purchases": "purchase_manage",
+    "can_receive_purchases": "purchase_receipt",
+    "can_view_purchase_inventory": "purchase_inventory_view",
+    "can_adjust_purchase_inventory": "purchase_inventory_adjust",
+    "can_outbound_purchase_inventory": "purchase_inventory_outbound",
+    "can_view_purchase_prices": "purchase_price_view",
+    "can_manage_suppliers": "supplier_manage",
+}
+
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 MANUALS_DIR = BASE_DIR / "manuals"
@@ -445,6 +457,14 @@ def upload_limits():
         "can_manage_shipped": user_has_permission("shipped_manage"),
         "can_view_prices": user_can_view_prices(),
         "can_manage_finance": user_has_permission("finance_manage"),
+        "can_view_purchases": user_has_permission("purchase_view"),
+        "can_manage_purchases": user_has_permission("purchase_manage"),
+        "can_receive_purchases": user_has_permission("purchase_receipt"),
+        "can_view_purchase_inventory": user_has_permission("purchase_inventory_view"),
+        "can_adjust_purchase_inventory": user_has_permission("purchase_inventory_adjust"),
+        "can_outbound_purchase_inventory": user_has_permission("purchase_inventory_outbound"),
+        "can_view_purchase_prices": user_can_view_purchase_prices(),
+        "can_manage_suppliers": user_has_permission("supplier_manage"),
         "can_access_admin_modules": user_can_access_admin_modules(),
         "shipment_signature_url": shipment_signature_url,
         "shipment_photo_upload_url": shipment_photo_upload_url,
@@ -1212,10 +1232,32 @@ def ensure_user_table(conn):
         "can_edit_products": "ALTER TABLE users ADD COLUMN can_edit_products INTEGER NOT NULL DEFAULT 1",
         "can_view_prices": "ALTER TABLE users ADD COLUMN can_view_prices INTEGER NOT NULL DEFAULT 0",
         "can_manage_finance": "ALTER TABLE users ADD COLUMN can_manage_finance INTEGER NOT NULL DEFAULT 0",
+        "can_view_purchases": "ALTER TABLE users ADD COLUMN can_view_purchases INTEGER NOT NULL DEFAULT 0",
+        "can_manage_purchases": "ALTER TABLE users ADD COLUMN can_manage_purchases INTEGER NOT NULL DEFAULT 0",
+        "can_receive_purchases": "ALTER TABLE users ADD COLUMN can_receive_purchases INTEGER NOT NULL DEFAULT 0",
+        "can_view_purchase_inventory": "ALTER TABLE users ADD COLUMN can_view_purchase_inventory INTEGER NOT NULL DEFAULT 0",
+        "can_adjust_purchase_inventory": "ALTER TABLE users ADD COLUMN can_adjust_purchase_inventory INTEGER NOT NULL DEFAULT 0",
+        "can_outbound_purchase_inventory": "ALTER TABLE users ADD COLUMN can_outbound_purchase_inventory INTEGER NOT NULL DEFAULT 0",
+        "can_view_purchase_prices": "ALTER TABLE users ADD COLUMN can_view_purchase_prices INTEGER NOT NULL DEFAULT 0",
+        "can_manage_suppliers": "ALTER TABLE users ADD COLUMN can_manage_suppliers INTEGER NOT NULL DEFAULT 0",
+    }
+    procurement_legacy_permissions = {
+        "can_view_purchases": "can_manage_purchase_followups OR can_manage_carton_purchases OR can_manage_powder_coating",
+        "can_manage_purchases": "can_manage_purchase_followups OR can_manage_carton_purchases OR can_manage_powder_coating",
+        "can_receive_purchases": "can_manage_carton_purchases OR can_manage_warehouse_inventory",
+        "can_view_purchase_inventory": "can_manage_warehouse_inventory",
+        "can_adjust_purchase_inventory": "can_manage_warehouse_inventory",
+        "can_outbound_purchase_inventory": "can_manage_warehouse_inventory",
+        "can_view_purchase_prices": "can_view_prices OR can_manage_finance",
+        "can_manage_suppliers": "can_manage_purchase_followups OR can_manage_carton_purchases OR can_manage_powder_coating",
     }
     for column, statement in migrations.items():
         if column not in existing:
             conn.execute(statement)
+            if column in procurement_legacy_permissions:
+                conn.execute(
+                    f"UPDATE users SET {column} = CASE WHEN {procurement_legacy_permissions[column]} THEN 1 ELSE 0 END"
+                )
 
     now = datetime.utcnow().isoformat(timespec="seconds")
     legacy_username, legacy_password = admin_credentials()
@@ -2186,11 +2228,18 @@ def user_has_permission(permission):
         return bool(user["can_view_prices"])
     if permission == "finance_manage":
         return bool(user["can_manage_finance"])
+    for column, permission_key in PROCUREMENT_PERMISSION_COLUMNS.items():
+        if permission == permission_key:
+            return bool(user[column])
     return False
 
 
 def user_can_view_prices():
     return user_has_permission("price_view") or user_has_permission("finance_manage")
+
+
+def user_can_view_purchase_prices():
+    return user_has_permission("purchase_price_view") or user_has_permission("finance_manage")
 
 
 def get_suppliers():
@@ -10083,6 +10132,14 @@ def admin_users():
         can_edit_products = 1 if role == "admin" or request.form.get("can_edit_products") else 0
         can_view_prices = 1 if role == "admin" or request.form.get("can_view_prices") else 0
         can_manage_finance = 1 if role == "admin" or request.form.get("can_manage_finance") else 0
+        can_view_purchases = 1 if role == "admin" or request.form.get("can_view_purchases") else 0
+        can_manage_purchases = 1 if role == "admin" or request.form.get("can_manage_purchases") else 0
+        can_receive_purchases = 1 if role == "admin" or request.form.get("can_receive_purchases") else 0
+        can_view_purchase_inventory = 1 if role == "admin" or request.form.get("can_view_purchase_inventory") else 0
+        can_adjust_purchase_inventory = 1 if role == "admin" or request.form.get("can_adjust_purchase_inventory") else 0
+        can_outbound_purchase_inventory = 1 if role == "admin" or request.form.get("can_outbound_purchase_inventory") else 0
+        can_view_purchase_prices = 1 if role == "admin" or request.form.get("can_view_purchase_prices") else 0
+        can_manage_suppliers = 1 if role == "admin" or request.form.get("can_manage_suppliers") else 0
 
         if role not in {"admin", "operator"}:
             flash("请选择有效的用户权限", "error")
@@ -10105,9 +10162,13 @@ def admin_users():
                         can_manage_carton_purchases, can_manage_warehouse_inventory,
                         can_manage_production_followups, can_create_products, can_edit_products,
                         can_view_prices, can_manage_finance,
+                        can_view_purchases, can_manage_purchases, can_receive_purchases,
+                        can_view_purchase_inventory, can_adjust_purchase_inventory,
+                        can_outbound_purchase_inventory, can_view_purchase_prices,
+                        can_manage_suppliers,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         username,
@@ -10129,6 +10190,14 @@ def admin_users():
                         can_edit_products,
                         can_view_prices,
                         can_manage_finance,
+                        can_view_purchases,
+                        can_manage_purchases,
+                        can_receive_purchases,
+                        can_view_purchase_inventory,
+                        can_adjust_purchase_inventory,
+                        can_outbound_purchase_inventory,
+                        can_view_purchase_prices,
+                        can_manage_suppliers,
                         now,
                         now,
                     ),
@@ -10172,6 +10241,14 @@ def edit_user(user_id):
     can_edit_products = 1 if role == "admin" or request.form.get("can_edit_products") else 0
     can_view_prices = 1 if role == "admin" or request.form.get("can_view_prices") else 0
     can_manage_finance = 1 if role == "admin" or request.form.get("can_manage_finance") else 0
+    can_view_purchases = 1 if role == "admin" or request.form.get("can_view_purchases") else 0
+    can_manage_purchases = 1 if role == "admin" or request.form.get("can_manage_purchases") else 0
+    can_receive_purchases = 1 if role == "admin" or request.form.get("can_receive_purchases") else 0
+    can_view_purchase_inventory = 1 if role == "admin" or request.form.get("can_view_purchase_inventory") else 0
+    can_adjust_purchase_inventory = 1 if role == "admin" or request.form.get("can_adjust_purchase_inventory") else 0
+    can_outbound_purchase_inventory = 1 if role == "admin" or request.form.get("can_outbound_purchase_inventory") else 0
+    can_view_purchase_prices = 1 if role == "admin" or request.form.get("can_view_purchase_prices") else 0
+    can_manage_suppliers = 1 if role == "admin" or request.form.get("can_manage_suppliers") else 0
 
     if role not in {"admin", "operator"}:
         flash("请选择有效的用户权限", "error")
@@ -10203,6 +10280,10 @@ def edit_user(user_id):
                     can_manage_carton_purchases = ?, can_manage_warehouse_inventory = ?,
                     can_manage_production_followups = ?, can_create_products = ?, can_edit_products = ?,
                     can_view_prices = ?, can_manage_finance = ?,
+                    can_view_purchases = ?, can_manage_purchases = ?, can_receive_purchases = ?,
+                    can_view_purchase_inventory = ?, can_adjust_purchase_inventory = ?,
+                    can_outbound_purchase_inventory = ?, can_view_purchase_prices = ?,
+                    can_manage_suppliers = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -10225,6 +10306,14 @@ def edit_user(user_id):
                     can_edit_products,
                     can_view_prices,
                     can_manage_finance,
+                    can_view_purchases,
+                    can_manage_purchases,
+                    can_receive_purchases,
+                    can_view_purchase_inventory,
+                    can_adjust_purchase_inventory,
+                    can_outbound_purchase_inventory,
+                    can_view_purchase_prices,
+                    can_manage_suppliers,
                     now,
                     user_id,
                 ),
@@ -10240,6 +10329,10 @@ def edit_user(user_id):
                     can_manage_carton_purchases = ?, can_manage_warehouse_inventory = ?,
                     can_manage_production_followups = ?, can_create_products = ?, can_edit_products = ?,
                     can_view_prices = ?, can_manage_finance = ?,
+                    can_view_purchases = ?, can_manage_purchases = ?, can_receive_purchases = ?,
+                    can_view_purchase_inventory = ?, can_adjust_purchase_inventory = ?,
+                    can_outbound_purchase_inventory = ?, can_view_purchase_prices = ?,
+                    can_manage_suppliers = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -10261,6 +10354,14 @@ def edit_user(user_id):
                     can_edit_products,
                     can_view_prices,
                     can_manage_finance,
+                    can_view_purchases,
+                    can_manage_purchases,
+                    can_receive_purchases,
+                    can_view_purchase_inventory,
+                    can_adjust_purchase_inventory,
+                    can_outbound_purchase_inventory,
+                    can_view_purchase_prices,
+                    can_manage_suppliers,
                     now,
                     user_id,
                 ),
