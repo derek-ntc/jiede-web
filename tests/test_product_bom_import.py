@@ -757,6 +757,63 @@ class ProductBomRouteTests(ProductBomDatabaseTestCase):
         self.assertTrue(all(row["customer"] == CUSTOMER for row in products))
         self.assertEqual(len(relationships), 4)
 
+    def test_confirm_writes_excel_specification_on_insert_and_reimport_update(self):
+        def preview_token(sku, product_name):
+            preview = self.client.post(
+                "/admin/products/import",
+                data={
+                    "customer": CUSTOMER,
+                    "file": workbook_upload(
+                        [
+                            ("物料编码", "物料名称", "规格型号", "单位"),
+                            (sku, product_name, "PART-ROUTE", "PCS"),
+                        ]
+                    ),
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(preview.status_code, 200)
+            return re.search(
+                r'name="import_token"\s+value="([^"]+)"',
+                preview.get_data(as_text=True),
+            ).group(1)
+
+        inserted = self.client.post(
+            "/admin/products/import/confirm",
+            data={"import_token": preview_token("MAT-OLD", "旧名称")},
+        )
+        self.assertEqual(inserted.status_code, 302)
+        with app.get_db() as conn:
+            product = conn.execute(
+                "SELECT id, drawing_no, supplier FROM manuals WHERE drawing_no = 'PART-ROUTE'"
+            ).fetchone()
+            self.assertEqual(
+                (product["drawing_no"], product["supplier"]),
+                ("PART-ROUTE", "PART-ROUTE"),
+            )
+            conn.execute(
+                "UPDATE manuals SET supplier = '过期规格' WHERE id = ?",
+                (product["id"],),
+            )
+
+        updated = self.client.post(
+            "/admin/products/import/confirm",
+            data={"import_token": preview_token("MAT-NEW", "新名称")},
+        )
+
+        self.assertEqual(updated.status_code, 302)
+        with app.get_db() as conn:
+            product = conn.execute(
+                """
+                SELECT drawing_no, supplier, sku, product_name
+                FROM manuals WHERE drawing_no = 'PART-ROUTE'
+                """
+            ).fetchone()
+        self.assertEqual(
+            tuple(product),
+            ("PART-ROUTE", "PART-ROUTE", "MAT-NEW", "新名称"),
+        )
+
     def test_standalone_product_is_visible_in_preview_and_confirmed_without_a_relationship(self):
         preview = self.client.post(
             "/admin/products/import",

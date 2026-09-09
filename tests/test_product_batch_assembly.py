@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -277,6 +278,77 @@ class ProductBatchAssemblyTests(unittest.TestCase):
                 END
                 """
             )
+        restore_lock_depths = []
+        real_restore = app.restore_quarantined_manual_uploads
+
+        def record_restore_lock_depth(moved_files, quarantine_dir):
+            restore_lock_depths.append(getattr(app._write_lock_state, "depth", 0))
+            return real_restore(moved_files, quarantine_dir)
+
+        with mock.patch.object(
+            app,
+            "restore_quarantined_manual_uploads",
+            new=record_restore_lock_depth,
+        ):
+            response = self.client.post(
+                "/admin/products/delete-batch",
+                data={"manual_id": [str(self.product_a), str(self.product_b)]},
+                follow_redirects=True,
+            )
+
+        self.assertIn("整批未删除", response.get_data(as_text=True))
+        self.assertTrue(restore_lock_depths)
+        self.assertTrue(all(depth > 0 for depth in restore_lock_depths))
+        self.assert_products_exist(self.product_a, self.product_b)
+        self.assertTrue((app.MANUALS_DIR / "part-a.pdf").exists())
+
+    def test_batch_delete_retains_quarantine_when_file_restore_fails(self):
+        self.attach_file(self.product_a, "part-a.pdf")
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                CREATE TRIGGER reject_product_delete
+                BEFORE DELETE ON manuals
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced delete failure');
+                END
+                """
+            )
+        original_replace = Path.replace
+
+        def fail_quarantine_restore(path, target):
+            if ".delete-quarantine" in path.parts:
+                raise OSError("forced restore failure")
+            return original_replace(path, target)
+
+        with mock.patch.object(Path, "replace", new=fail_quarantine_restore):
+            response = self.client.post(
+                "/admin/products/delete-batch",
+                data={"manual_id": [str(self.product_a), str(self.product_b)]},
+                follow_redirects=True,
+            )
+
+        self.assertIn("整批未删除", response.get_data(as_text=True))
+        self.assert_products_exist(self.product_a, self.product_b)
+        self.assertFalse((app.MANUALS_DIR / "part-a.pdf").exists())
+        retained = list(
+            (app.MANUALS_DIR / ".delete-quarantine").glob("*/part-a.pdf")
+        )
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].read_bytes(), b"part-a.pdf")
+
+    def test_batch_delete_rejects_persisted_file_path_outside_upload_directory(self):
+        outside_file = Path(self.tmpdir.name) / "outside.pdf"
+        outside_file.write_bytes(b"outside")
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_files (
+                    manual_id, filename, original_filename, file_type, created_at
+                ) VALUES (?, '../outside.pdf', 'outside.pdf', 'file', ?)
+                """,
+                (self.product_a, "2026-09-03T20:00:00"),
+            )
 
         response = self.client.post(
             "/admin/products/delete-batch",
@@ -286,7 +358,33 @@ class ProductBatchAssemblyTests(unittest.TestCase):
 
         self.assertIn("整批未删除", response.get_data(as_text=True))
         self.assert_products_exist(self.product_a, self.product_b)
-        self.assertTrue((app.MANUALS_DIR / "part-a.pdf").exists())
+        self.assertEqual(outside_file.read_bytes(), b"outside")
+
+    def test_batch_delete_rejects_upload_symlink_resolving_outside_directory(self):
+        outside_file = Path(self.tmpdir.name) / "outside-target.pdf"
+        outside_file.write_bytes(b"outside target")
+        upload_link = app.MANUALS_DIR / "linked.pdf"
+        upload_link.symlink_to(outside_file)
+        with app.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_files (
+                    manual_id, filename, original_filename, file_type, created_at
+                ) VALUES (?, 'linked.pdf', 'linked.pdf', 'file', ?)
+                """,
+                (self.product_a, "2026-09-03T20:00:00"),
+            )
+
+        response = self.client.post(
+            "/admin/products/delete-batch",
+            data={"manual_id": [str(self.product_a), str(self.product_b)]},
+            follow_redirects=True,
+        )
+
+        self.assertIn("整批未删除", response.get_data(as_text=True))
+        self.assert_products_exist(self.product_a, self.product_b)
+        self.assertTrue(upload_link.is_symlink())
+        self.assertEqual(outside_file.read_bytes(), b"outside target")
 
     def test_batch_delete_deduplicates_ids_and_removes_all_related_data_and_files(self):
         self.attach_file(self.product_a, "part-a.pdf")

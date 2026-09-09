@@ -18137,18 +18137,70 @@ def manual_delete_filenames(conn, manuals):
     return list(dict.fromkeys(filename for filename in filenames if filename))
 
 
+def resolve_manual_delete_path(root, filename, *, allow_quarantine_namespace=False):
+    root = Path(root).resolve()
+    relative_path = Path(str(filename or ""))
+    if (
+        not str(filename or "")
+        or not relative_path.parts
+        or relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or (
+            relative_path.parts[0] == ".delete-quarantine"
+            and not allow_quarantine_namespace
+        )
+    ):
+        raise ValueError("产品文件路径无效")
+    resolved_path = (root / relative_path).resolve(strict=False)
+    try:
+        resolved_path.relative_to(root)
+    except ValueError as error:
+        raise ValueError("产品文件路径无效") from error
+    return resolved_path
+
+
+def resolve_manual_delete_quarantine_dir(quarantine_dir):
+    manuals_root = MANUALS_DIR.resolve()
+    resolved_dir = Path(quarantine_dir).resolve(strict=False)
+    try:
+        relative_dir = resolved_dir.relative_to(manuals_root)
+    except ValueError as error:
+        raise ValueError("产品删除隔离路径无效") from error
+    if (
+        len(relative_dir.parts) != 2
+        or relative_dir.parts[0] != ".delete-quarantine"
+        or re.fullmatch(r"[0-9a-f]{32}", relative_dir.parts[1]) is None
+    ):
+        raise ValueError("产品删除隔离路径无效")
+    return resolved_dir
+
+
 def quarantine_manual_uploads(filenames):
-    quarantine_dir = MANUALS_DIR / ".delete-quarantine" / uuid.uuid4().hex
+    quarantine_dir = resolve_manual_delete_quarantine_dir(
+        resolve_manual_delete_path(
+            MANUALS_DIR,
+            Path(".delete-quarantine") / uuid.uuid4().hex,
+            allow_quarantine_namespace=True,
+        )
+    )
+    validated_paths = [
+        (
+            filename,
+            resolve_manual_delete_path(MANUALS_DIR, filename),
+            resolve_manual_delete_path(quarantine_dir, filename),
+        )
+        for filename in filenames
+    ]
     moved_files = []
     try:
-        for filename in filenames:
-            source = MANUALS_DIR / filename
+        for filename, source, destination in validated_paths:
             if not source.exists():
                 continue
-            destination = quarantine_dir / filename
             destination.parent.mkdir(parents=True, exist_ok=True)
+            source = resolve_manual_delete_path(MANUALS_DIR, filename)
+            destination = resolve_manual_delete_path(quarantine_dir, filename)
             source.replace(destination)
-            moved_files.append((source, destination))
+            moved_files.append(filename)
     except Exception:
         restore_quarantined_manual_uploads(moved_files, quarantine_dir)
         raise
@@ -18156,31 +18208,55 @@ def quarantine_manual_uploads(filenames):
 
 
 def restore_quarantined_manual_uploads(moved_files, quarantine_dir):
+    try:
+        quarantine_dir = resolve_manual_delete_quarantine_dir(quarantine_dir)
+        validated_paths = [
+            (
+                filename,
+                resolve_manual_delete_path(MANUALS_DIR, filename),
+                resolve_manual_delete_path(quarantine_dir, filename),
+            )
+            for filename in moved_files
+        ]
+    except ValueError as error:
+        app.logger.error(
+            "产品删除文件恢复路径校验失败；隔离目录保留在：%s",
+            quarantine_dir,
+        )
+        raise OSError("产品删除文件恢复路径无效") from error
+
     restore_error = None
-    for source, destination in reversed(moved_files):
+    for filename, source, destination in reversed(validated_paths):
         try:
             if destination.exists():
                 source.parent.mkdir(parents=True, exist_ok=True)
+                source = resolve_manual_delete_path(MANUALS_DIR, filename)
+                destination = resolve_manual_delete_path(quarantine_dir, filename)
                 destination.replace(source)
-        except OSError as error:
-            restore_error = restore_error or error
+        except (OSError, ValueError) as error:
+            restore_error = restore_error or OSError(
+                f"无法恢复隔离文件 {filename}"
+            )
             app.logger.exception("恢复产品删除隔离文件失败：%s", source.name)
+    if restore_error is not None:
+        app.logger.error(
+            "产品删除文件未能完整恢复；隔离目录保留在：%s",
+            quarantine_dir,
+        )
+        raise restore_error
     try:
         if quarantine_dir.exists():
             shutil.rmtree(quarantine_dir)
-    except OSError as error:
-        restore_error = restore_error or error
-        app.logger.exception("清理产品删除隔离目录失败：%s", quarantine_dir)
-    if restore_error is not None:
-        raise restore_error
+    except OSError:
+        app.logger.exception("清理已恢复的产品删除隔离目录失败：%s", quarantine_dir)
 
 
 def delete_manuals(raw_manual_ids):
     manual_ids = normalize_manual_delete_ids(raw_manual_ids)
     quarantine_dir = MANUALS_DIR / ".delete-quarantine" / uuid.uuid4().hex
     moved_files = []
-    try:
-        with application_write_lock():
+    with application_write_lock():
+        try:
             with get_db() as conn:
                 manuals = load_deletable_manuals(conn, manual_ids)
                 filenames = manual_delete_filenames(conn, manuals)
@@ -18205,18 +18281,18 @@ def delete_manuals(raw_manual_ids):
                     f"DELETE FROM manuals WHERE id IN ({placeholders})",
                     manual_ids,
                 )
-    except Exception:
-        try:
-            restore_quarantined_manual_uploads(moved_files, quarantine_dir)
-        except OSError:
-            app.logger.exception("产品批量删除失败，且隔离文件未能完整恢复")
-        raise
+        except Exception:
+            try:
+                restore_quarantined_manual_uploads(moved_files, quarantine_dir)
+            except OSError:
+                app.logger.exception("产品批量删除失败，且隔离文件未能完整恢复")
+            raise
 
-    try:
-        if quarantine_dir.exists():
-            shutil.rmtree(quarantine_dir)
-    except OSError:
-        app.logger.exception("产品已删除，但清理隔离文件失败：%s", quarantine_dir)
+        try:
+            if quarantine_dir.exists():
+                shutil.rmtree(quarantine_dir)
+        except OSError:
+            app.logger.exception("产品已删除，但清理隔离文件失败：%s", quarantine_dir)
     return len(manual_ids)
 
 
