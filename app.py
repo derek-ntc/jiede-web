@@ -96,6 +96,7 @@ from reportlab.lib.utils import ImageReader
 
 from assembly_shipping import (
     parse_positive_int as parse_assembly_positive_int,
+    parse_nonnegative_int as parse_assembly_quantity,
     allocate_quantity,
     expand_components,
     inventory_result,
@@ -136,6 +137,7 @@ from shipping_workflow import (
     bind_legacy_delivery_customer_identity,
     create_delivery_notes,
     delivery_request_identity,
+    delivery_source_items,
     find_delivery_operation,
     format_delivery_timestamp,
     load_delivery_note,
@@ -4519,9 +4521,25 @@ def _normalize_assembly_overrides(overrides):
         normalized_id = parse_assembly_positive_int(manual_id, "配件 ID")
         if normalized_id in normalized:
             raise ValueError("同一配件不能重复提交")
-        normalized[normalized_id] = parse_assembly_positive_int(
+        normalized[normalized_id] = parse_assembly_quantity(
             quantity, "配件实际发货数量"
         )
+    return normalized
+
+
+def _normalize_assembly_remarks(remarks):
+    if remarks is None:
+        return {}
+    if not isinstance(remarks, dict):
+        raise ValueError("发货行备注格式无效")
+    normalized = {}
+    for manual_id, remark in remarks.items():
+        manual_id = parse_assembly_positive_int(manual_id, "配件 ID")
+        if manual_id in normalized or not isinstance(remark, str):
+            raise ValueError("发货行备注格式无效")
+        if len(remark) > 500:
+            raise ValueError("发货行备注不能超过 500 个字符")
+        normalized[manual_id] = remark
     return normalized
 
 
@@ -4547,6 +4565,7 @@ def build_assembly_shipment_preview(
     overrides=None,
     exclude_batch_id=None,
     selected_manual_ids=None,
+    remarks=None,
 ):
     customer = str(customer or "").strip()
     assembly_drawing_no = str(assembly_drawing_no or "").strip()
@@ -4556,6 +4575,7 @@ def build_assembly_shipment_preview(
         raise ValueError("请选择组装件图号")
     set_quantity = parse_assembly_positive_int(set_quantity, "组装件套数")
     normalized_overrides = _normalize_assembly_overrides(overrides)
+    normalized_remarks = _normalize_assembly_remarks(remarks)
     valid_exclude_batch_id = _validated_excluded_assembly_batch(
         conn, exclude_batch_id, customer, assembly_drawing_no
     )
@@ -4579,7 +4599,7 @@ def build_assembly_shipment_preview(
             for row in conn.execute(
                 """
                 SELECT items.manual_id, items.drawing_no, items.product_name,
-                       items.quantity_per_set, items.source_kind,
+                       items.quantity_per_set, items.source_kind, items.remark,
                        items.specification_snapshot,
                        COALESCE(items.specification_snapshot, manuals.supplier, '') AS specification
                 FROM assembly_shipment_items AS items
@@ -4600,6 +4620,8 @@ def build_assembly_shipment_preview(
         raise ValueError("请至少选择一个组装发货配件")
     if not set(normalized_overrides).issubset(set(selected_ids)):
         raise ValueError("实际发货配件不属于所选组装件")
+    if not set(normalized_remarks).issubset(set(selected_ids)):
+        raise ValueError("发货行备注不属于所选配件")
     selected_components = []
     for manual_id in selected_ids:
         manual = conn.execute(
@@ -4613,6 +4635,8 @@ def build_assembly_shipment_preview(
             component = dict(manual, source_kind="extra", quantity_per_set=0)
         selected_components.append(component)
     expanded = expand_components(selected_components, set_quantity, normalized_overrides)
+    if not any(item["shipped_quantity"] > 0 for item in expanded):
+        raise ValueError("至少有一个产品的发货数量必须大于 0")
     preview = {
         "customer": customer,
         "assembly_drawing_no": assembly_drawing_no,
@@ -4657,6 +4681,7 @@ def build_assembly_shipment_preview(
             "quantity_per_set": int(component["quantity_per_set"]),
             "calculated_quantity": int(component["calculated_quantity"]),
             "shipped_quantity": int(component["shipped_quantity"]),
+            "remark": normalized_remarks.get(manual_id, component.get("remark", "")),
             "available_inventory": available_inventory,
             "inventory_deducted_quantity": inventory["deducted_quantity"],
             "inventory_shortage_quantity": inventory["shortage_quantity"],
@@ -5369,6 +5394,10 @@ def _validated_assembly_preview_header(preview, shipped_at):
         raise ValueError("请填写发货时间")
     if not preview["items"]:
         raise ValueError("该组装件没有有效配件")
+    quantities = [parse_assembly_quantity(item.get("shipped_quantity"), "配件实际发货数量")
+                  for item in preview["items"]]
+    if not any(quantities):
+        raise ValueError("至少有一个产品的发货数量必须大于 0")
     return customer, assembly_drawing_no, set_quantity, shipped_at
 
 
@@ -5481,9 +5510,10 @@ def _save_assembly_shipment_items(
             calculated_quantity = parse_positive_int(
                 preview_item.get("calculated_quantity"), "配件计算数量"
             )
-        shipped_quantity = parse_positive_int(
+        shipped_quantity = parse_assembly_quantity(
             preview_item.get("shipped_quantity"), "配件实际发货数量"
         )
+        remark = _normalize_assembly_remarks({manual_id: preview_item.get("remark", "")})[manual_id]
         expected_deducted = max(
             0, int(preview_item.get("inventory_deducted_quantity") or 0)
         )
@@ -5493,7 +5523,7 @@ def _save_assembly_shipment_items(
         if expected_deducted + expected_shortage != shipped_quantity:
             raise ValueError("组装发货库存预览无效")
         allocations = preview_item.get("allocations")
-        if not isinstance(allocations, list) or not allocations:
+        if not isinstance(allocations, list) or (shipped_quantity > 0 and not allocations):
             raise ValueError("组装发货订单分配无效")
         allocation_total = sum(
             parse_positive_int(allocation.get("quantity"), "订单分配数量")
@@ -5514,10 +5544,10 @@ def _save_assembly_shipment_items(
                 batch_id, manual_id, drawing_no, product_name,
                 quantity_per_set, calculated_quantity, shipped_quantity,
                 inventory_deducted_quantity, inventory_shortage_quantity,
-                specification_snapshot, source_kind,
+                specification_snapshot, source_kind, remark,
                 unit_price_minor, currency, price_recorded_by, price_recorded_at,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 batch_id,
@@ -5531,6 +5561,7 @@ def _save_assembly_shipment_items(
                 expected_shortage,
                 specification_snapshot,
                 source_kind,
+                remark,
                 price_snapshot["unit_price_minor"],
                 price_snapshot["currency"],
                 price_snapshot["price_recorded_by"],
@@ -5558,7 +5589,7 @@ def _save_assembly_shipment_items(
             shipped_quantity,
             customer,
             assembly_drawing_no,
-        )
+        ) if shipped_quantity > 0 else 0
         if actual_deducted != expected_deducted:
             raise ValueError("订单或库存状态已变化，请按最新结果重新确认")
     return affected_order_ids
@@ -5938,6 +5969,7 @@ def _fetch_assembly_shipment_batches_by_ids(
                    assembly_shipment_items.quantity_per_set,
                    assembly_shipment_items.calculated_quantity,
                    assembly_shipment_items.shipped_quantity,
+                   assembly_shipment_items.remark,
                    assembly_shipment_items.inventory_deducted_quantity,
                    assembly_shipment_items.inventory_shortage_quantity,
                    assembly_shipment_items.created_at,
@@ -15170,6 +15202,7 @@ def assembly_shipment_preview():
                 payload.get("set_quantity"),
                 payload.get("overrides"),
                 selected_manual_ids=payload.get("selected_manual_ids"),
+                remarks=payload.get("remarks"),
             )
     except AssemblyDefinitionNotFound as error:
         return jsonify({"error": str(error)}), 404
@@ -15192,13 +15225,22 @@ def _parse_assembly_shipment_item_overrides(form):
         manual_id = parse_positive_int(manual_id, "配件 ID")
         if manual_id in overrides:
             raise ValueError("同一配件不能重复提交")
-        overrides[manual_id] = parse_positive_int(
+        overrides[manual_id] = parse_assembly_quantity(
             shipped_quantity, "配件实际发货数量"
         )
     return overrides
 
 
-def _assembly_edit_preview(conn, batch, overrides=None, selected_manual_ids=None):
+def _parse_assembly_shipment_remarks(form):
+    if "line_remark" not in form:
+        return None  # Legacy edits retain existing row remarks.
+    manual_ids, remarks = form.getlist("manual_id"), form.getlist("line_remark")
+    if len(manual_ids) != len(remarks):
+        raise ValueError("配件 ID 和发货行备注必须一一对应")
+    return _normalize_assembly_remarks(dict(zip(manual_ids, remarks)))
+
+
+def _assembly_edit_preview(conn, batch, overrides=None, selected_manual_ids=None, remarks=None):
     if selected_manual_ids is None:
         selected_manual_ids = [int(item["manual_id"]) for item in batch["items"]]
     if not isinstance(selected_manual_ids, list):
@@ -15220,6 +15262,7 @@ def _assembly_edit_preview(conn, batch, overrides=None, selected_manual_ids=None
         overrides,
         exclude_batch_id=batch["id"],
         selected_manual_ids=selected_manual_ids,
+        remarks=remarks,
     )
 
 
@@ -15272,6 +15315,7 @@ def create_assembly_shipment_from_shipped_page():
         operation_token, request_digest = delivery_request_identity(request.form, image_files, 'assembly')
         operator = current_admin_username()
         overrides = _parse_assembly_shipment_item_overrides(request.form)
+        remarks = _parse_assembly_shipment_remarks(request.form)
         with get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = find_delivery_operation(conn, operation_token, request_digest, operator)
@@ -15291,6 +15335,7 @@ def create_assembly_shipment_from_shipped_page():
                 set_quantity,
                 overrides,
                 selected_manual_ids=_assembly_form_selection(request.form),
+                remarks=remarks,
             )
             definition_ids = {item["manual_id"] for item in preview["items"]}
             if set(overrides) != definition_ids:
@@ -15326,7 +15371,12 @@ def create_assembly_shipment_from_shipped_page():
             )
             if staged_images:
                 save_assembly_shipment_images(conn, batch_id, staged_images)
-            create_delivery_notes(conn, operation_id, [('assembly', batch_id)], recipient_overrides, operator)
+            display_lines = delivery_source_items(conn, 'assembly', batch_id)
+            for line in display_lines:
+                if line['shipped_quantity'] == 0:
+                    line.update(source_type=None, source_id=None, order_no='')
+            create_delivery_notes(conn, operation_id, [('assembly', batch_id)],
+                                  recipient_overrides, operator, display_lines=display_lines)
             conn.commit()
             transaction_committed = True
     except DeliveryOperationConflict as error:
@@ -15405,7 +15455,8 @@ def edit_assembly_shipment(batch_id):
                 if not batches:
                     abort(404)
                 preview = _assembly_edit_preview(
-                    conn, batches[0], payload.get("overrides"), payload.get("selected_manual_ids")
+                    conn, batches[0], payload.get("overrides"), payload.get("selected_manual_ids"),
+                    remarks=payload.get("remarks"),
                 )
         except AssemblyDefinitionNotFound as error:
             return jsonify({"error": str(error)}), 404
@@ -15424,6 +15475,7 @@ def edit_assembly_shipment(batch_id):
     transaction_committed = False
     try:
         overrides = _parse_assembly_shipment_item_overrides(request.form)
+        remarks = _parse_assembly_shipment_remarks(request.form)
         with get_db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             batches = _fetch_assembly_shipment_batches_by_ids(
@@ -15448,7 +15500,9 @@ def edit_assembly_shipment(batch_id):
                     int(item["manual_id"]): int(item["shipped_quantity"])
                     for item in batch["items"]
                 }
-                if shipped_at != batch["shipped_at"] or overrides != existing_quantities:
+                existing_remarks = {int(item["manual_id"]): item["remark"] for item in batch["items"]}
+                if (shipped_at != batch["shipped_at"] or overrides != existing_quantities
+                        or (remarks is not None and remarks != existing_remarks)):
                     if finance_claimed:
                         assert_finance_sources_mutable(conn, source_refs)
                     if reconciliation_claimed:
@@ -15486,7 +15540,7 @@ def edit_assembly_shipment(batch_id):
                 selected_shipment_images()
             )
             preview = _assembly_edit_preview(
-                conn, batch, overrides, _assembly_form_selection(request.form)
+                conn, batch, overrides, _assembly_form_selection(request.form), remarks=remarks
             )
             definition_ids = {item["manual_id"] for item in preview["items"]}
             if set(overrides) != definition_ids:

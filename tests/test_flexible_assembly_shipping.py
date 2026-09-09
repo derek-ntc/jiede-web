@@ -42,23 +42,121 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
         self.paths.stop()
         self.files.cleanup()
 
-    def flexible_preview(self, ids=None, quantities=None, batch_id=None):
+    def flexible_preview(self, ids=None, quantities=None, batch_id=None, remarks=None):
         ids = [self.p1, self.p3] if ids is None else ids
         quantities = {self.p1: 20, self.p3: 7} if quantities is None else quantities
         return self.client.post(
             f'/admin/shipped-orders/assembly/{batch_id}/edit' if batch_id else
             '/admin/shipped-orders/assembly-preview',
             json={'customer': '客户A', 'assembly_drawing_no': 'ASM-100',
-                  'set_quantity': 10, 'selected_manual_ids': ids, 'overrides': quantities},
+                  'set_quantity': 10, 'selected_manual_ids': ids, 'overrides': quantities,
+                  'remarks': remarks},
         )
 
     def save_flexible(self, preview, batch_id=None, **extra):
         data = self.save_data(preview, extra_data=extra)
         data['selected_manual_ids'] = [str(item['manual_id']) for item in preview['items']]
+        data.setdefault('line_remark', [item.get('remark', '') for item in preview['items']])
         return self.client.post(
             f'/admin/shipped-orders/assembly/{batch_id}/edit' if batch_id else
             '/admin/shipped-orders/assembly/new', data=data,
         )
+
+    def test_zero_bom_row_keeps_remark_but_has_no_business_quantity(self):
+        response = self.flexible_preview([self.p2, self.p1], {self.p2: 0, self.p1: 3},
+                                         remarks={self.p2: '本次不发 <待补>', self.p1: '先发三件'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        preview = response.get_json()
+        zero = preview['items'][0]
+        self.assertEqual((zero['shipped_quantity'], zero['calculated_quantity'], zero['remark']),
+                         (0, 30, '本次不发 <待补>'))
+        self.assertEqual(zero['allocations'], [])
+        self.assertEqual((zero['inventory_deducted_quantity'], zero['inventory_shortage_quantity'], zero['no_order_quantity']), (0, 0, 0))
+        self.assertFalse(any(w['manual_id'] == self.p2 for w in preview['warnings']))
+        saved = self.save_flexible(preview)
+        self.assertEqual(saved.status_code, 201, saved.get_json())
+        with app.get_db() as conn:
+            rows = [dict(row) for row in conn.execute('SELECT * FROM assembly_shipment_items ORDER BY id')]
+            self.assertEqual([(r['manual_id'], r['shipped_quantity'], r['remark']) for r in rows],
+                             [(self.p2, 0, '本次不发 <待补>'), (self.p1, 3, '先发三件')])
+            zero_id = rows[0]['id']
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM assembly_shipment_allocations WHERE item_id=?', (zero_id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM inventory_transactions WHERE type='out' AND manual_id=?", (self.p2,)).fetchone()[0], 0)
+            self.assertEqual(app.inventory_total_for_manual(conn, self.p2), 40)
+            self.assertEqual(conn.execute('SELECT shipped_quantity FROM product_orders WHERE id=?', (self.o2,)).fetchone()[0], 0)
+            self.assertIsNone(app._fetch_finance_source(conn, 'assembly_item', zero_id))
+            self.assertIsNone(app._fetch_reconciliation_source(conn, 'assembly_item', zero_id))
+            sources = app.fetch_available_finance_sources(conn, '客户A')
+            self.assertEqual([r['source_id'] for r in sources], [rows[1]['id']])
+
+    def test_legacy_rows_gain_empty_remark_without_rewriting_existing_data(self):
+        saved = self.save_flexible(self.flexible_preview().get_json())
+        self.assertEqual(saved.status_code, 201, saved.get_json())
+        with app.get_db() as conn:
+            conn.execute('ALTER TABLE assembly_shipment_items DROP COLUMN remark')
+            before = [dict(row) for row in conn.execute('SELECT * FROM assembly_shipment_items ORDER BY id')]
+        app.init_db()
+        app.init_db()
+        with app.get_db() as conn:
+            rows = [dict(row) for row in conn.execute('SELECT * FROM assembly_shipment_items ORDER BY id')]
+            self.assertEqual([row.pop('remark') for row in rows], ['', ''])
+            self.assertEqual(rows, before)
+
+    def test_remark_length_validation_edit_and_idempotent_migration(self):
+        for invalid in [{self.p1: '注' * 501}, {self.foreign: '错误客户'}, {self.p1: {'bad': 'type'}}]:
+            response = self.flexible_preview(remarks=invalid)
+            self.assertEqual(response.status_code, 400, response.get_json())
+        preview = self.flexible_preview(remarks={self.p1: '注' * 500, self.p3: '临时配件'}).get_json()
+        self.assertEqual(preview['items'][0].get('remark'), '注' * 500)
+        saved = self.save_flexible(preview)
+        self.assertEqual(saved.status_code, 201, saved.get_json())
+        batch_id = saved.get_json()['batch_id']
+        app.init_db()
+        app.init_db()
+        page = self.client.get(f'/admin/shipped-orders/assembly/{batch_id}/edit').get_data(as_text=True)
+        self.assertIn('<th>本行备注</th>', page)
+        initial = json.loads(re.search(r'data-assembly-initial-preview>(.*?)</script>', page, re.S)[1])
+        self.assertEqual([item['remark'] for item in initial['items']], ['注' * 500, '临时配件'])
+        changed = self.flexible_preview(batch_id=batch_id, remarks={self.p1: '', self.p3: '<script>明细</script>'}).get_json()
+        self.assertEqual(self.save_flexible(changed, batch_id).status_code, 201)
+        with app.get_db() as conn:
+            self.assertEqual([r[0] for r in conn.execute('SELECT remark FROM assembly_shipment_items ORDER BY id')], ['', '<script>明细</script>'])
+
+    def test_all_zero_and_invalid_complete_lines_do_not_create_operation(self):
+        response = self.flexible_preview([self.p1, self.p3], {self.p1: 0, self.p3: 0})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('至少有一个产品的发货数量必须大于 0', response.get_json()['error'])
+        preview = self.flexible_preview().get_json()
+        for extra in [dict(shipped_quantity=['0', '0']), dict(line_remark=['错位']),
+                      dict(line_remark=['注' * 501, '']), dict(shipped_quantity=['2147483648', '7'])]:
+            with self.subTest(extra=extra):
+                result = self.save_flexible(preview, **extra)
+                self.assertEqual(result.status_code, 400, result.get_json())
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM assembly_shipment_items').fetchone()[0], 0)
+            for item in preview['items']:
+                item.update(shipped_quantity=0, allocations=[], inventory_deducted_quantity=0, inventory_shortage_quantity=0)
+            with self.assertRaisesRegex(ValueError, '至少有一个产品'):
+                app.save_assembly_shipment(conn, preview, '2026-09-09', '', 'admin')
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM assembly_shipment_batches').fetchone()[0], 0)
+
+    def test_save_rechecks_decreased_stock_and_keeps_zero_extra_document_line(self):
+        response = self.flexible_preview([self.p1, self.p3], {self.p1: 20, self.p3: 0})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        preview = response.get_json()
+        with app.get_db() as conn:
+            conn.execute('UPDATE inventory_balances SET quantity=2 WHERE manual_id=?', (self.p1,))
+        stale = self.save_flexible(preview)
+        self.assertEqual(stale.status_code, 409, stale.get_json())
+        refreshed = stale.get_json()['preview']
+        self.assertEqual([(w['code'], w['quantity']) for w in refreshed['warnings']], [('inventory_shortage', 18)])
+        self.assertEqual(self.save_flexible(refreshed, confirm_warnings='0').status_code, 409)
+        self.assertEqual(self.save_flexible(refreshed).status_code, 201)
+        with app.get_db() as conn:
+            self.assertEqual([tuple(row) for row in conn.execute('SELECT shipped_quantity, inventory_deducted_quantity, inventory_shortage_quantity FROM assembly_shipment_items ORDER BY id')], [(20, 2, 18), (0, 0, 0)])
+            self.assertEqual(app.inventory_total_for_manual(conn, self.p3), 4)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM supplemental_shipments').fetchone()[0], 0)
 
     def test_selected_components_only_allocate_and_deduct_without_changing_bom(self):
         with app.get_db() as conn:
@@ -222,6 +320,7 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
         self.assertNotIn('data-assembly-component-search', page)
         changed = self.flexible_preview([self.p3], {self.p3: 7}, batch_id).get_json()
         self.assertEqual(self.save_flexible(changed, batch_id).status_code, 400)
+        self.assertEqual(self.save_flexible(initial, batch_id, line_remark=['篡改锁定行', '']).status_code, 400)
         self.assertEqual(self.save_flexible(initial, batch_id, logistics_no='仍可维护备注').status_code, 201)
         with app.get_db() as conn:
             self.assertEqual([tuple(row) for row in conn.execute('SELECT * FROM assembly_shipment_items ORDER BY id')], before)
@@ -240,7 +339,7 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
             appendChild(item) { this.append(item); return item; }
             replaceChildren(...items) { this.children=items; }
             setAttribute(name,value) { this[name]=value; }
-            matches(selector) { return selector === '[data-assembly-item-quantity]' && this.dataset.assemblyItemQuantity !== undefined; }
+            matches(selector) { return (selector === '[data-assembly-item-quantity]' && this.dataset.assemblyItemQuantity !== undefined) || (selector === '[data-assembly-item-remark]' && this.dataset.assemblyItemRemark !== undefined); }
             set innerHTML(value) { throw Error('Untrusted HTML insertion'); }
             querySelectorAll() { return []; }
           }
@@ -276,10 +375,10 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
             if (url.includes('component-options')) return await new Promise(resolve=>searches.push({resolve,options}));
             if (url.includes('assembly-options')) return response({assembly_drawing_numbers:['ASM-B']});
             const payload=JSON.parse(options.body); previews.push(payload);
-            if (Object.values(payload.overrides).some(value=>Number(value) <= 0)) return {ok:false,status:400,json:async()=>({error:'数量必须为正整数'})};
+            if (Object.values(payload.overrides).some(value=>Number(value) < 0)) return {ok:false,status:400,json:async()=>({error:'数量必须为非负整数'})};
             const items=payload.selected_manual_ids.map(id=>{
               const base=initialItems.find(item=>item.manual_id===Number(id)) || {manual_id:Number(id),drawing_no:'<img onerror=evil()>',product_name:'追加',specification:'X',source_kind:'extra',quantity_per_set:0,allocations:[]};
-              return {...base,shipped_quantity:Number(payload.overrides[id]),calculated_quantity:base.quantity_per_set*Number(payload.set_quantity)};
+              return {...base,shipped_quantity:Number(payload.overrides[id]),remark:payload.remarks?.[id] || '',calculated_quantity:base.quantity_per_set*Number(payload.set_quantity)};
             });
             return response({items,warnings:[],preview_token:'new'});
           };
@@ -310,6 +409,22 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
           await addButton.emit('click');
           await waitFor(()=>previews.length===previewCount+1,'preview after appending a component');
           assert.deepEqual(previews.at(-1).selected_manual_ids.map(Number),[1,3]);
+          nodes['component-search'].value='P3'; await nodes['component-search'].emit('input');
+          await waitFor(()=>searches.length===2,'duplicate product search');
+          searches[1].resolve(response({items:[{manual_id:3,drawing_no:'P3',product_name:'追加',specification:'X'}]}));
+          await waitFor(()=>all(nodes['component-results']).some(el=>el.dataset.assemblyAddItem !== undefined),'duplicate merge control');
+          previewCount=previews.length;
+          await all(nodes['component-results']).find(el=>el.dataset.assemblyAddItem !== undefined).emit('click');
+          await waitFor(()=>previews.length===previewCount+1,'duplicate merge preview');
+          assert.deepEqual(previews.at(-1).selected_manual_ids.map(Number),[1,3]);
+          assert.equal(Number(previews.at(-1).overrides['3']),2,'duplicate add merges quantity in one row');
+          let remark=all(nodes.preview).find(el=>el.dataset.assemblyItemRemark !== undefined && el.dataset.manualId==='3');
+          assert.ok(remark,'every row offers a remark input');
+          remark.value='<script>原样保留</script>';
+          previewCount=previews.length;
+          await form.emit('input',{target:remark});
+          await waitFor(()=>previews.length===previewCount+1,'remark preview');
+          assert.equal(previews.at(-1).remarks['3'],'<script>原样保留</script>');
           quantity=form.querySelectorAll().find(el=>el.dataset.manualId==='3'); quantity.value='7';
           previewCount=previews.length;
           await form.emit('input',{target:quantity});
@@ -319,7 +434,18 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
           await waitFor(()=>previews.length===previewCount+1,'preview after explicit BOM recalculation');
           assert.equal(Number(previews.at(-1).overrides['1']),40,'explicit recalc updates BOM quantity');
           assert.equal(previews.at(-1).overrides['3'],'7','extra never multiplies by set count');
+          assert.equal(previews.at(-1).remarks['3'],'<script>原样保留</script>','recalculation retains remarks');
           quantity=form.querySelectorAll().find(el=>el.dataset.manualId==='3'); quantity.value='0';
+          previewCount=previews.length;
+          await form.emit('input',{target:quantity});
+          await waitFor(()=>previews.length===previewCount+1 && nodes.submit.disabled===false,'zero-line preview');
+          quantity=form.querySelectorAll().find(el=>el.dataset.manualId==='3');
+          assert.equal(quantity.min,'0');
+          assert.ok(all(nodes.preview).some(el=>String(el.textContent).includes('本次不发')),'zero row is clearly labeled');
+          await form.emit('submit');
+          assert.deepEqual(submissions[0].getAll('shipped_quantity'),['40','0']);
+          assert.deepEqual(submissions[0].getAll('line_remark'),['','<script>原样保留</script>']);
+          quantity.value='-1';
           previewCount=previews.length;
           await form.emit('input',{target:quantity});
           await waitFor(()=>previews.length===previewCount+1,'rejected invalid preview');
@@ -333,7 +459,7 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
           await form.emit('submit');
           assert.deepEqual(submissions[0].getAll('selected_manual_ids'),['1','3']);
           assert.deepEqual(submissions[0].getAll('manual_id'),['1','3']);
-          assert.deepEqual(submissions[0].getAll('shipped_quantity'),['40','7']);
+          assert.deepEqual(submissions[1].getAll('shipped_quantity'),['40','7']);
           assert.deepEqual(submissions[0].getAll('assembly_selection_explicit'),['1']);
           previewCount=previews.length;
           await removeButtons()[0].emit('click');
@@ -347,10 +473,10 @@ class FlexibleAssemblyShippingTests(AssemblyTask7TestCase):
           assert.equal(nodes.submit.disabled,true);
           assert.equal(all(nodes.preview).map(el=>el.textContent || '').join(''),'本次明细为空，请搜索追加至少一个配件。');
           nodes['component-search'].value='old'; await nodes['component-search'].emit('input');
-          await waitFor(()=>searches.length===2,'old-customer component search request');
+          await waitFor(()=>searches.length===3,'old-customer component search request');
           nodes.customer.value='客户B'; await nodes.customer.emit('change');
-          assert.equal(searches[1].options.signal.aborted,true);
-          searches[1].resolve(response({items:[{manual_id:9,drawing_no:'OLD'}]}));
+          assert.equal(searches[2].options.signal.aborted,true);
+          searches[2].resolve(response({items:[{manual_id:9,drawing_no:'OLD'}]}));
           await new Promise(resolve=>setImmediate(resolve));
           assert.equal(nodes['component-results'].children.length,0,'late old customer cannot insert candidates');
           assert.equal(form._assemblySelectedIds,null,'changing customer explicitly resets adjustments');

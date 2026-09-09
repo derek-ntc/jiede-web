@@ -16,6 +16,17 @@ def parse_positive_int(value, label):
     return parsed
 
 
+def parse_nonnegative_int(value, label):
+    text = str(value).strip() if value is not None else ""
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}必须为 0 至 2147483647 的整数")
+    if not 0 <= parsed <= 2_147_483_647 or str(parsed) != text:
+        raise ValueError(f"{label}必须为 0 至 2147483647 的整数")
+    return parsed
+
+
 def normalize_component_rows(drawing_numbers, quantities):
     result = []
     seen = set()
@@ -53,16 +64,16 @@ def expand_components(components, set_quantity, overrides=None):
         override = overrides.get(int(component["manual_id"]))
         item["calculated_quantity"] = calculated
         item["shipped_quantity"] = (
-            parse_positive_int(override, "配件实际发货数量")
+            parse_nonnegative_int(override, "配件实际发货数量")
             if override is not None
-            else parse_positive_int(calculated, "配件实际发货数量")
+            else parse_nonnegative_int(calculated, "配件实际发货数量")
         )
         expanded.append(item)
     return expanded
 
 
 def allocate_quantity(quantity, orders):
-    remaining = parse_positive_int(quantity, "配件实际发货数量")
+    remaining = parse_nonnegative_int(quantity, "配件实际发货数量")
     allocations = []
     for order in orders:
         available = max(0, int(order["unshipped_quantity"] or 0))
@@ -78,7 +89,7 @@ def allocate_quantity(quantity, orders):
 
 
 def inventory_result(requested_quantity, available_quantity):
-    requested = parse_positive_int(requested_quantity, "配件实际发货数量")
+    requested = parse_nonnegative_int(requested_quantity, "配件实际发货数量")
     available = max(0, int(available_quantity or 0))
     deducted = min(requested, available)
     return {

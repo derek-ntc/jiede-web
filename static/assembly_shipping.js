@@ -52,6 +52,7 @@ async function requestAssemblyPreview(form, signal) {
     overrides: form._assemblyOverrides || Object.fromEntries(
       quantityInputs.map((input) => [input.dataset.manualId, input.value])
     ),
+    remarks: form._assemblyRemarks || {},
   };
   const response = await fetch(
     form.dataset.assemblyPreviewUrl || "/admin/shipped-orders/assembly-preview",
@@ -106,7 +107,8 @@ function renderAssemblyPreview(form, preview) {
     const quantity = document.createElement("input");
     quantity.type = "number";
     quantity.name = "shipped_quantity";
-    quantity.min = "1";
+    quantity.min = "0";
+    quantity.max = "2147483647";
     quantity.step = "1";
     quantity.required = true;
     quantity.value = String(item.shipped_quantity);
@@ -116,16 +118,29 @@ function renderAssemblyPreview(form, preview) {
     quantity.setAttribute("aria-label", `${item.drawing_no || "配件"} 实际发货数量`);
     quantityCell.append(manualId, selectedId, quantity);
     row.appendChild(quantityCell);
+    const remarkCell = document.createElement("td");
+    remarkCell.dataset.label = "本行备注";
+    const remark = document.createElement("input");
+    remark.type = "text";
+    remark.name = "line_remark";
+    remark.maxLength = 500;
+    remark.value = item.remark || "";
+    remark.readOnly = form.dataset.assemblyFinanceClaimed === "1";
+    remark.dataset.assemblyItemRemark = "";
+    remark.dataset.manualId = String(item.manual_id);
+    remark.setAttribute("aria-label", `${item.drawing_no || "配件"} 本行备注`);
+    remarkCell.appendChild(remark);
+    row.appendChild(remarkCell);
     const allocationText = item.allocations.map((allocation) => (
       allocation.order_id === null
         ? `无订单直接发货：${allocation.quantity}`
         : `${allocation.order_no || `订单 ${allocation.order_id}`}：${allocation.quantity}`
     )).join("；");
-    appendAssemblyCell(row, "订单分配", allocationText || "-");
+    appendAssemblyCell(row, "订单分配", item.shipped_quantity === 0 ? "本次不发" : allocationText || "-");
     appendAssemblyCell(
       row,
       "库存状态",
-      item.inventory_shortage_quantity > 0
+      item.shipped_quantity === 0 ? `本次不发，不扣库存（可用 ${item.available_inventory}）` : item.inventory_shortage_quantity > 0
         ? `可用 ${item.available_inventory}，库存缺口 ${item.inventory_shortage_quantity}`
         : `可用库存 ${item.available_inventory}`
     );
@@ -145,10 +160,13 @@ function renderAssemblyPreview(form, preview) {
   form._assemblyOverrides = Object.fromEntries(
     preview.items.map((item) => [String(item.manual_id), String(item.shipped_quantity)])
   );
+  form._assemblyRemarks = Object.fromEntries(
+    preview.items.map((item) => [String(item.manual_id), item.remark || ""])
+  );
   form._assemblySelectedIds = preview.items.map((item) => String(item.manual_id));
   form._assemblyItems = preview.items;
   renderAssemblyWarnings(form.querySelector("[data-assembly-warning-summary]"), preview.warnings || []);
-  form.querySelector("[data-assembly-submit]").disabled = rows.length === 0;
+  form.querySelector("[data-assembly-submit]").disabled = !preview.items.some((item) => item.shipped_quantity > 0);
 }
 
 async function submitAssemblyShipment(form, preview, confirmed) {
@@ -175,7 +193,7 @@ function clearAssemblyPreview(form, message) {
   form._assemblyPreview = null;
   const empty = document.createElement("tr");
   const cell = document.createElement("td");
-  cell.colSpan = 10;
+  cell.colSpan = 11;
   cell.className = "empty";
   cell.textContent = form._assemblySelectedIds?.length === 0
     ? "本次明细为空，请搜索追加至少一个配件。" : "暂无组装发货预览";
@@ -314,6 +332,7 @@ function initializeAssemblyShipmentForm(form) {
     if (locked || submitPending) return;
     form._assemblySelectedIds = (form._assemblySelectedIds || []).filter((id) => id !== manualId);
     delete form._assemblyOverrides[manualId];
+    delete form._assemblyRemarks[manualId];
     schedulePreview();
   };
 
@@ -341,17 +360,27 @@ function initializeAssemblyShipmentForm(form) {
         const body = await response.json();
         if (generation !== candidateGeneration || customer.value.trim() !== selectedCustomer || drawing.value.trim() !== selectedDrawing) return;
         if (!response.ok) throw new Error(body.error || "加载配件失败");
-        const buttons = body.items.filter((item) => !form._assemblySelectedIds?.includes(String(item.manual_id))).map((item) => {
+        const buttons = body.items.map((item) => {
           const button = document.createElement("button");
           button.type = "button";
           button.dataset.assemblyAddItem = String(item.manual_id);
-          button.textContent = `追加 ${item.drawing_no || "—"} / ${item.product_name || "—"} / ${item.specification || "—"}`;
+          const alreadySelected = form._assemblySelectedIds?.includes(String(item.manual_id));
+          button.textContent = `${alreadySelected ? "合并 +1" : "追加"} ${item.drawing_no || "—"} / ${item.product_name || "—"} / ${item.specification || "—"}`;
           button.addEventListener("click", () => {
             if (locked || submitPending || generation !== candidateGeneration || form._assemblySelectedIds === null) return;
             const id = String(item.manual_id);
-            if (form._assemblySelectedIds.includes(id)) return;
-            form._assemblySelectedIds.push(id);
-            form._assemblyOverrides[id] = "1";
+            if (form._assemblySelectedIds.includes(id)) {
+              const current = Number(form._assemblyOverrides[id]);
+              if (!Number.isInteger(current) || current < 0 || current >= 2147483647) {
+                setAssemblyStatus(form, "请先填写有效数量，再合并追加。", true);
+                return;
+              }
+              form._assemblyOverrides[id] = String(current + 1);
+            } else {
+              form._assemblySelectedIds.push(id);
+              form._assemblyOverrides[id] = "1";
+              form._assemblyRemarks[id] = "";
+            }
             cancelCandidates();
             schedulePreview();
           });
@@ -383,6 +412,7 @@ function initializeAssemblyShipmentForm(form) {
     form._assemblySelectedIds = null;
     form._assemblyItems = [];
     form._assemblyOverrides = {};
+    form._assemblyRemarks = {};
     clearAssemblyPreview(form, "已重置本次删减和追加，正在加载该客户的组装件图号…");
     populateAssemblyDrawings(form, []);
     const selectedCustomer = customer.value.trim();
@@ -406,15 +436,19 @@ function initializeAssemblyShipmentForm(form) {
     form._assemblySelectedIds = null;
     form._assemblyItems = [];
     form._assemblyOverrides = {};
+    form._assemblyRemarks = {};
     clearAssemblyPreview(form);
     schedulePreview();
     setAssemblyStatus(form, "已重置本次删减和追加，正在按组装件配置预览…");
   });
   sets.addEventListener("input", schedulePreview);
   form.addEventListener("input", (event) => {
-    if (!event.target.matches("[data-assembly-item-quantity]")) return;
+    const isQuantity = event.target.matches("[data-assembly-item-quantity]");
+    const isRemark = event.target.matches("[data-assembly-item-remark]");
+    if (!isQuantity && !isRemark) return;
     if (locked || submitPending || !form._assemblySelectedIds?.includes(event.target.dataset.manualId)) return;
-    form._assemblyOverrides[event.target.dataset.manualId] = event.target.value;
+    const values = isQuantity ? form._assemblyOverrides : form._assemblyRemarks;
+    values[event.target.dataset.manualId] = event.target.value;
     schedulePreview();
   });
   form.addEventListener("submit", async (event) => {

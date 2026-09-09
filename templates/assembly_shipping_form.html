@@ -53,10 +53,7 @@
 
   <div class="wide">
     <p class="empty-text">删减和追加仅影响本次发货，不修改组装件配置。更换客户或图号会重置调整；修改套数保留实际数量。</p>
-    <label>搜索追加配件（图号 / 名称）
-      <input type="search" autocomplete="off" data-assembly-component-search placeholder="搜索当前客户的产品">
-    </label>
-    <div aria-live="polite" data-assembly-component-results></div>
+    <p class="empty-text">实际数量可填 0（本次不发），仍保留在送货单中；至少一个产品的数量须大于 0。本行备注最多 500 字。</p>
     <button type="button" class="secondary" data-assembly-recalculate>按当前套数重算已选 BOM 行数量</button>
   </div>
 
@@ -71,6 +68,7 @@
           <th>每套用量</th>
           <th>计算数量</th>
           <th>实际发货数量</th>
+          <th>本行备注</th>
           <th>订单分配</th>
           <th>库存状态</th>
           <th>本次调整</th>
@@ -78,10 +76,18 @@
       </thead>
       <tbody data-assembly-preview>
         <tr data-assembly-preview-empty>
-          <td colspan="10" class="empty">暂无组装发货预览</td>
+          <td colspan="11" class="empty">暂无组装发货预览</td>
         </tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="wide">
+    <label>添加产品（图号 / 名称）
+      <input type="search" autocomplete="off" data-assembly-component-search placeholder="搜索当前客户的产品">
+    </label>
+    <p class="empty-text">每次追加 1 件，可修改数量；重复产品合并到已有行，备注保留。</p>
+    <div aria-live="polite" data-assembly-component-results></div>
   </div>
 
   <div class="wide form-actions">

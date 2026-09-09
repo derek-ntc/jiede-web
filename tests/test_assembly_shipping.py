@@ -163,6 +163,24 @@ def _acquire_write_lock_in_subprocess(write_lock_path, result_queue):
 
 
 class AssemblyShippingDomainTests(unittest.TestCase):
+    def test_zero_actual_quantity_preserves_calculation_without_allocations_or_stock(self):
+        rows = assembly_shipping.expand_components(
+            [{"manual_id": 7, "quantity_per_set": 2}], 10, {7: 0}
+        )
+        self.assertEqual(rows[0]["calculated_quantity"], 20)
+        self.assertEqual(rows[0]["shipped_quantity"], 0)
+        self.assertEqual(assembly_shipping.allocate_quantity(0, [{"id": 1, "unshipped_quantity": 9}]), [])
+        self.assertEqual(assembly_shipping.inventory_result(0, 0), {
+            "requested_quantity": 0, "deducted_quantity": 0, "shortage_quantity": 0,
+        })
+
+    def test_actual_quantity_rejects_negative_fraction_boolean_and_overflow(self):
+        for quantity in [-1, 1.5, True, "", "01", 2_147_483_648]:
+            with self.subTest(quantity=quantity), self.assertRaises(ValueError):
+                assembly_shipping.expand_components(
+                    [{"manual_id": 7, "quantity_per_set": 2}], 10, {7: quantity}
+                )
+
     def test_normalize_component_rows_ignores_blank_rows_and_rejects_duplicates(self):
         rows = assembly_shipping.normalize_component_rows(
             [" ASM-100 ", "", "ASM-200"], ["2", "", "3"]
@@ -1699,7 +1717,7 @@ class AssemblySaveTests(AssemblyAppTestCase):
             ("unknown", [ids[0], unknown_id], quantities),
             ("missing quantity", ids, [quantities[0]]),
             ("extra quantity", [ids[0]], quantities),
-            ("non-positive quantity", ids, ["0", quantities[1]]),
+            ("negative quantity", ids, ["-1", quantities[1]]),
         ]
 
         for label, manual_ids, submitted_quantities in cases:

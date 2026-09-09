@@ -42,6 +42,43 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         return dict(shipped_at='2026-09-08', order_id=str(self.order),
                     shipped_quantity='20', operation_token='ordinary-token', **extra)
 
+    def test_assembly_snapshot_keeps_order_zero_remarks_and_replay_is_read_only(self):
+        zero_product = self.create_product('ZERO-DN')
+        self.configure_components([(zero_product, 3), (self.product, 1)])
+        response = self.client.post('/admin/shipped-orders/assembly-preview', json={
+            'customer': '客户A', 'assembly_drawing_no': 'ASM-100', 'set_quantity': 2,
+            'selected_manual_ids': [zero_product, self.product],
+            'overrides': {zero_product: 0, self.product: 2},
+            'remarks': {zero_product: '<待补> & 本次不发', self.product: '先发两件'},
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = self.save_data(response.get_json(), extra_data={
+            'selected_manual_ids': [str(zero_product), str(self.product)],
+            'line_remark': ['<待补> & 本次不发', '先发两件'],
+            'operation_token': 'zero-assembly-snapshot',
+        })
+        first = self.client.post('/admin/shipped-orders/assembly/new', data=data)
+        self.assertEqual(first.status_code, 201, first.get_json())
+        retry = self.client.post('/admin/shipped-orders/assembly/new', data=data)
+        self.assertEqual(retry.status_code, 201, retry.get_json())
+        self.assertEqual(first.get_json(), retry.get_json())
+        with app.get_db() as conn:
+            note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+            self.assertEqual([(i['manual_id'], i['quantity'], i['remark']) for i in note['items']],
+                             [(zero_product, 0, '<待补> & 本次不发'), (self.product, 2, '先发两件')])
+            self.assertEqual([i['sort_order'] for i in note['items']], [0, 1])
+            self.assertIsNone(note['items'][0]['source_id'])
+            self.assertEqual(len(note['sources']), 1)
+            self.assertEqual(app.inventory_total_for_manual(conn, self.product), 18)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM delivery_operations').fetchone()[0], 1)
+            conn.execute("UPDATE manuals SET drawing_no='CHANGED', supplier='CHANGED'")
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+            self.assertEqual(note['items'][0]['drawing_no'], 'ZERO-DN')
+            self.assertEqual(note['items'][1]['specification'], '长规格')
+        self.assertEqual(self.client.get(first.get_json()['redirect_url']).status_code, 200)
+        self.assertEqual(self.client.get(f'/admin/delivery-notes/{note_id}.pdf').status_code, 200)
+
     def note_rows(self):
         with app.get_db() as conn:
             return [dict(row) for row in conn.execute('SELECT * FROM delivery_notes ORDER BY id')]

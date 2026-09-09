@@ -112,6 +112,10 @@ def ensure_shipping_workflow_tables(conn):
             ),
         },
         "assembly_shipment_items": {
+            "remark": (
+                "ALTER TABLE assembly_shipment_items "
+                "ADD COLUMN remark TEXT NOT NULL DEFAULT ''"
+            ),
             "source_kind": (
                 "ALTER TABLE assembly_shipment_items "
                 "ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'bom'"
@@ -325,7 +329,7 @@ def delivery_source_items(conn, source_type, source_id):
             i.shipped_quantity, i.manual_id, i.drawing_no, i.product_name, COALESCE(m.unit, '') AS unit,
             COALESCE(i.specification_snapshot, m.supplier, '') AS specification,
             i.specification_snapshot IS NULL AS specification_is_fallback,
-            b.assembly_drawing_no,
+            b.assembly_drawing_no, i.remark,
             COALESCE((SELECT group_concat(allocation_label, ' / ') FROM (
                 SELECT CASE WHEN o.id IS NULL
                     THEN CASE WHEN EXISTS (
