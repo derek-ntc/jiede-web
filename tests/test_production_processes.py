@@ -24,6 +24,8 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
             session["admin_logged_in"] = True
             session["admin_username"] = "admin"
             session["admin_role"] = "admin"
+            session["production_followup_csrf_token"] = "test-process-csrf"
+        self.client.environ_base["HTTP_X_CSRF_TOKEN"] = "test-process-csrf"
 
     def tearDown(self):
         app.DB_PATH = self.original_db_path
@@ -194,6 +196,52 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
         self.assertIn("data-move-process-down", html)
         self.assertIn("data-remove-process-step", html)
         self.assertIn("保存默认工艺", html)
+        self.assertIn(
+            'name="production_followup_csrf_token" value="test-process-csrf"',
+            html,
+        )
+
+    def test_product_process_template_requires_valid_csrf_without_mutating_template(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.manual_id,
+                ["下料", "包装"],
+                now="2026-09-09T10:00:00",
+            )
+        self.client.environ_base.pop("HTTP_X_CSRF_TOKEN")
+
+        for data in (
+            {"process_name": ["焊接"]},
+            {
+                "process_name": ["焊接"],
+                "production_followup_csrf_token": "wrong-token",
+            },
+        ):
+            with self.subTest(data=data):
+                response = self.client.post(
+                    f"/admin/{self.manual_id}/process-template", data=data
+                )
+                self.assertEqual(response.status_code, 403)
+                with app.get_db() as conn:
+                    saved = production_processes.load_manual_process_template(
+                        conn, self.manual_id
+                    )
+                self.assertEqual([step["name"] for step in saved], ["下料", "包装"])
+
+        response = self.client.post(
+            f"/admin/{self.manual_id}/process-template",
+            data={
+                "process_name": ["焊接"],
+                "production_followup_csrf_token": "test-process-csrf",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            saved = production_processes.load_manual_process_template(
+                conn, self.manual_id
+            )
+        self.assertEqual([step["name"] for step in saved], ["焊接"])
 
     def test_product_technical_page_can_deliberately_save_an_empty_template(self):
         with app.get_db() as conn:

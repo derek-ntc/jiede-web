@@ -2821,12 +2821,16 @@ class AssemblyTask7TestCase(AssemblyAppTestCase):
         token=None,
         confirm_warnings="1",
         images=None,
+        remarks=None,
     ):
         data = {
             "manual_id": [str(item["manual_id"]) for item in preview["items"]],
             "shipped_quantity": [
                 str(item["shipped_quantity"]) for item in preview["items"]
             ],
+            "line_remark": remarks
+            if remarks is not None
+            else [str(item.get("remark") or "") for item in preview["items"]],
             "shipped_at": "2026-08-31",
             "logistics_no": "修改后备注",
             "preview_token": preview["preview_token"] if token is None else token,
@@ -2980,6 +2984,150 @@ class AssemblyHistoryTests(AssemblyTask7TestCase):
 
 
 class AssemblyEditDeleteTests(AssemblyTask7TestCase):
+    def test_metadata_only_edit_preserves_original_shortage_after_later_replenishment(self):
+        batch_id, manual_id, order_id = self.create_single_batch(
+            drawing_no="P-EDIT-METADATA",
+            quantity=5,
+            order_quantity=5,
+            stock_quantity=2,
+        )
+        before = self.batch_state(batch_id, manual_id, [order_id])
+        original_item = before["items"][0]
+        original_allocation_ids = [row["id"] for row in before["allocations"]]
+        original_transaction_ids = [row["id"] for row in before["transactions"]]
+        self.assertEqual(
+            (
+                original_item["inventory_deducted_quantity"],
+                original_item["inventory_shortage_quantity"],
+            ),
+            (2, 3),
+        )
+        self.stock_product(manual_id, 3)
+
+        preview_response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            json={
+                "overrides": {str(manual_id): "5"},
+                "remarks": {str(manual_id): "仅修改备注"},
+            },
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        preview = preview_response.get_json()
+        self.assertEqual(preview["items"][0]["inventory_deducted_quantity"], 5)
+
+        response = self.post_edit(
+            batch_id,
+            preview,
+            remarks=["仅修改备注"],
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        after = self.batch_state(batch_id, manual_id, [order_id])
+        item = after["items"][0]
+        self.assertEqual(item["id"], original_item["id"])
+        self.assertEqual(item["remark"], "仅修改备注")
+        self.assertEqual(
+            (
+                item["inventory_deducted_quantity"],
+                item["inventory_shortage_quantity"],
+                after["balance"],
+            ),
+            (2, 3, 3),
+        )
+        self.assertEqual(
+            [row["id"] for row in after["allocations"]], original_allocation_ids
+        )
+        self.assertEqual(
+            [row["id"] for row in after["transactions"]],
+            original_transaction_ids,
+        )
+        self.assertEqual(after["batch"]["shipped_at"], "2026-08-31")
+        self.assertEqual(after["batch"]["logistics_no"], "修改后备注")
+
+    def test_mixed_edit_rebuilds_only_changed_row_and_retains_unchanged_shortage(self):
+        retained = self.create_product("P-EDIT-RETAINED", "客户A")
+        changed = self.create_product("P-EDIT-CHANGED", "客户A")
+        self.configure_components([(retained, 1), (changed, 1)])
+        retained_order = self.create_order(retained, "SO-EDIT-RETAINED", 5)
+        changed_order = self.create_order(changed, "SO-EDIT-CHANGED", 5)
+        self.stock_product(retained, 2)
+        self.stock_product(changed, 5)
+        preview = self.post_preview(sets=5).get_json()
+        create_response = self.client.post(
+            "/admin/shipped-orders/assembly/new", data=self.save_data(preview)
+        )
+        self.assertEqual(create_response.status_code, 201)
+        batch_id = create_response.get_json()["batch_id"]
+        with app.get_db() as conn:
+            original_items = {
+                row["manual_id"]: dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM assembly_shipment_items WHERE batch_id = ?",
+                    (batch_id,),
+                )
+            }
+            retained_allocation_ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM assembly_shipment_allocations WHERE item_id = ? ORDER BY id",
+                    (original_items[retained]["id"],),
+                )
+            ]
+        self.stock_product(retained, 3)
+
+        preview_response = self.client.post(
+            f"/admin/shipped-orders/assembly/{batch_id}/edit",
+            json={
+                "overrides": {str(retained): "5", str(changed): "4"},
+                "remarks": {str(retained): "保留行", str(changed): "修改行"},
+            },
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        response = self.post_edit(
+            batch_id,
+            preview_response.get_json(),
+            remarks=["保留行", "修改行"],
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        with app.get_db() as conn:
+            edited_items = {
+                row["manual_id"]: dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM assembly_shipment_items WHERE batch_id = ?",
+                    (batch_id,),
+                )
+            }
+            retained_allocations = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM assembly_shipment_allocations WHERE item_id = ? ORDER BY id",
+                    (edited_items[retained]["id"],),
+                )
+            ]
+            retained_balance = app.inventory_total_for_manual(conn, retained)
+            changed_balance = app.inventory_total_for_manual(conn, changed)
+            orders = {
+                row["id"]: row["shipped_quantity"]
+                for row in conn.execute(
+                    "SELECT id, shipped_quantity FROM product_orders WHERE id IN (?, ?)",
+                    (retained_order, changed_order),
+                )
+            }
+        self.assertEqual(edited_items[retained]["id"], original_items[retained]["id"])
+        self.assertNotEqual(edited_items[changed]["id"], original_items[changed]["id"])
+        self.assertEqual(
+            (
+                edited_items[retained]["inventory_deducted_quantity"],
+                edited_items[retained]["inventory_shortage_quantity"],
+                retained_balance,
+            ),
+            (2, 3, 3),
+        )
+        self.assertEqual(retained_allocations, retained_allocation_ids)
+        self.assertEqual(changed_balance, 1)
+        self.assertEqual(orders, {retained_order: 5, changed_order: 4})
+
     def test_edit_preserves_retained_item_price_snapshots_after_current_prices_change(self):
         first = self.create_product("P-EDIT-PRICE-1", "客户A")
         second = self.create_product("P-EDIT-PRICE-2", "客户A")
@@ -3366,18 +3514,16 @@ class AssemblyEditDeleteTests(AssemblyTask7TestCase):
         )
         preview = self.edit_preview(batch_id, manual_id, 80).get_json()
         before = self.batch_state(batch_id, manual_id, [order_id])
-        original_reverse = getattr(app, "reverse_assembly_shipment_batch", None)
+        original_reverse = app.reverse_assembly_inventory_deduction
 
-        def reverse_then_fail(conn, target_batch_id):
-            if original_reverse is not None:
-                original_reverse(conn, target_batch_id)
+        def reverse_then_fail(conn, item_id):
+            original_reverse(conn, item_id)
             raise sqlite3.DatabaseError("injected after reversal")
 
         with patch.object(
             app,
-            "reverse_assembly_shipment_batch",
+            "reverse_assembly_inventory_deduction",
             side_effect=reverse_then_fail,
-            create=True,
         ):
             response = self.post_edit(batch_id, preview)
 

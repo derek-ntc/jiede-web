@@ -94,6 +94,7 @@
           action="{{ url_for('batch_delete_manuals', q=query, supplier=selected_supplier, customer=selected_customer, sort=sort, direction=direction) }}"
           class="product-delete-dialog-panel"
         >
+          <input type="hidden" name="production_followup_csrf_token" value="{{ product_mutation_csrf_token }}">
           <header>
             <div>
               <h2 id="product-delete-title">确认批量删除产品</h2>

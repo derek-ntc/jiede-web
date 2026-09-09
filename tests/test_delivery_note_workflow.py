@@ -69,7 +69,13 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.assertIn('规格型号', listed)
 
         template = f'/admin/{self.product}/process-template'
-        self.assertEqual(self.client.post(template, data={'process_name': ['下料', '检验 <终检>']}).status_code, 302)
+        self.client.get(f'/manual/{self.product}/technical')
+        with self.client.session_transaction() as session:
+            process_csrf = session['production_followup_csrf_token']
+        self.assertEqual(self.client.post(template, data={
+            'process_name': ['下料', '检验 <终检>'],
+            'production_followup_csrf_token': process_csrf,
+        }).status_code, 302)
 
         def create_card():
             response = self.client.post('/admin/production-followups', data={
@@ -94,7 +100,10 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
                 'SELECT * FROM production_followup_process_steps WHERE followup_id=? ORDER BY sort_order', (historical,))]
             self.assertTrue(old_steps[0]['completed_at'])
             self.assertEqual(old_steps[0]['completed_by'], 'admin')
-        self.assertEqual(self.client.post(template, data={'process_name': ['包装']}).status_code, 302)
+        self.assertEqual(self.client.post(template, data={
+            'process_name': ['包装'],
+            'production_followup_csrf_token': process_csrf,
+        }).status_code, 302)
         current = create_card()
         app.init_db()
         app.init_db()
@@ -117,11 +126,16 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
             app.create_finance_invoice(conn, customer, [('ordinary', source)], 'admin')
             app.create_reconciliation_statement(conn, [('ordinary', source)], 'admin')
         blocked = self.client.post('/admin/products/delete-batch', data={
+            'production_followup_csrf_token': process_csrf,
             'manual_id': [str(free), str(self.product)], 'return_supplier': 'P1'}, follow_redirects=True)
         self.assertIn('整批未删除', blocked.get_data(as_text=True))
         with app.get_db() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM manuals WHERE id IN (?,?)', (free, self.product)).fetchone()[0], 2)
-        deleted = self.client.post('/admin/products/delete-batch', data={'manual_id': str(free), 'return_q': 'FREE-IMPORT'})
+        deleted = self.client.post('/admin/products/delete-batch', data={
+            'manual_id': str(free),
+            'return_q': 'FREE-IMPORT',
+            'production_followup_csrf_token': process_csrf,
+        })
         self.assertIn('/admin/products?q=FREE-IMPORT', deleted.location)
         with app.get_db() as conn:
             self.assertIsNone(conn.execute('SELECT id FROM manuals WHERE id=?', (free,)).fetchone())

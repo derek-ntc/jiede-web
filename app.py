@@ -5682,6 +5682,131 @@ def replace_assembly_shipment(
     return int(batch_id)
 
 
+def selectively_replace_assembly_shipment(
+    conn,
+    batch,
+    preview,
+    shipped_at,
+    logistics_no,
+    existing_price_snapshots,
+    recorded_by="",
+):
+    """Replace only materially changed assembly rows.
+
+    Unchanged rows keep their item IDs, allocations and recorded inventory
+    deductions so a metadata-only edit cannot consume stock received later.
+    """
+    batch_id = int(batch["id"])
+    customer, assembly_drawing_no, set_quantity, shipped_at = (
+        _validated_assembly_preview_header(preview, shipped_at)
+    )
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    existing_items = {int(item["manual_id"]): item for item in batch["items"]}
+    preview_items = {int(item["manual_id"]): item for item in preview["items"]}
+
+    unchanged_manual_ids = {
+        manual_id
+        for manual_id, old_item in existing_items.items()
+        if manual_id in preview_items
+        and int(old_item["shipped_quantity"]) == int(preview_items[manual_id]["shipped_quantity"])
+        and str(old_item["source_kind"] or "bom")
+        == str(preview_items[manual_id].get("source_kind") or "bom")
+        and int(old_item["quantity_per_set"] or 0)
+        == int(preview_items[manual_id].get("quantity_per_set") or 0)
+        and int(old_item["calculated_quantity"] or 0)
+        == int(preview_items[manual_id].get("calculated_quantity") or 0)
+    }
+    changed_existing_items = [
+        item
+        for manual_id, item in existing_items.items()
+        if manual_id not in unchanged_manual_ids
+    ]
+    changed_item_ids = [int(item["id"]) for item in changed_existing_items]
+    affected_order_ids = set()
+    if changed_item_ids:
+        placeholders = ",".join("?" for _ in changed_item_ids)
+        affected_order_ids.update(
+            int(row["order_id"])
+            for row in conn.execute(
+                f"""
+                SELECT DISTINCT order_id
+                FROM assembly_shipment_allocations
+                WHERE item_id IN ({placeholders}) AND order_id IS NOT NULL
+                """,
+                changed_item_ids,
+            ).fetchall()
+        )
+        for item_id in changed_item_ids:
+            reverse_assembly_inventory_deduction(conn, item_id)
+        conn.execute(
+            f"DELETE FROM assembly_shipment_allocations WHERE item_id IN ({placeholders})",
+            changed_item_ids,
+        )
+        conn.execute(
+            f"DELETE FROM assembly_shipment_items WHERE id IN ({placeholders})",
+            changed_item_ids,
+        )
+
+    for manual_id in sorted(unchanged_manual_ids):
+        conn.execute(
+            """
+            UPDATE assembly_shipment_items
+            SET remark = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(preview_items[manual_id].get("remark") or ""),
+                now,
+                int(existing_items[manual_id]["id"]),
+            ),
+        )
+
+    conn.execute(
+        """
+        UPDATE assembly_shipment_batches
+        SET customer = ?, assembly_drawing_no = ?, set_quantity = ?,
+            shipped_at = ?, logistics_no = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            customer,
+            assembly_drawing_no,
+            set_quantity,
+            shipped_at,
+            str(logistics_no or "").strip(),
+            now,
+            batch_id,
+        ),
+    )
+
+    changed_preview_items = [
+        item
+        for item in preview["items"]
+        if int(item["manual_id"]) not in unchanged_manual_ids
+    ]
+    if changed_preview_items:
+        changed_preview = dict(preview)
+        changed_preview["items"] = changed_preview_items
+        retained_snapshots = {
+            manual_id: snapshot
+            for manual_id, snapshot in existing_price_snapshots.items()
+            if manual_id not in unchanged_manual_ids
+        }
+        affected_order_ids.update(
+            _save_assembly_shipment_items(
+                conn,
+                batch_id,
+                changed_preview,
+                now,
+                recorded_by,
+                existing_price_snapshots=retained_snapshots,
+            )
+        )
+    for order_id in sorted(affected_order_ids):
+        sync_order_shipment_summary(conn, order_id, updated_at=now)
+    return batch_id
+
+
 def shipment_plan_box_count(planned_quantity, pack_quantity):
     pack_count = parse_positive_number(pack_quantity)
     if pack_count <= 0:
@@ -7309,6 +7434,13 @@ def finance_source_refs_for_manual(conn, manual_id):
             (manual_id,),
         ).fetchall()
     )
+    refs.extend(
+        ("supplemental", int(row["id"]))
+        for row in conn.execute(
+            "SELECT id FROM supplemental_shipments WHERE manual_id = ? ORDER BY id",
+            (manual_id,),
+        ).fetchall()
+    )
     return refs
 
 
@@ -8778,6 +8910,7 @@ def products_index():
         selected_customer=selected_customer,
         sort=sort,
         direction=direction,
+        product_mutation_csrf_token=production_followup_csrf_token(),
     )
 
 
@@ -9197,7 +9330,9 @@ def production_followup_csrf_token():
 
 def require_production_followup_csrf():
     expected = session.get("production_followup_csrf_token", "")
-    submitted = request.form.get("production_followup_csrf_token", "")
+    submitted = request.form.get("production_followup_csrf_token", "") or request.headers.get(
+        "X-CSRF-Token", ""
+    )
     if (
         not isinstance(expected, str)
         or not isinstance(submitted, str)
@@ -9441,6 +9576,7 @@ def update_production_followup_customer(followup_id):
 
 
 def production_process_action_result(followup_id, action, success_message):
+    require_production_followup_csrf()
     try:
         with get_db() as conn:
             followup = conn.execute(
@@ -9534,6 +9670,7 @@ def revert_production_followup_process(followup_id, step_id):
 @app.route("/admin/production-followups/<int:followup_id>/<stage>", methods=["POST"])
 @permission_required("production_followups_manage")
 def complete_production_stage(followup_id, stage):
+    require_production_followup_csrf()
     column = production_stage_column(stage)
     if not column:
         abort(404)
@@ -9807,12 +9944,14 @@ def manual_technical(manual_id):
         inspection_requirements=inspection_requirements,
         materials=materials,
         process_template=process_template,
+        product_mutation_csrf_token=production_followup_csrf_token(),
     )
 
 
 @app.route("/admin/<int:manual_id>/process-template", methods=["POST"])
 @permission_required("product_edit")
 def save_product_process_template(manual_id):
+    require_production_followup_csrf()
     process_names = request.form.getlist("process_name")
     try:
         with get_db() as conn:
@@ -15617,14 +15756,12 @@ def edit_assembly_shipment(batch_id):
                 }
                 for item in batch["items"]
             }
-            old_order_ids = reverse_assembly_shipment_batch(conn, batch_id)
-            replace_assembly_shipment(
+            selectively_replace_assembly_shipment(
                 conn,
-                batch_id,
+                batch,
                 preview,
                 shipped_at,
                 logistics_no,
-                old_order_ids,
                 existing_price_snapshots=existing_price_snapshots,
                 recorded_by=current_admin_username(),
             )
@@ -18720,6 +18857,7 @@ def delete_manuals(raw_manual_ids):
 @app.route("/admin/products/delete-batch", methods=["POST"])
 @permission_required("product_edit")
 def batch_delete_manuals():
+    require_production_followup_csrf()
     redirect_args = product_list_return_args(request.form)
     try:
         deleted_count = delete_manuals(request.form.getlist("manual_id"))

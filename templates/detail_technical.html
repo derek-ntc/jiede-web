@@ -81,6 +81,7 @@
     </div>
     {% if can_edit_products %}
       <form method="post" action="{{ url_for('save_product_process_template', manual_id=manual.id) }}" class="process-template-editor" data-process-template-editor>
+        <input type="hidden" name="production_followup_csrf_token" value="{{ product_mutation_csrf_token }}">
         <ol class="process-template-rows" data-process-template-rows>
           {% for step in process_template %}
             <li class="process-template-row" data-process-template-row>

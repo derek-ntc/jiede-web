@@ -94,6 +94,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
             )
 
         self.client = app.app.test_client()
+        self.client.environ_base["HTTP_X_CSRF_TOKEN"] = "test-followup-csrf"
         self._login("manager")
 
     def tearDown(self):
@@ -107,6 +108,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
             session["admin_logged_in"] = True
             session["admin_username"] = username
             session["admin_role"] = "operator"
+            session["production_followup_csrf_token"] = "test-followup-csrf"
 
     @staticmethod
     def _insert_product(conn, drawing_no, product_name, customer, specification, now):
@@ -418,6 +420,61 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+    def test_all_process_mutations_require_valid_csrf_without_side_effects(self):
+        with app.get_db() as conn:
+            production_processes.save_manual_process_template(
+                conn,
+                self.product_a,
+                ["下料", "检验"],
+                now="2026-09-09T09:00:00",
+            )
+            steps = production_processes.create_followup_process_snapshot(
+                conn,
+                1,
+                self.product_a,
+                now="2026-09-09T09:05:00",
+            )
+            before = production_processes.load_followup_process_card(conn, 1)
+
+        page = self.client.get("/admin/production-followups")
+        self.assertIn(
+            'name="production_followup_csrf_token" value="test-followup-csrf"',
+            page.get_data(as_text=True),
+        )
+        self.client.environ_base.pop("HTTP_X_CSRF_TOKEN")
+        requests = [
+            ("/admin/production-followups/1/processes", {"name": "包装"}),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/delete',
+                {},
+            ),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/move',
+                {"direction": "down"},
+            ),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/complete',
+                {},
+            ),
+            (
+                f'/admin/production-followups/1/processes/{steps[0]["id"]}/revert',
+                {},
+            ),
+            ("/admin/production-followups/1/laser", {}),
+        ]
+        for path, base_data in requests:
+            for token in (None, "wrong-token"):
+                data = dict(base_data)
+                if token is not None:
+                    data["production_followup_csrf_token"] = token
+                with self.subTest(path=path, token=token):
+                    response = self.client.post(path, data=data)
+                    self.assertEqual(response.status_code, 403)
+
+        with app.get_db() as conn:
+            after = production_processes.load_followup_process_card(conn, 1)
+        self.assertEqual(after, before)
 
     def test_process_action_routes_deny_users_without_followup_management_permission(self):
         with app.get_db() as conn:

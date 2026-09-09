@@ -115,7 +115,13 @@ class LegacyWorkflowStartupTests(delivery_fixtures.DeliveryPersistenceFixture):
         self.addCleanup(super().tearDown)
         self.client = app.app.test_client()
         with self.client.session_transaction() as session:
-            session.update(admin_logged_in=True, admin_username='admin', admin_role='admin')
+            session.update(
+                admin_logged_in=True,
+                admin_username='admin',
+                admin_role='admin',
+                production_followup_csrf_token='legacy-startup-csrf',
+            )
+        self.client.environ_base['HTTP_X_CSRF_TOKEN'] = 'legacy-startup-csrf'
         with app.get_db() as conn:
             delivery_fixtures.DeliverySourceMigrationTests.seed_legacy(self, conn)
             # Old imports wrote the matching drawing number but no specification.

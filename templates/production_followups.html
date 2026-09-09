@@ -168,6 +168,7 @@
                           {% if step.completed_at %}
                             {% if step.can_revert %}
                               <form method="post" action="{{ url_for('revert_production_followup_process', followup_id=row.id, step_id=step.id) }}" data-production-process-confirm="确定撤回{{ step.name }}吗？">
+                                <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                                 <input type="hidden" name="filter_q" value="{{ query }}">
                                 <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                                 <button class="secondary compact-button" type="submit">撤回</button>
@@ -177,6 +178,7 @@
                             {% endif %}
                           {% elif step.can_complete %}
                             <form method="post" action="{{ url_for('complete_production_followup_process', followup_id=row.id, step_id=step.id) }}">
+                              <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                               <input type="hidden" name="filter_q" value="{{ query }}">
                               <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                               <button class="compact-button" type="submit">完成</button>
@@ -188,6 +190,7 @@
                           {% if not step.completed_at %}
                             {% if step.can_move_up %}
                               <form method="post" action="{{ url_for('move_production_followup_process', followup_id=row.id, step_id=step.id) }}">
+                                <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                                 <input type="hidden" name="direction" value="up">
                                 <input type="hidden" name="filter_q" value="{{ query }}">
                                 <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
@@ -198,6 +201,7 @@
                             {% endif %}
                             {% if step.can_move_down %}
                               <form method="post" action="{{ url_for('move_production_followup_process', followup_id=row.id, step_id=step.id) }}">
+                                <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                                 <input type="hidden" name="direction" value="down">
                                 <input type="hidden" name="filter_q" value="{{ query }}">
                                 <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
@@ -207,6 +211,7 @@
                               <button class="secondary compact-button" type="button" disabled aria-label="不可下移{{ step.name }}">↓</button>
                             {% endif %}
                             <form method="post" action="{{ url_for('delete_production_followup_process', followup_id=row.id, step_id=step.id) }}" data-production-process-confirm="确定删除{{ step.name }}吗？">
+                              <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                               <input type="hidden" name="filter_q" value="{{ query }}">
                               <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                               <button class="danger compact-button" type="submit">删除</button>
@@ -221,6 +226,7 @@
                 </ol>
                 {% if can_manage_production_followups %}
                   <form method="post" action="{{ url_for('add_production_followup_process', followup_id=row.id) }}" class="production-process-add-form">
+                    <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                     <input type="hidden" name="filter_q" value="{{ query }}">
                     <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                     <input type="text" name="name" maxlength="100" required placeholder="新工艺名称" aria-label="{{ row.batch_no }} 新工艺名称">

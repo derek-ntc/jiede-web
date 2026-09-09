@@ -711,8 +711,12 @@ class InspectionReportTests(unittest.TestCase):
                 session["admin_logged_in"] = True
                 session["admin_username"] = "worker"
                 session["admin_role"] = "operator"
+                session["production_followup_csrf_token"] = "stage-csrf"
 
-            client.post(f"/admin/production-followups/{followup_id}/laser")
+            client.post(
+                f"/admin/production-followups/{followup_id}/laser",
+                data={"production_followup_csrf_token": "stage-csrf"},
+            )
             with app.get_db() as conn:
                 row = conn.execute(
                     "SELECT laser_completed_at FROM production_followups WHERE id = ?",
@@ -720,7 +724,10 @@ class InspectionReportTests(unittest.TestCase):
                 ).fetchone()
                 self.assertTrue(row["laser_completed_at"])
 
-            client.post(f"/admin/production-followups/{followup_id}/laser")
+            client.post(
+                f"/admin/production-followups/{followup_id}/laser",
+                data={"production_followup_csrf_token": "stage-csrf"},
+            )
             with app.get_db() as conn:
                 row = conn.execute(
                     "SELECT laser_completed_at FROM production_followups WHERE id = ?",

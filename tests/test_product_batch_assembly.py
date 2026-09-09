@@ -25,6 +25,8 @@ class ProductBatchAssemblyTests(unittest.TestCase):
             session["admin_logged_in"] = True
             session["admin_username"] = "admin"
             session["admin_role"] = "admin"
+            session["production_followup_csrf_token"] = "test-product-csrf"
+        self.client.environ_base["HTTP_X_CSRF_TOKEN"] = "test-product-csrf"
 
         self.product_a = self.create_product("PART-A", "短名称A", "客户A")
         self.product_b = self.create_product("PART-B", "短名称B", "客户A")
@@ -114,6 +116,56 @@ class ProductBatchAssemblyTests(unittest.TestCase):
                 app.create_reconciliation_statement(
                     conn, [("ordinary", shipment_id)], "admin"
                 )
+
+    def create_claimed_supplemental_shipment(self, manual_id, claim_kind):
+        now = "2026-09-03T20:00:00"
+        with app.get_db() as conn:
+            manual = conn.execute(
+                "SELECT * FROM manuals WHERE id = ?", (manual_id,)
+            ).fetchone()
+            app.ensure_customer_exists(conn, manual["customer"], now)
+            customer_id = conn.execute(
+                "SELECT id FROM customers WHERE name = ?", (manual["customer"],)
+            ).fetchone()["id"]
+            operation_id = app.start_delivery_operation(
+                conn,
+                f"supplemental-{claim_kind}-{manual_id}",
+                f"digest-{claim_kind}-{manual_id}",
+                "admin",
+            )
+            shipment_id = conn.execute(
+                """
+                INSERT INTO supplemental_shipments (
+                    operation_id, manual_id, customer, drawing_no, product_name,
+                    specification_snapshot, sku, model, unit, shipped_quantity,
+                    inventory_deducted_quantity, inventory_shortage_quantity,
+                    shipped_at, logistics_no, remark, unit_price_minor, currency,
+                    price_recorded_by, price_recorded_at, created_by, created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, '', '', '', '件', 2, 0, 2,
+                          '2026-09-03', '', '', 100, 'CNY', 'admin', ?,
+                          'admin', ?, ?)
+                """,
+                (
+                    operation_id,
+                    manual_id,
+                    manual["customer"],
+                    manual["drawing_no"],
+                    manual["product_name"],
+                    now,
+                    now,
+                    now,
+                ),
+            ).lastrowid
+            if claim_kind == "finance":
+                app.create_finance_invoice(
+                    conn, customer_id, [("supplemental", shipment_id)], "admin"
+                )
+            else:
+                app.create_reconciliation_statement(
+                    conn, [("supplemental", shipment_id)], "admin"
+                )
+        return shipment_id
 
     def assert_products_exist(self, *manual_ids):
         with app.get_db() as conn:
@@ -265,6 +317,60 @@ class ProductBatchAssemblyTests(unittest.TestCase):
 
                 self.assertIn("整批未删除", response.get_data(as_text=True))
                 self.assert_products_exist(unlocked_id, locked_id)
+
+    def test_batch_delete_rejects_supplemental_finance_or_reconciliation_claim_atomically(self):
+        for claim_kind in ("finance", "reconciliation"):
+            with self.subTest(claim_kind=claim_kind):
+                unlocked_id = self.create_product(
+                    f"FREE-SUP-{claim_kind}", "普通产品", "客户A"
+                )
+                locked_id = self.create_product(
+                    f"LOCK-SUP-{claim_kind}", "补充发货锁定产品", "客户A"
+                )
+                self.attach_file(locked_id, f"locked-{claim_kind}.pdf")
+                shipment_id = self.create_claimed_supplemental_shipment(
+                    locked_id, claim_kind
+                )
+
+                response = self.client.post(
+                    "/admin/products/delete-batch",
+                    data={"manual_id": [str(unlocked_id), str(locked_id)]},
+                    follow_redirects=True,
+                )
+
+                self.assertIn("整批未删除", response.get_data(as_text=True))
+                self.assert_products_exist(unlocked_id, locked_id)
+                self.assertTrue(
+                    (app.MANUALS_DIR / f"locked-{claim_kind}.pdf").exists()
+                )
+                with app.get_db() as conn:
+                    refs = app.finance_source_refs_for_manual(conn, locked_id)
+                    self.assertIn(("supplemental", shipment_id), refs)
+
+    def test_batch_delete_requires_valid_csrf_without_deleting_any_product(self):
+        self.client.environ_base.pop("HTTP_X_CSRF_TOKEN")
+        for data in (
+            {"manual_id": [str(self.product_a), str(self.product_b)]},
+            {
+                "manual_id": [str(self.product_a), str(self.product_b)],
+                "production_followup_csrf_token": "wrong-token",
+            },
+        ):
+            with self.subTest(data=data):
+                response = self.client.post("/admin/products/delete-batch", data=data)
+                self.assertEqual(response.status_code, 403)
+                self.assert_products_exist(self.product_a, self.product_b)
+
+        response = self.client.post(
+            "/admin/products/delete-batch",
+            data={
+                "manual_id": [str(self.product_a), str(self.product_b)],
+                "production_followup_csrf_token": "test-product-csrf",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM manuals").fetchone()[0], 0)
 
     def test_batch_delete_restores_quarantined_files_when_database_commit_fails(self):
         self.attach_file(self.product_a, "part-a.pdf")
