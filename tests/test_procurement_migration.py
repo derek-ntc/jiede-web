@@ -320,7 +320,7 @@ class MigrationTests(unittest.TestCase):
             with sqlite3.connect(db) as copy:
                 self.conn.backup(copy)
             before = (hashlib.sha256(db.read_bytes()).hexdigest(), db.stat().st_mtime_ns)
-            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--lock-path", str(lock), "--database", str(db)]
+            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--env-file", str(Path(directory) / ".env"), "--lock-path", str(lock), "--database", str(db)]
             first = subprocess.run(cmd, capture_output=True, text=True)
             second = subprocess.run(cmd, capture_output=True, text=True)
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -349,7 +349,7 @@ class MigrationTests(unittest.TestCase):
             with sqlite3.connect(db) as copy:
                 self.conn.backup(copy)
             env = dict(os.environ, JIEDE_WRITE_LOCK_PATH=str(lock))
-            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--database", str(db)]
+            cmd = [sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--env-file", str(Path(directory) / ".env"), "--database", str(db)]
             before = (db.read_bytes(), db.stat().st_mtime_ns)
             failed = subprocess.run(cmd, capture_output=True, text=True, env=env)
             self.assertNotEqual(failed.returncode, 0)
@@ -398,7 +398,7 @@ with open(sys.argv[2], 'rb') as lock:
             try:
                 self.assertTrue(select.select([writer.stdout], [], [], 5)[0])
                 self.assertEqual(writer.stdout.readline().strip(), "half-written")
-                reporter = subprocess.Popen([sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--database", str(db)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ, JIEDE_WRITE_LOCK_PATH=str(lock)))
+                reporter = subprocess.Popen([sys.executable, str(ROOT / "scripts/report_procurement_migration.py"), "--env-file", str(Path(directory) / ".env"), "--database", str(db)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ, JIEDE_WRITE_LOCK_PATH=str(lock)))
                 self.assertTrue(select.select([reporter.stderr], [], [], 5)[0])
                 self.assertIn("application lock", reporter.stderr.readline().lower())
                 with self.assertRaises(subprocess.TimeoutExpired):

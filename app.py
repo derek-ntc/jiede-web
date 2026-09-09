@@ -56,6 +56,7 @@ if not getattr(PillowPackage, "__version__", ""):
 PillowImageFile.LOAD_TRUNCATED_IMAGES = False
 
 from dotenv import load_dotenv
+from runtime_config import DEFAULT_WRITE_LOCK_PATH, resolve_write_lock_path
 from flask import (
     Flask,
     abort,
@@ -221,6 +222,7 @@ DISABLED_ENDPOINT_PREFIXES = (
 )
 
 
+_configured_write_lock_path = resolve_write_lock_path(BASE_DIR)
 load_dotenv(BASE_DIR / ".env", override=True)
 
 
@@ -252,10 +254,7 @@ class FactoryRequest(FlaskRequest):
 app = Flask(__name__)
 app.request_class = FactoryRequest
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-env")
-DEFAULT_WRITE_LOCK_PATH = "/tmp/jiede-web-write.lock"
-app.config["WRITE_LOCK_PATH"] = os.getenv(
-    "JIEDE_WRITE_LOCK_PATH", DEFAULT_WRITE_LOCK_PATH
-)
+app.config["WRITE_LOCK_PATH"] = str(_configured_write_lock_path)
 _write_lock_state = threading.local()
 _HTTP_SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 

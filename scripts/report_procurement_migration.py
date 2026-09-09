@@ -5,13 +5,13 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import json
-import os
 from pathlib import Path
 import sqlite3
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from procurement import procurement_migration_report
+from runtime_config import resolve_write_lock_path
 
 
 @contextmanager
@@ -33,12 +33,15 @@ def existing_application_lock(path, *, offline=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", required=True, type=Path)
+    parser.add_argument("--env-file", type=Path, help="Use this dotenv file instead of the project-root .env for lock selection; its lock value overrides the process environment. A missing file falls back to the environment/default. Other values are not loaded")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--lock-path", type=Path, help="Existing application lock file (default: JIEDE_WRITE_LOCK_PATH or /tmp/jiede-web-write.lock); never created by this command")
+    mode.add_argument("--lock-path", help="Existing application lock file; overrides .env and process environment. Otherwise use JIEDE_WRITE_LOCK_PATH from .env, then the environment, then /tmp/jiede-web-write.lock. Never created by this command")
     mode.add_argument("--offline", action="store_true", help="Bypass the application lock ONLY for a static copy or stopped application; concurrent nolock writers can make the report inconsistent")
     args = parser.parse_args()
-    lock_path = args.lock_path or Path(os.getenv("JIEDE_WRITE_LOCK_PATH", "/tmp/jiede-web-write.lock"))
+    lock_path = None
     try:
+        if not args.offline:
+            lock_path = resolve_write_lock_path(Path(__file__).resolve().parents[1], explicit_lock_path=args.lock_path, env_file=args.env_file)
         with existing_application_lock(lock_path, offline=args.offline):
             # as_uri quotes spaces, # and ?; never create a missing file.
             conn = sqlite3.connect(args.database.resolve().as_uri() + "?mode=ro", uri=True)
