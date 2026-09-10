@@ -413,6 +413,22 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
             [("下料", "", ""), ("包装", "", "")],
         )
 
+    def test_process_remark_route_renders_on_list_and_print_card(self):
+        with app.get_db() as conn:
+            steps = production_processes.create_followup_process_snapshot(
+                conn, 1, self.product_a, now="2026-09-09T09:05:00"
+            )
+        response = self.client.post(
+            f'/admin/production-followups/1/processes/{steps[0]["id"]}/remark',
+            data={"remark": "注意孔位", "filter_q": "P1", "filter_customer": "客户A"},
+            follow_redirects=True,
+        )
+        self.assertIn("生产工艺备注已保存", response.get_data(as_text=True))
+        self.assertIn("注意孔位", response.get_data(as_text=True))
+        card = self.client.get("/admin/production-followups/1/process-card")
+        self.assertIn("备注", card.get_data(as_text=True))
+        self.assertIn("注意孔位", card.get_data(as_text=True))
+
     def test_process_routes_return_not_found_for_an_unknown_followup(self):
         response = self.client.post(
             "/admin/production-followups/999999/processes",

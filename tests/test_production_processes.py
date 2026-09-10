@@ -803,6 +803,23 @@ class ProductionProcessPersistenceTests(unittest.TestCase):
         self.assertEqual(template_step_count, 0)
         self.assertEqual([step["name"] for step in historical], ["下料", "包装"])
 
+    def test_process_step_remark_persists_independently_of_completion(self):
+        with app.get_db() as conn:
+            followup_id = self._insert_followup(conn, manual_id=self.manual_id)
+            card = production_processes.create_followup_process_snapshot(
+                conn, followup_id, self.manual_id, now="2026-09-09T10:00:00"
+            )
+            saved = production_processes.update_followup_process_step_remark(
+                conn,
+                followup_id,
+                card[0]["id"],
+                "压铆用4-1或4-2的压铆螺母，注意方向",
+                now="2026-09-09T10:05:00",
+            )
+
+        self.assertEqual(saved[0]["remark"], "压铆用4-1或4-2的压铆螺母，注意方向")
+        self.assertEqual(saved[0]["completed_at"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

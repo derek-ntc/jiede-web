@@ -12,6 +12,7 @@ LEGACY_PROCESS_COLUMNS = {
     "焊接": "welding_completed_at",
 }
 MAX_PROCESS_NAME_LENGTH = 100
+MAX_PROCESS_REMARK_LENGTH = 1000
 
 
 def _now():
@@ -106,6 +107,7 @@ def ensure_production_process_tables(conn):
             sort_order INTEGER NOT NULL,
             completed_at TEXT NOT NULL DEFAULT '',
             completed_by TEXT NOT NULL DEFAULT '',
+            remark TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             CHECK (
@@ -117,6 +119,10 @@ def ensure_production_process_tables(conn):
         )
         """
     )
+    if "remark" not in _table_columns(conn, "production_followup_process_steps"):
+        conn.execute(
+            "ALTER TABLE production_followup_process_steps ADD COLUMN remark TEXT NOT NULL DEFAULT ''"
+        )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_production_followup_process_steps_order
@@ -170,9 +176,9 @@ def ensure_production_process_tables(conn):
             conn.execute(
                 """
                 INSERT INTO production_followup_process_steps (
-                    followup_id, name, sort_order, completed_at, completed_by,
+                    followup_id, name, sort_order, completed_at, completed_by, remark,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, '', ?, ?)
                 """,
                 (
                     followup["id"],
@@ -338,9 +344,9 @@ def create_followup_process_snapshot(
             conn.execute(
                 """
                 INSERT INTO production_followup_process_steps (
-                    followup_id, name, sort_order, completed_at, completed_by,
+                    followup_id, name, sort_order, completed_at, completed_by, remark,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, '', '', ?, ?)
+                ) VALUES (?, ?, ?, '', '', '', ?, ?)
                 """,
                 (followup_id, step["name"], sort_order, timestamp, timestamp),
             )
@@ -498,9 +504,9 @@ def add_followup_process_step(conn, followup_id, name, *, now=None):
         conn.execute(
             """
             INSERT INTO production_followup_process_steps (
-                followup_id, name, sort_order, completed_at, completed_by,
+                followup_id, name, sort_order, completed_at, completed_by, remark,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, '', '', ?, ?)
+            ) VALUES (?, ?, ?, '', '', '', ?, ?)
             """,
             (followup_id, normalized_name, len(card), timestamp, timestamp),
         )
@@ -512,6 +518,25 @@ def add_followup_process_step(conn, followup_id, name, *, now=None):
             """,
             (timestamp, followup_id),
         )
+    return load_followup_process_card(conn, followup_id)
+
+
+def update_followup_process_step_remark(conn, followup_id, step_id, remark, *, now=None):
+    normalized = str(remark or "").strip()
+    if len(normalized) > MAX_PROCESS_REMARK_LENGTH:
+        raise ValueError("生产工艺备注不能超过 1000 个字符")
+    timestamp = now or _beijing_now()
+    with _savepoint(conn, "update_followup_process_step_remark"):
+        step = _card_step(load_followup_process_card(conn, followup_id), step_id)
+        conn.execute(
+            """
+            UPDATE production_followup_process_steps
+            SET remark = ?, updated_at = ?
+            WHERE id = ? AND followup_id = ?
+            """,
+            (normalized, timestamp, step["id"], followup_id),
+        )
+        _update_followup_timestamp(conn, followup_id, timestamp)
     return load_followup_process_card(conn, followup_id)
 
 

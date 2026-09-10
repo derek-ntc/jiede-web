@@ -1065,6 +1065,26 @@ table {
   min-width: 1160px;
 }
 
+.production-process-remark {
+  display: block;
+  margin-top: 3px;
+  white-space: pre-wrap;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.production-process-remark-form {
+  display: flex;
+  flex-basis: 100%;
+  gap: 6px;
+  align-items: center;
+}
+
+.production-process-remark-form textarea {
+  min-width: 180px;
+  flex: 1;
+}
+
 .purchase-followup-page {
   width: 80vw;
   max-width: none;

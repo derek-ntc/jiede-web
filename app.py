@@ -149,6 +149,7 @@ from production_processes import (
     move_followup_process_step,
     revert_followup_process_step,
     save_manual_process_template,
+    update_followup_process_step_remark,
 )
 from shipping_workflow import (
     DeliveryOperationConflict,
@@ -9743,6 +9744,21 @@ def delete_production_followup_process(followup_id, step_id):
         followup_id,
         lambda conn: delete_followup_process_step(conn, followup_id, step_id),
         "生产工艺已删除",
+    )
+
+
+@app.route(
+    "/admin/production-followups/<int:followup_id>/processes/<int:step_id>/remark",
+    methods=["POST"],
+)
+@permission_required("production_followups_manage")
+def update_production_followup_process_remark(followup_id, step_id):
+    return production_process_action_result(
+        followup_id,
+        lambda conn: update_followup_process_step_remark(
+            conn, followup_id, step_id, request.form.get("remark", "")
+        ),
+        "生产工艺备注已保存",
     )
 
 

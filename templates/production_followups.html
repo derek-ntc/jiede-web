@@ -155,6 +155,7 @@
                       <span class="production-process-number">{{ loop.index }}</span>
                       <div class="production-process-summary">
                         <strong>{{ step.name }}</strong>
+                        {% if step.remark %}<span class="production-process-remark">备注：{{ step.remark }}</span>{% endif %}
                         {% if step.completed_at %}
                           <span class="production-process-meta">已完成 · {{ step.completed_at.replace("T", " ")[:16] }}{% if step.completed_by %} · {{ step.completed_by }}{% endif %}</span>
                         {% elif step.can_complete %}
@@ -165,6 +166,13 @@
                       </div>
                       {% if can_manage_production_followups %}
                         <div class="production-process-actions">
+                          <form method="post" action="{{ url_for('update_production_followup_process_remark', followup_id=row.id, step_id=step.id) }}" class="production-process-remark-form">
+                            <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
+                            <input type="hidden" name="filter_q" value="{{ query }}">
+                            <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
+                            <textarea name="remark" maxlength="1000" rows="2" placeholder="工艺备注、注意事项" aria-label="{{ step.name }} 备注">{{ step.remark }}</textarea>
+                            <button class="secondary compact-button" type="submit">保存备注</button>
+                          </form>
                           {% if step.completed_at %}
                             {% if step.can_revert %}
                               <form method="post" action="{{ url_for('revert_production_followup_process', followup_id=row.id, step_id=step.id) }}" data-production-process-confirm="确定撤回{{ step.name }}吗？">

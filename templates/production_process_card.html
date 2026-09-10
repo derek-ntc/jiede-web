@@ -48,6 +48,7 @@
               <th>状态</th>
               <th>完成时间</th>
               <th>操作人</th>
+              <th>备注</th>
             </tr>
           </thead>
           <tbody>
@@ -61,10 +62,11 @@
                 </td>
                 <td>{{ step.completed_at.replace("T", " ")[:16] if step.completed_at else "" }}</td>
                 <td>{{ step.completed_by }}</td>
+                <td>{{ step.remark }}</td>
               </tr>
             {% else %}
               <tr>
-                <td colspan="4" class="empty-text">无生产工艺</td>
+                <td colspan="5" class="empty-text">无生产工艺</td>
               </tr>
             {% endfor %}
           </tbody>
