@@ -1065,6 +1065,46 @@ table {
   min-width: 1160px;
 }
 
+/* Readability adjustments are intentionally limited to 客商管理的三张资料页。 */
+body.page-admin_customers .panel,
+body.page-admin_suppliers .panel,
+body.page-admin_common_info .panel {
+  font-size: 16px;
+}
+
+body.page-admin_customers table,
+body.page-admin_suppliers table,
+body.page-admin_common_info table {
+  font-size: 16px;
+}
+
+body.page-admin_customers th,
+body.page-admin_suppliers th,
+body.page-admin_common_info th {
+  font-size: 17px;
+}
+
+body.page-admin_customers input,
+body.page-admin_customers textarea,
+body.page-admin_customers select,
+body.page-admin_suppliers input,
+body.page-admin_suppliers textarea,
+body.page-admin_suppliers select,
+body.page-admin_common_info input,
+body.page-admin_common_info textarea,
+body.page-admin_common_info select,
+body.page-admin_customers button,
+body.page-admin_suppliers button,
+body.page-admin_common_info button {
+  font-size: 16px;
+}
+
+body.page-admin_customers td,
+body.page-admin_suppliers td,
+body.page-admin_common_info td {
+  min-height: 48px;
+}
+
 .production-process-remark {
   display: block;
   margin-top: 3px;

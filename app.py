@@ -17,7 +17,7 @@ import zlib
 import json
 import fcntl
 import threading
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
 from contextlib import contextmanager
 from email.message import EmailMessage
 from io import BytesIO
@@ -8576,6 +8576,72 @@ def build_shipped_orders_pdf(shipped_orders, query, selected_customer, shipped_a
     return buffer
 
 
+DELIVERY_NOTE_EXPORT_COLUMNS = (
+    ("序号", "index"), ("产品图号", "drawing_no"), ("产品名称", "product_name"),
+    ("规格型号", "specification"), ("单位", "unit"), ("数量", "shipped_quantity"),
+    ("订单号", "order_no"), ("发货时间", "shipped_at"), ("备注", "remark"),
+)
+
+
+def delivery_note_export_payload(note):
+    """The price-free values from a persisted delivery-note snapshot."""
+    return {
+        "document_no": str(note["document_no"] or "送货单"),
+        "customer": str(note["customer"] or ""),
+        "recipient_name": str(note["recipient_name"] or "未填写"),
+        "recipient_phone": str(note["recipient_phone"] or "未填写"),
+        "address": str(note["address"] or "未填写"),
+        "updated_at": str(note["updated_at"] or ""),
+        "items": [
+            {"index": index, "drawing_no": str(item["drawing_no"] or "-"),
+             "product_name": str(item["product_name"] or "-"),
+             "specification": str(display_shipment_specification(item) or ""),
+             "unit": str(item["unit"] or ""), "shipped_quantity": int(item["shipped_quantity"] or 0),
+             "order_no": str(item["order_no"] or "-"), "shipped_at": str(item["shipped_at"] or "-"),
+             "remark": str(item["remark"] or "")}
+            for index, item in enumerate(note["items"], 1)
+        ],
+    }
+
+
+def _delivery_note_rows(payload):
+    return [[item[key] for _, key in DELIVERY_NOTE_EXPORT_COLUMNS] for item in payload["items"]]
+
+
+def build_delivery_note_xlsx(payload):
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "送货单"
+    sheet.merge_cells("A1:I1"); sheet["A1"] = "送货单"; sheet["A1"].font = Font(size=18, bold=True); sheet["A1"].alignment = Alignment(horizontal="center")
+    for row_no, values in enumerate((("客户名称", payload["customer"] or "-", "送货单号", payload["document_no"]), ("收货人", payload["recipient_name"], "收货电话", payload["recipient_phone"]), ("收货地址", payload["address"], "明细更新时间", format_delivery_timestamp(payload["updated_at"]) or "-")), 3):
+        sheet.cell(row_no, 1, values[0]); sheet.cell(row_no, 2, values[1]); sheet.merge_cells(start_row=row_no, start_column=2, end_row=row_no, end_column=5)
+        sheet.cell(row_no, 6, values[2]); sheet.cell(row_no, 7, values[3]); sheet.merge_cells(start_row=row_no, start_column=7, end_row=row_no, end_column=9)
+    for column, (label, _) in enumerate(DELIVERY_NOTE_EXPORT_COLUMNS, 1):
+        cell = sheet.cell(7, column, label); cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="5C7280"); cell.alignment = Alignment(horizontal="center")
+    for row in _delivery_note_rows(payload): sheet.append(row)
+    border = Border(*(Side(style="thin", color="6F8390") for _ in range(4)))
+    for row in sheet.iter_rows(min_row=3, max_row=sheet.max_row, max_col=9):
+        for cell in row: cell.border = border; cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for column, width in enumerate((8, 17, 22, 22, 10, 10, 16, 15, 28), 1): sheet.column_dimensions[get_column_letter(column)].width = width
+    sheet.page_setup.orientation = sheet.ORIENTATION_LANDSCAPE; sheet.page_setup.paperSize = sheet.PAPERSIZE_A4; sheet.page_setup.fitToWidth = 1; sheet.page_setup.fitToHeight = 0
+    output = BytesIO(); workbook.save(output); output.seek(0); return output
+
+
+def build_delivery_note_docx(payload):
+    def cell(value):
+        return '<w:tc><w:tcPr><w:tcW w:w="1600" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">%s</w:t></w:r></w:p></w:tc>' % xml_escape(str(value))
+    def table(rows):
+        return '<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single"/><w:left w:val="single"/><w:bottom w:val="single"/><w:right w:val="single"/><w:insideH w:val="single"/><w:insideV w:val="single"/></w:tblBorders></w:tblPr>%s</w:tbl>' % ''.join('<w:tr>%s</w:tr>' % ''.join(cell(value) for value in row) for row in rows)
+    metadata = (("客户名称", payload["customer"] or "-", "送货单号", payload["document_no"]), ("收货人", payload["recipient_name"], "收货电话", payload["recipient_phone"]), ("收货地址", payload["address"], "明细更新时间", format_delivery_timestamp(payload["updated_at"]) or "-"))
+    rows = [tuple(label for label, _ in DELIVERY_NOTE_EXPORT_COLUMNS), *_delivery_note_rows(payload)]
+    body = '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="36"/></w:rPr><w:t>送货单</w:t></w:r></w:p>' + table(metadata) + table(rows) + '<w:p><w:r><w:t>收货/签收：__________________    制单：__________________    发货公司：宁波市杰德机械科技有限公司</w:t></w:r></w:p>'
+    document_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>%s<w:sectPr><w:pgSz w:w="16840" w:h="11906" w:orient="landscape"/><w:pgMar w:top="567" w:right="567" w:bottom="567" w:left="567"/></w:sectPr></w:body></w:document>') % body
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as package:
+        package.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+        package.writestr('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+        package.writestr('word/document.xml', document_xml)
+    output.seek(0); return output
+
+
 def finance_invoice_source_label(item):
     if item["source_type"] == "ordinary":
         return item["order_no"] or "-"
@@ -15937,6 +16003,38 @@ def download_delivery_note(note_id):
     except Exception:
         app.logger.exception('送货单 PDF 生成失败（发货已保存，可重试下载）')
         return '送货单暂时无法下载；发货已保存，请重试下载，不要重复新增发货。', 503
+
+
+def _valid_delivery_note_export(note_id):
+    with get_db() as conn:
+        note = load_delivery_note(conn, note_id)
+    if note is None:
+        abort(404)
+    if note["invalidated"]:
+        return None, ('送货单已失效：发货来源已删除或不再匹配，请返回发货清单核对。', 410)
+    return note, None
+
+
+@app.route('/admin/delivery-notes/<int:note_id>.xlsx')
+@permission_required('shipped_view')
+def download_delivery_note_xlsx(note_id):
+    note, error = _valid_delivery_note_export(note_id)
+    if error:
+        return error
+    return send_file(build_delivery_note_xlsx(delivery_note_export_payload(note)),
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                     as_attachment=True, download_name=f"{note['document_no']}.xlsx")
+
+
+@app.route('/admin/delivery-notes/<int:note_id>.docx')
+@permission_required('shipped_view')
+def download_delivery_note_docx(note_id):
+    note, error = _valid_delivery_note_export(note_id)
+    if error:
+        return error
+    return send_file(build_delivery_note_docx(delivery_note_export_payload(note)),
+                     mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                     as_attachment=True, download_name=f"{note['document_no']}.docx")
 
 
 @app.route("/admin/shipped-orders")

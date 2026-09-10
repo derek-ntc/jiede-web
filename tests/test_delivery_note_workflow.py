@@ -6,11 +6,13 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
+from zipfile import ZipFile
 from pathlib import Path
 from unittest.mock import patch
 
 import app
 import shipping_workflow
+from openpyxl import load_workbook
 from tests.test_assembly_shipping import AssemblyTask7TestCase, VALID_PNG_BYTES, png_bytes
 from tests.test_product_bom_import import workbook_upload
 
@@ -249,6 +251,31 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.assertIn('ZERO-PDF', text)
         self.assertIn('0', text)
         self.assertNotIn('CNY', text)
+
+    def test_delivery_note_offers_xlsx_and_docx_exports_for_saved_zero_quantity_rows(self):
+        zero = self.create_product('ZERO-EXPORT')
+        order = self.create_order(zero, 'ZERO-EXPORT-ORDER', 5)
+        response = self.client.post('/admin/shipped-orders/new', data={
+            'order_id': [str(order), str(self.order)], 'shipped_quantity': ['0', '1'],
+            'line_remark': ['暂不发货', '正常发货'], 'shipped_at': '2026-09-09',
+            'operation_token': 'zero-export',
+        })
+        body = self.client.get(response.location).get_data(as_text=True)
+        self.assertIn('.xlsx', body)
+        self.assertIn('.docx', body)
+        with app.get_db() as conn:
+            note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
+        xlsx = self.client.get(f'/admin/delivery-notes/{note_id}.xlsx')
+        self.assertEqual(xlsx.status_code, 200)
+        workbook = load_workbook(BytesIO(xlsx.data))
+        self.assertEqual(workbook.active.page_setup.orientation, "landscape")
+        self.assertIn("暂不发货", " ".join(str(cell.value or "") for row in workbook.active.iter_rows() for cell in row))
+        docx = self.client.get(f'/admin/delivery-notes/{note_id}.docx')
+        self.assertEqual(docx.status_code, 200)
+        with ZipFile(BytesIO(docx.data)) as package:
+            document_xml = package.read("word/document.xml").decode("utf-8")
+        self.assertIn("暂不发货", document_xml)
+        self.assertNotIn("单价", document_xml)
 
     def test_assembly_snapshot_keeps_order_zero_remarks_and_replay_is_read_only(self):
         zero_product = self.create_product('ZERO-DN')
