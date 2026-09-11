@@ -193,6 +193,9 @@ def ensure_shipping_workflow_tables(conn):
         order_no TEXT NOT NULL DEFAULT '', assembly_drawing_no TEXT NOT NULL DEFAULT '',
         drawing_no TEXT NOT NULL DEFAULT '', product_name TEXT NOT NULL DEFAULT '',
         specification TEXT NOT NULL DEFAULT '', unit TEXT NOT NULL DEFAULT '',
+        order_quantity INTEGER NOT NULL DEFAULT 0,
+        quantity_per_set INTEGER NOT NULL DEFAULT 0,
+        assembly_set_quantity INTEGER NOT NULL DEFAULT 0,
         quantity INTEGER NOT NULL CHECK(typeof(quantity)='integer' AND quantity >= 0),
         remark TEXT NOT NULL DEFAULT '' CHECK(length(remark) <= 500),
         shipped_at TEXT NOT NULL DEFAULT '',
@@ -200,6 +203,14 @@ def ensure_shipping_workflow_tables(conn):
         CHECK((source_type IS NULL AND source_id IS NULL) OR
               (source_type IS NOT NULL AND source_id IS NOT NULL AND source_id > 0))
     )""")
+    delivery_item_columns = _table_columns(conn, 'delivery_note_items')
+    for column_name, statement in {
+        'order_quantity': "ALTER TABLE delivery_note_items ADD COLUMN order_quantity INTEGER NOT NULL DEFAULT 0",
+        'quantity_per_set': "ALTER TABLE delivery_note_items ADD COLUMN quantity_per_set INTEGER NOT NULL DEFAULT 0",
+        'assembly_set_quantity': "ALTER TABLE delivery_note_items ADD COLUMN assembly_set_quantity INTEGER NOT NULL DEFAULT 0",
+    }.items():
+        if column_name not in delivery_item_columns:
+            conn.execute(statement)
     conn.execute("""CREATE TABLE IF NOT EXISTS supplemental_shipments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         operation_id INTEGER NOT NULL REFERENCES delivery_operations(id),
@@ -339,7 +350,8 @@ def delivery_source_items(conn, source_type, source_id):
             COALESCE(NULLIF(o.customer, ''), m.customer, '') AS customer, c.id AS customer_id,
             COALESCE(s.specification_snapshot, m.supplier, '') AS specification,
             s.specification_snapshot IS NULL AS specification_is_fallback,
-            o.order_no, s.signature_status, s.signature_image, s.signed_at
+            o.order_no, o.quantity AS order_quantity, 0 AS quantity_per_set,
+            0 AS assembly_set_quantity, s.signature_status, s.signature_image, s.signed_at
             FROM product_order_shipments s JOIN product_orders o ON o.id=s.order_id
             JOIN manuals m ON m.id=o.manual_id
             LEFT JOIN customers c ON c.name=COALESCE(NULLIF(o.customer, ''), m.customer, '')
@@ -349,7 +361,8 @@ def delivery_source_items(conn, source_type, source_id):
             i.shipped_quantity, i.manual_id, i.drawing_no, i.product_name, COALESCE(m.unit, '') AS unit,
             COALESCE(i.specification_snapshot, m.supplier, '') AS specification,
             i.specification_snapshot IS NULL AS specification_is_fallback,
-            b.assembly_drawing_no, i.remark,
+            b.assembly_drawing_no, i.remark, 0 AS order_quantity,
+            i.quantity_per_set, b.set_quantity AS assembly_set_quantity,
             COALESCE((SELECT group_concat(allocation_label, ' / ') FROM (
                 SELECT CASE WHEN o.id IS NULL
                     THEN CASE WHEN EXISTS (
@@ -374,6 +387,7 @@ def delivery_source_items(conn, source_type, source_id):
             c.id AS customer_id, s.shipped_at, s.shipped_quantity, s.drawing_no,
             s.product_name, s.unit, s.specification_snapshot AS specification,
             0 AS specification_is_fallback, '未关联订单' AS order_no,
+            0 AS order_quantity, 0 AS quantity_per_set, 0 AS assembly_set_quantity,
             '' AS assembly_drawing_no, s.remark,
             '' AS signature_status, '' AS signature_image, '' AS signed_at
             FROM supplemental_shipments s LEFT JOIN customers c ON c.name=s.customer
@@ -515,11 +529,14 @@ def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides
         for sort_order, line in enumerate(line_groups[customer]):
             conn.execute('''INSERT INTO delivery_note_items
                 (note_id,sort_order,manual_id,source_type,source_id,order_no,assembly_drawing_no,
-                 drawing_no,product_name,specification,unit,quantity,remark,shipped_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                 drawing_no,product_name,specification,unit,order_quantity,quantity_per_set,
+                 assembly_set_quantity,quantity,remark,shipped_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (note_id, sort_order, line.get('manual_id'), line.get('source_type'), line.get('source_id'),
                  *[str(line.get(field) or '') for field in ('order_no', 'assembly_drawing_no',
                      'drawing_no', 'product_name', 'specification', 'unit')],
+                 *[int(line.get(field) or 0) for field in ('order_quantity', 'quantity_per_set',
+                     'assembly_set_quantity')],
                  line['quantity'], line['remark'], str(line.get('shipped_at') or '')))
         note_ids.append(note_id)
     return note_ids

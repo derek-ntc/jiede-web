@@ -17,8 +17,12 @@
   <div class="form-actions">
     <a class="button" href="{{ url_for('download_delivery_note', note_id=note.id) }}">导出 PDF</a>
     <a class="button secondary" href="{{ url_for('download_delivery_note_xlsx', note_id=note.id) }}">导出 Excel</a>
-    <a class="button secondary" href="{{ url_for('download_delivery_note_docx', note_id=note.id) }}">导出 Word</a>
+    <form method="post" action="{{ url_for('email_delivery_note', note_id=note.id) }}">
+      <input type="hidden" name="delivery_note_email_csrf_token" value="{{ delivery_note_email_csrf_token }}">
+      <button class="button secondary" type="submit">同步发送客户邮箱</button>
+    </form>
   </div>
+  <p class="hint-box">客户邮箱：{{ note.customer_email or '未填写，暂不能发送' }}。发送时会附上 PDF 和 Excel。</p>
   {% endif %}
 </section>
 {% endfor %}

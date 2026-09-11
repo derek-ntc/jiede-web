@@ -6,7 +6,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
-from zipfile import ZipFile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +14,7 @@ import shipping_workflow
 from openpyxl import load_workbook
 from tests.test_assembly_shipping import AssemblyTask7TestCase, VALID_PNG_BYTES, png_bytes
 from tests.test_product_bom_import import workbook_upload
+from tests.test_shipped_pdf_company import ShippedPdfCompanyTests
 
 
 class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
@@ -252,7 +252,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.assertIn('0', text)
         self.assertNotIn('CNY', text)
 
-    def test_delivery_note_offers_xlsx_and_docx_exports_for_saved_zero_quantity_rows(self):
+    def test_delivery_note_exports_template_style_excel_without_word(self):
         zero = self.create_product('ZERO-EXPORT')
         order = self.create_order(zero, 'ZERO-EXPORT-ORDER', 5)
         response = self.client.post('/admin/shipped-orders/new', data={
@@ -262,20 +262,113 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         })
         body = self.client.get(response.location).get_data(as_text=True)
         self.assertIn('.xlsx', body)
-        self.assertIn('.docx', body)
+        self.assertNotIn('.docx', body)
         with app.get_db() as conn:
             note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
         xlsx = self.client.get(f'/admin/delivery-notes/{note_id}.xlsx')
         self.assertEqual(xlsx.status_code, 200)
         workbook = load_workbook(BytesIO(xlsx.data))
-        self.assertEqual(workbook.active.page_setup.orientation, "landscape")
-        self.assertIn("暂不发货", " ".join(str(cell.value or "") for row in workbook.active.iter_rows() for cell in row))
-        docx = self.client.get(f'/admin/delivery-notes/{note_id}.docx')
-        self.assertEqual(docx.status_code, 200)
-        with ZipFile(BytesIO(docx.data)) as package:
-            document_xml = package.read("word/document.xml").decode("utf-8")
-        self.assertIn("暂不发货", document_xml)
-        self.assertNotIn("单价", document_xml)
+        sheet = workbook.active
+        self.assertEqual(sheet.page_setup.orientation, "portrait")
+        self.assertTrue(sheet.sheet_properties.pageSetUpPr.fitToPage)
+        self.assertEqual(str(sheet.print_area), "'送货单'!$A$2:$H$11")
+        self.assertEqual(sheet["A2"].value, "宁波市杰德机械科技有限公司")
+        self.assertEqual(sheet["A3"].value, "送货单")
+        self.assertEqual(
+            [sheet.cell(7, column).value for column in range(1, 9)],
+            ["序号", "产品图号", "产品名称", "规格型号", "单位", "订单数量", "实发数量", "备注"],
+        )
+        self.assertIn("暂不发货", " ".join(str(cell.value or "") for row in sheet.iter_rows() for cell in row))
+        self.assertEqual(self.client.get(f'/admin/delivery-notes/{note_id}.docx').status_code, 404)
+        with app.get_db() as conn:
+            note = shipping_workflow.load_delivery_note(conn, note_id)
+        story = []
+        with patch.object(app.SimpleDocTemplate, 'build', lambda _doc, values: story.extend(values)):
+            app.build_delivery_note_pdf(app.delivery_note_export_payload(note))
+        text = ShippedPdfCompanyTests.collect_story_text(story)
+        self.assertIn('订单数量', text)
+        self.assertIn('实发数量', text)
+
+    def test_assembly_delivery_note_excel_uses_assembly_template_columns(self):
+        preview = self.post_preview(sets=2).get_json()
+        saved = self.client.post('/admin/shipped-orders/assembly/new', data=self.save_data(preview))
+        self.assertEqual(saved.status_code, 201, saved.get_json())
+        with app.get_db() as conn:
+            note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
+
+        xlsx = self.client.get(f'/admin/delivery-notes/{note_id}.xlsx')
+        self.assertEqual(xlsx.status_code, 200)
+        sheet = load_workbook(BytesIO(xlsx.data)).active
+        self.assertEqual(sheet["A7"].value, "组装件名称")
+        self.assertEqual(sheet["B7"].value, "ASM-100")
+        self.assertEqual(
+            [sheet.cell(8, column).value for column in range(1, 9)],
+            ["序号", "产品图号", "产品名称", "规格型号", "单位", "每套数量", "实发数量", "备注"],
+        )
+
+    def test_delivery_note_can_send_pdf_and_excel_to_saved_customer_email(self):
+        with app.get_db() as conn:
+            conn.execute("UPDATE customers SET email='customer@example.com' WHERE name='客户A'")
+        response = self.client.post('/admin/shipped-orders/new', data=self.ordinary_data())
+        with app.get_db() as conn:
+            note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
+
+        self.client.get(response.location)
+        with self.client.session_transaction() as session:
+            csrf_token = session['delivery_note_email_csrf_token']
+
+        sent_messages = []
+
+        class FakeSMTP:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def starttls(self):
+                pass
+
+            def login(self, *args):
+                pass
+
+            def send_message(self, message):
+                sent_messages.append(message)
+
+        with patch.dict(app.os.environ, {
+            'SMTP_HOST': 'smtp.example.com', 'SMTP_FROM': 'noreply@example.com',
+            'DELIVERY_NOTE_CC': '',
+        }, clear=False), patch.object(app.smtplib, 'SMTP', FakeSMTP):
+            result = self.client.post(
+                f'/admin/delivery-notes/{note_id}/email',
+                data={'delivery_note_email_csrf_token': csrf_token}, follow_redirects=True,
+            )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertIn('已发送至 customer@example.com', result.get_data(as_text=True))
+        self.assertEqual(len(sent_messages), 1)
+        attachments = list(sent_messages[0].iter_attachments())
+        self.assertEqual([item.get_content_type() for item in attachments], [
+            'application/pdf',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ])
+
+    def test_delivery_note_email_requires_customer_email(self):
+        response = self.client.post('/admin/shipped-orders/new', data=self.ordinary_data())
+        with app.get_db() as conn:
+            note_id = conn.execute('SELECT id FROM delivery_notes').fetchone()[0]
+        self.client.get(response.location)
+        with self.client.session_transaction() as session:
+            csrf_token = session['delivery_note_email_csrf_token']
+
+        result = self.client.post(
+            f'/admin/delivery-notes/{note_id}/email',
+            data={'delivery_note_email_csrf_token': csrf_token}, follow_redirects=True,
+        )
+        self.assertIn('未填写客户邮箱', result.get_data(as_text=True))
 
     def test_assembly_snapshot_keeps_order_zero_remarks_and_replay_is_read_only(self):
         zero_product = self.create_product('ZERO-DN')
@@ -579,7 +672,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         self.client.post('/admin/shipped-orders/new', data=self.ordinary_data())
         note = self.note_rows()[0]
         route = f"/admin/delivery-notes/{note['id']}.pdf"
-        with patch.object(app, 'build_shipped_orders_pdf', side_effect=OSError('render failure')):
+        with patch.object(app, 'build_delivery_note_pdf', side_effect=OSError('render failure')):
             self.assertEqual(self.client.get(route).status_code, 503)
         pdf = self.client.get(route)
         self.assertEqual(pdf.status_code, 200)
