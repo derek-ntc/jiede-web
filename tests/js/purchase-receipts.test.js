@@ -58,10 +58,10 @@ test('mounted stale preview refresh retains edits and key, then sends new signed
   const location = node({value: '1', options: [], replaceChildren(option) { this.options = [option]; }, add(option) { this.options.push(option); }});
   const fields = [node({dataset: {field: 'remark'}, value: '<b>keep edit</b>'}), location];
   location.dataset = {field: 'location_id'};
-  const actual = node(); const qualified = node(); const remaining = node();
+  const ordered = node({textContent: 90}); const actual = node(); const qualified = node(); const remaining = node();
   const row = {dataset: {itemId: '1'}, querySelector(selector) {
     return {'[data-row-selected]': {checked: true}, '[data-current-actual]': actual,
-      '[data-current-qualified]': qualified, '[data-current-remaining]': remaining,
+      '[data-current-ordered]': ordered, '[data-current-qualified]': qualified, '[data-current-remaining]': remaining,
       '[data-field="location_id"]': location}[selector];
   }, querySelectorAll: () => fields};
   const refresh = node({addEventListener: (type, handler) => { events.refresh = handler; }});
@@ -89,6 +89,7 @@ test('mounted stale preview refresh retains edits and key, then sends new signed
     assert.equal(sent.length, 1);
     assert.equal(fields[0].value, '<b>keep edit</b>');
     events.refresh();
+    assert.equal(ordered.textContent, 100);
     assert.equal(actual.textContent, 40);
     assert.equal(remaining.textContent, 60);
     assert.equal(location.value, '1');

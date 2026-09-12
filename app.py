@@ -2158,6 +2158,7 @@ def user_can_access_admin_modules():
         user_has_permission("supplier_manage"),
         user_has_permission("purchase_view"),
         user_has_permission("purchase_manage"),
+        user_has_permission("purchase_receipt"),
         user_has_permission("purchase_followups"),
         user_has_permission("carton_purchases"),
         user_has_permission("warehouse_inventory"),

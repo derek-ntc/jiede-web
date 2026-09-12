@@ -40,6 +40,7 @@
       form.querySelectorAll('[data-receipt-row]').forEach(element => {
         const row = rows.get(element.dataset.itemId);
         if (row) {
+          element.querySelector('[data-current-ordered]').textContent = row.ordered_quantity;
           element.querySelector('[data-current-actual]').textContent = row.actual_quantity;
           element.querySelector('[data-current-qualified]').textContent = row.qualified_quantity;
           element.querySelector('[data-current-remaining]').textContent = row.remaining_quantity;

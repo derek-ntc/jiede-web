@@ -36,8 +36,8 @@
         {% if can_manage_customers or can_manage_suppliers or can_manage_common_info %}
           <a class="{% if request.endpoint and (request.endpoint in ['admin_business_partners', 'admin_customers', 'business_partner_customers_alias', 'customer_billing', 'admin_suppliers', 'edit_supplier', 'delete_supplier', 'reactivate_supplier', 'admin_common_info', 'business_partner_common_info_alias', 'purchase_delivery_profiles', 'edit_purchase_delivery_profile', 'deactivate_purchase_delivery_profile', 'reactivate_purchase_delivery_profile']) %}active-nav-link{% endif %}" href="{{ url_for('admin_business_partners') }}">客商管理</a>
         {% endif %}
-        {% if can_view_purchases or can_manage_carton_purchases %}
-          <a class="{% if request.path.startswith('/admin/purchases/') or request.path.startswith('/admin/arrival-') or request.path.startswith('/admin/carton-') %}active-nav-link{% endif %}" href="{{ url_for('purchase_orders', category='raw-material') if can_view_purchases else url_for('admin_arrival_records') }}">采购</a>
+        {% if can_view_purchases or can_manage_carton_purchases or can_receive_purchases %}
+          <a class="{% if request.path.startswith('/admin/purchases/') or request.path.startswith('/admin/purchase-receipts/') or request.path.startswith('/admin/arrival-') or request.path.startswith('/admin/carton-') %}active-nav-link{% endif %}" href="{{ url_for('purchase_orders', category='raw-material') if can_view_purchases else url_for('admin_arrival_records') if can_manage_carton_purchases else url_for('purchase_receipts', category='raw-material') }}">采购</a>
         {% endif %}
         {% if current_user_role == "admin" %}
           <a class="{% if request.endpoint == 'admin_users' %}active-nav-link{% endif %}" href="{{ url_for('admin_users') }}">账号</a>

@@ -47,6 +47,12 @@
         <span>{{ purchase_order_count }} 张订单，管理原材料、纸箱、外协和其他采购。</span>
       </a>
     {% endif %}
+    {% if can_receive_purchases %}
+      <a class="module-card" href="{{ url_for('purchase_receipts', category='raw-material') }}">
+        <strong>采购订单入库</strong>
+        <span>按原材料、纸箱、外协和其他采购登记实际到货并批量入库。</span>
+      </a>
+    {% endif %}
     {% if can_manage_carton_purchases %}
       <a class="module-card" href="{{ url_for('admin_arrival_records') }}">
         <strong>到货记录（历史）</strong>

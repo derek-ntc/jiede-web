@@ -99,6 +99,33 @@ class PurchaseReceiptRouteTests(unittest.TestCase):
         self.assertEqual(self.client.get(self.url).status_code, 302)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_receipts"), 0)
 
+    def test_receipt_only_user_can_discover_receiving_without_unrelated_access(self):
+        with app.get_db() as conn:
+            columns = [row["name"] for row in conn.execute("PRAGMA table_info(users)")
+                       if row["name"].startswith("can_") and row["name"] != "can_receive_purchases"]
+            conn.execute("UPDATE users SET " + ",".join(f"{column}=0" for column in columns)
+                         + " WHERE username='receiver'")
+        response = self.client.get("/admin")
+        self.assertEqual(response.status_code, 200)
+        navigation = response.text.split("<nav>", 1)[1].split("</nav>", 1)[0]
+        dashboard = response.text.split('<section class="module-grid">', 1)[1].split("</section>", 1)[0]
+        receipt_link = 'href="/admin/purchase-receipts/raw-material"'
+        self.assertIn(receipt_link, navigation)
+        self.assertIn(receipt_link, dashboard)
+        self.assertIn("采购订单入库", dashboard)
+        for html in (navigation, dashboard):
+            self.assertNotIn('href="/admin/purchases/raw-material"', html)
+            self.assertNotIn('href="/admin/arrival-records"', html)
+        receipt_page = self.client.get("/admin/purchase-receipts/raw-material")
+        self.assertEqual(receipt_page.status_code, 200)
+        receipt_navigation = receipt_page.text.split("<nav>", 1)[1].split("</nav>", 1)[0]
+        self.assertRegex(receipt_navigation, r'class="[^"]*active-nav-link[^"]*" href="/admin/purchase-receipts/raw-material"')
+        self.assertEqual(self.client.get("/admin/purchases/raw-material").status_code, 302)
+        self.assertEqual(self.client.get("/admin/arrival-records").status_code, 302)
+        self.assertEqual(self.scalar("SELECT can_view_purchases + can_manage_purchases + can_manage_carton_purchases FROM users WHERE username='receiver'"), 0)
+        self.login("reader")
+        self.assertNotIn(receipt_link, self.client.get("/admin").text)
+
     def test_signed_token_cannot_be_tampered_or_used_for_another_order(self):
         payload = self.payload()
         self.assertEqual(self.client.post(self.url, json=dict(payload, preview_token="forged")).status_code, 409)
