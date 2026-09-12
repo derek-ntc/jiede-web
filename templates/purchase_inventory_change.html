@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% set action_label = {'transfer':'移库','adjust':'数量调整','invoice-status':'开票状态'}[action] %}
+{% block title %}采购库存{{ action_label }}{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-inventory.css', v=static_version) }}">{% endblock %}
+{% block content %}
+<h1>采购库存{{ action_label }}</h1>
+<p>{{ lot.lot_no }} · {{ lot.item_name or lot.drawing_no }} · {{ lot.supplier_name }} · {{ lot.order_no }}</p>
+<p>当前库位：{{ lot.location_code }} · {{ lot.location_name }}；当前可用数量：<strong>{{ lot.available_quantity }}</strong>；版本：{{ lot.version }}</p>
+{% if error_message %}<p role="alert" class="purchase-stock-error">{{ error_message }}。填写值已保留，请复核当前库存后再次确认。</p>{% endif %}
+<form method="post" class="panel purchase-stock-change">
+  <input type="hidden" name="csrf_token" value="{{ inventory_csrf_token() }}">
+  <input type="hidden" name="category" value="{{ category }}">
+  <input type="hidden" name="expected_version" value="{{ values.expected_version }}">
+  <input type="hidden" name="idempotency_key" value="{{ values.idempotency_key }}">
+  {% if action == 'transfer' %}
+  <label>目标库位<select name="target_location_id" required><option value="">请选择</option>{% for location in locations %}<option value="{{ location.id }}" {% if values.target_location_id|string == location.id|string %}selected{% endif %}>{{ location.code }} · {{ location.name }}</option>{% endfor %}</select></label>
+  <label>移库数量<input type="number" min="1" step="1" name="quantity" value="{{ values.quantity }}" required></label>
+  {% elif action == 'adjust' %}
+  <label>盘点后实际数量<input type="number" min="0" step="1" name="counted_quantity" value="{{ values.counted_quantity }}" required></label>
+  <p>系统将计算差额并生成调整流水，不更改历史入库数量。</p>
+  {% else %}
+  <label>开票状态<select name="new_status" required>{% for key,label in invoice_labels.items() %}<option value="{{ key }}" {% if values.new_status == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>备注<input name="remark" value="{{ values.remark }}"></label>
+  {% endif %}
+  {% if action != 'invoice-status' %}<label>变更原因<input name="reason" value="{{ values.reason }}" required></label>{% endif %}
+  <button type="submit">确认{{ action_label }}</button>
+  {% if can_view_purchase_inventory %}<a href="{{ url_for('purchase_inventory', category=category_slug, q=lot.lot_no, include_zero=1) }}">返回库存</a>{% endif %}
+</form>
+{% endblock %}

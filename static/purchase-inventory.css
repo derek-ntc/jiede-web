@@ -10,3 +10,9 @@
 [data-conflict-summary]:not(:empty) { white-space: pre-line; margin: 12px 0; padding: 12px; border: 1px solid #d6dce5; }
 .form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 18px; }
 @media (max-width: 700px) { .receipt-filters label { min-width: 0; width: 100%; } }
+.purchase-stock-table { min-width: 1500px; }
+.purchase-stock-actions { min-width: 100px; }
+.purchase-stock-actions a { display: block; margin-bottom: .5rem; }
+.purchase-stock-change { max-width: 720px; display: grid; gap: 1rem; }
+.purchase-stock-change label { display: grid; gap: .4rem; }
+.purchase-stock-error { color: #9c2424; }

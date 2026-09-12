@@ -135,6 +135,8 @@ from procurement_inventory import (
     ACTUAL_FIELDS, PurchaseInventoryConflict, ensure_purchase_inventory_tables,
     load_receivable_orders, load_receipt_preview, receipt_preview_token,
     post_purchase_receipt, receipt_voidability, void_purchase_receipt,
+    fetch_purchase_inventory, transfer_purchase_inventory, adjust_purchase_inventory,
+    update_purchase_invoice_status, parse_purchase_category_slug,
 )
 from reconciliation import (
     TAX_RATE_PPM,
@@ -2159,6 +2161,7 @@ def user_can_access_admin_modules():
         user_has_permission("purchase_view"),
         user_has_permission("purchase_manage"),
         user_has_permission("purchase_receipt"),
+        user_has_permission("purchase_inventory_view"),
         user_has_permission("purchase_followups"),
         user_has_permission("carton_purchases"),
         user_has_permission("warehouse_inventory"),
@@ -12062,6 +12065,104 @@ def purchase_orders(category):
             orders.append(purchase_price_projection(order, items)[0])
         suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
     return render_template("purchase_orders.html", orders=orders, filters=filters, suppliers=suppliers, **purchase_page_context(category))
+
+
+@app.route("/admin/purchase-inventory/<category>")
+@permission_required("purchase_inventory_view")
+def purchase_inventory(category):
+    category = purchase_category_from_slug(category)
+    filters = {key: request.args.get(key, "").strip() for key in (
+        "supplier_id", "order_no", "receipt_no", "q", "location_id", "received_from", "received_to",
+        "invoice_status", "include_zero")}
+    filters["category"] = category
+    with get_db() as conn:
+        try:
+            rows = fetch_purchase_inventory(conn, filters, user_can_view_purchase_prices())
+        except ValueError as error:
+            abort(400, description=str(error))
+        suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
+        locations = conn.execute("SELECT id,code,name FROM warehouse_locations ORDER BY code,id").fetchall()
+    return render_template("purchase_inventory.html", rows=rows, filters=filters, suppliers=suppliers,
+                           locations=locations, **purchase_receipt_context(category))
+
+
+def purchase_inventory_change(lot_id, action):
+    """Common server-rendered command form; JSON callers get the same safe result."""
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if request.method == "POST":
+        if not isinstance(payload, dict):
+            abort(400, description="库存变更内容无效")
+        require_inventory_csrf(payload)
+    with get_db() as conn:
+        source = conn.execute("SELECT category,lot_no FROM purchase_inventory_lots WHERE id=?", (lot_id,)).fetchone()
+        if source is None:
+            abort(404)
+        category = source["category"]
+        lot = next(row for row in fetch_purchase_inventory(conn, dict(category=category, q=source["lot_no"], include_zero="1"),
+                                                            user_can_view_purchase_prices()) if row["id"] == lot_id)
+    values = dict(category=category, expected_version=lot["version"], idempotency_key=secrets.token_urlsafe(32),
+                  quantity=lot["available_quantity"], counted_quantity=lot["available_quantity"],
+                  new_status=lot["invoice_status"], reason="", remark="", target_location_id="")
+    error_message = ""
+    if request.method == "POST":
+        values.update(payload)
+        try:
+            if parse_purchase_category_slug(payload.get("category", "")) != category:
+                raise PurchaseInventoryConflict("库存批次不属于此采购类别")
+            now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+            key = normalize_purchase_text(payload.get("idempotency_key"))
+            with get_db() as conn:
+                duplicate = conn.execute("SELECT 1 FROM purchase_inventory_operations WHERE idempotency_key=?", (key,)).fetchone() is not None
+                if action == "transfer":
+                    result = transfer_purchase_inventory(conn, lot_id, payload.get("quantity"), payload.get("target_location_id"),
+                              payload.get("reason"), current_admin_username(), now, payload.get("expected_version"), key)
+                elif action == "adjust":
+                    result = adjust_purchase_inventory(conn, lot_id, payload.get("counted_quantity"), payload.get("reason"),
+                              current_admin_username(), now, payload.get("expected_version"), key)
+                else:
+                    result = update_purchase_invoice_status(conn, lot_id, payload.get("new_status"), payload.get("remark"),
+                              current_admin_username(), now, key)
+        except ValueError as error:
+            error_message = str(error)
+            current = getattr(error, "current", None)
+            if request.is_json:
+                return jsonify(error=error_message, current=purchase_receipt_projection(current)), 409
+            if current:
+                lot.update(current)
+            # The refreshed version is displayed alongside retained user input for explicit resubmission.
+            values["expected_version"] = lot["version"]
+        else:
+            redirect_url = url_for("purchase_inventory", category=category.replace("_", "-"), q=lot["lot_no"], include_zero="1")
+            if request.is_json:
+                return jsonify(**result, duplicate=duplicate, redirect_url=redirect_url), 200 if duplicate else 201
+            flash("采购库存变更已保存", "success")
+            return redirect(redirect_url)
+    elif request.args.get("category") and request.args["category"] not in (category, category.replace("_", "-")):
+        abort(404)
+    with get_db() as conn:
+        locations = conn.execute("SELECT id,code,name FROM warehouse_locations WHERE enabled=1 AND id<>? ORDER BY code,id",
+                                 (lot["location_id"],)).fetchall()
+    return render_template("purchase_inventory_change.html", lot=lot, action=action, values=values,
+                           error_message=error_message, locations=locations,
+                           **purchase_receipt_context(category)), 409 if error_message else 200
+
+
+@app.route("/admin/purchase-inventory/lots/<int:lot_id>/transfer", methods=["GET", "POST"])
+@permission_required("purchase_inventory_adjust")
+def purchase_inventory_transfer(lot_id):
+    return purchase_inventory_change(lot_id, "transfer")
+
+
+@app.route("/admin/purchase-inventory/lots/<int:lot_id>/adjust", methods=["GET", "POST"])
+@permission_required("purchase_inventory_adjust")
+def purchase_inventory_adjust(lot_id):
+    return purchase_inventory_change(lot_id, "adjust")
+
+
+@app.route("/admin/purchase-inventory/lots/<int:lot_id>/invoice-status", methods=["GET", "POST"])
+@permission_required("purchase_receipt")
+def purchase_inventory_invoice_status(lot_id):
+    return purchase_inventory_change(lot_id, "invoice-status")
 
 
 def purchase_receipt_context(category):

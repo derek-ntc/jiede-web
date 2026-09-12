@@ -268,6 +268,211 @@ def void_purchase_receipt(conn, receipt_id: int, actor: str, now: str) -> dict:
         return _load_receipt(conn, receipt_id)
 
 
+def fetch_purchase_inventory(conn, filters: dict, include_prices: bool) -> list[dict]:
+    """Project independent actual stock, excluding financial data at the SQL boundary."""
+    category = parse_purchase_category_slug(filters.get("category", ""))
+    columns = ["id", "lot_no", "category", "origin_receipt_item_id", "source_lot_id", "source_kind",
+               *ACTUAL_FIELDS, "supplier_id", "supplier_name", "purchase_order_id", "purchase_order_item_id",
+               "receipt_id", "location_id", "opening_quantity", "available_quantity", "invoice_status",
+               "version", "created_at", "updated_at"]
+    if include_prices:
+        columns += ["unit_price_minor", "currency"]
+    where, params = ["l.category=?"], [category]
+    if str(filters.get("include_zero", "")) != "1":
+        where.append("l.available_quantity>0")
+    for field in ("supplier_id", "location_id"):
+        if filters.get(field):
+            where.append(f"l.{field}=?")
+            params.append(_purchase_id(filters[field]))
+    for field, column in (("order_no", "o.order_no"), ("receipt_no", "r.receipt_no")):
+        value = normalize_purchase_text(filters.get(field))
+        if value:
+            where.append(f"instr({column},?)>0")
+            params.append(value)
+    query = normalize_purchase_text(filters.get("q"))
+    if query:
+        searchable = ("item_name", "drawing_no", "material", "spec", "dimension_text", "surface",
+                      "length", "width", "height", "thickness")
+        where.append("(l.lot_no=? OR " + " OR ".join(f"instr(COALESCE(l.{field},''),?)>0" for field in searchable) + ")")
+        params.extend([query] * (len(searchable) + 1))
+    for key, op in (("received_from", ">="), ("received_to", "<=")):
+        if filters.get(key):
+            where.append(f"r.received_at{op}?")
+            params.append(_purchase_date(filters[key]))
+    if filters.get("invoice_status"):
+        status = normalize_purchase_text(filters["invoice_status"])
+        if status not in INVOICE_STATUSES:
+            raise ValueError("发票状态无效")
+        where.append("l.invoice_status=?")
+        params.append(status)
+    rows = conn.execute("SELECT " + ",".join(f"l.{field}" for field in columns) +
+                        ",o.order_no,r.receipt_no,r.received_at,w.code AS location_code,w.name AS location_name "
+                        "FROM purchase_inventory_lots l JOIN purchase_orders o ON o.id=l.purchase_order_id "
+                        "JOIN purchase_receipts r ON r.id=l.receipt_id JOIN warehouse_locations w ON w.id=l.location_id "
+                        "WHERE " + " AND ".join(where) + " ORDER BY l.id DESC", params).fetchall()
+    result = [dict(row) for row in rows]
+    if include_prices:
+        for row in result:
+            row["amount_minor"] = None if row["unit_price_minor"] is None else row["unit_price_minor"] * row["available_quantity"]
+    return result
+
+
+def _stock_operation_payload(lot_id, reason, actor, key, **fields):
+    try:
+        payload = dict(lot_id=_purchase_id(lot_id), reason=normalize_purchase_text(reason),
+                       actor=normalize_purchase_text(actor), idempotency_key=normalize_purchase_text(key), **fields)
+        if not payload["idempotency_key"]:
+            raise ValueError("缺少防重复提交标识")
+        return payload
+    except ValueError as error:
+        raise PurchaseInventoryConflict(str(error)) from error
+
+
+def _existing_stock_operation(conn, payload):
+    existing = conn.execute("SELECT payload_hash,result_json FROM purchase_inventory_operations WHERE idempotency_key=?",
+                            (payload["idempotency_key"],)).fetchone()
+    if existing is None:
+        return None
+    if existing["payload_hash"] != _payload_digest(payload) or not existing["result_json"]:
+        raise PurchaseInventoryConflict("重复提交标识已用于不同的库存操作")
+    return json.loads(existing["result_json"])
+
+
+def _stock_lot(conn, lot_id, expected_version=None):
+    row = conn.execute("SELECT * FROM purchase_inventory_lots WHERE id=?", (lot_id,)).fetchone()
+    if row is None:
+        raise PurchaseInventoryConflict("采购库存批次不存在")
+    lot = dict(row)
+    current = {key: lot[key] for key in ("id", "category", "lot_no", "available_quantity", "version", "location_id", "invoice_status")}
+    if expected_version is not None:
+        receipt = conn.execute("SELECT status FROM purchase_receipts WHERE id=?", (lot["receipt_id"],)).fetchone()
+        if receipt is None or receipt["status"] != "posted":
+            raise PurchaseInventoryConflict("来源到货单已作废，不能变更库存", current=current)
+        if expected_version != lot["version"]:
+            raise PurchaseInventoryConflict("库存已变更，请复核当前数量后重新提交", current=current)
+        location = conn.execute("SELECT enabled FROM warehouse_locations WHERE id=?", (lot["location_id"],)).fetchone()
+        if location is None or not location["enabled"]:
+            raise PurchaseInventoryConflict("原库位已停用", current=current)
+    return lot
+
+
+def _new_stock_operation(conn, payload, now):
+    return _insert_inventory_record(conn, "purchase_inventory_operations", dict(
+        operation_no=_inventory_number("PIO", now[:10]), operation_type=payload["operation_type"],
+        idempotency_key=payload["idempotency_key"], payload_hash=_payload_digest(payload),
+        operator=payload["actor"], reason=payload["reason"], created_at=now))
+
+
+def _save_stock_operation_result(conn, operation_id, result):
+    result = dict(result, operation_id=operation_id)
+    conn.execute("UPDATE purchase_inventory_operations SET result_json=? WHERE id=?",
+                 (json.dumps(result, ensure_ascii=False, sort_keys=True), operation_id))
+    return result
+
+
+def _quantity_operation_payload(lot_id, reason, actor, key, expected_version, quantity, *, allow_zero=False, **fields):
+    try:
+        payload = _stock_operation_payload(lot_id, reason, actor, key,
+                    expected_version=parse_purchase_inventory_quantity(expected_version),
+                    quantity=parse_purchase_inventory_quantity(quantity, allow_zero=allow_zero), **fields)
+        if not payload["reason"]:
+            raise ValueError("请填写库存变更原因")
+        return payload
+    except ValueError as error:
+        raise PurchaseInventoryConflict(str(error)) from error
+
+
+def transfer_purchase_inventory(conn, lot_id: int, quantity: int, target_location_id: int, reason: str,
+                                actor: str, now: str, expected_version: int, idempotency_key: str) -> dict:
+    """Move into a fresh linked lot, retaining the original receipt location."""
+    try:
+        target_location_id = _purchase_id(target_location_id)
+    except ValueError as error:
+        raise PurchaseInventoryConflict(str(error)) from error
+    payload = _quantity_operation_payload(lot_id, reason, actor, idempotency_key, expected_version, quantity,
+                                          operation_type="transfer", target_location_id=target_location_id)
+    with _inventory_transaction(conn):
+        existing = _existing_stock_operation(conn, payload)
+        if existing is not None:
+            return existing
+        source = _stock_lot(conn, payload["lot_id"], payload["expected_version"])
+        quantity = payload["quantity"]
+        target = conn.execute("SELECT enabled FROM warehouse_locations WHERE id=?", (target_location_id,)).fetchone()
+        if target is None or not target["enabled"] or source["location_id"] == target_location_id:
+            raise PurchaseInventoryConflict("请选择与原库位不同的启用库位")
+        if source["available_quantity"] < quantity:
+            raise PurchaseInventoryConflict("库存数量不足", current={k: source[k] for k in ("id", "available_quantity", "version")})
+        operation_id = _new_stock_operation(conn, payload, now)
+        remaining = source["available_quantity"] - quantity
+        conn.execute("UPDATE purchase_inventory_lots SET available_quantity=?,version=version+1,updated_at=? WHERE id=?",
+                     (remaining, now, source["id"]))
+        lot = {k: v for k, v in source.items() if k != "id"}
+        lot.update(lot_no=_inventory_number("PIL", now[:10]), source_lot_id=source["id"], source_kind="transfer",
+                   location_id=target_location_id, opening_quantity=quantity, available_quantity=quantity,
+                   version=1, created_at=now, updated_at=now)
+        target_lot_id = _insert_inventory_record(conn, "purchase_inventory_lots", lot)
+        common = dict(related_type="operation", related_id=operation_id, from_location_id=source["location_id"],
+                      to_location_id=target_location_id, operator=payload["actor"], remark=payload["reason"], created_at=now)
+        outgoing = _insert_inventory_record(conn, "purchase_inventory_transactions", dict(common,
+                   transaction_no=_inventory_number("PIT", now[:10]), lot_id=source["id"], transaction_type="transfer_out", quantity_delta=-quantity))
+        incoming = _insert_inventory_record(conn, "purchase_inventory_transactions", dict(common,
+                   transaction_no=_inventory_number("PIT", now[:10]), lot_id=target_lot_id, transaction_type="transfer_in",
+                   quantity_delta=quantity, paired_transaction_id=outgoing))
+        conn.execute("UPDATE purchase_inventory_transactions SET paired_transaction_id=? WHERE id=?", (incoming, outgoing))
+        return _save_stock_operation_result(conn, operation_id, dict(transfer_id=operation_id, lot_id=source["id"],
+                    target_lot_id=target_lot_id, available_quantity=remaining, version=source["version"] + 1))
+
+
+def adjust_purchase_inventory(conn, lot_id: int, counted_quantity: int, reason: str, actor: str, now: str,
+                              expected_version: int, idempotency_key: str) -> dict:
+    """Record a compensating counted-stock delta; never alter opening snapshots."""
+    payload = _quantity_operation_payload(lot_id, reason, actor, idempotency_key, expected_version, counted_quantity,
+                                          allow_zero=True, operation_type="adjustment")
+    with _inventory_transaction(conn):
+        existing = _existing_stock_operation(conn, payload)
+        if existing is not None:
+            return existing
+        lot = _stock_lot(conn, payload["lot_id"], payload["expected_version"])
+        counted_quantity = payload["quantity"]
+        delta = counted_quantity - lot["available_quantity"]
+        if delta == 0:
+            raise PurchaseInventoryConflict("盘点数量未变化，无需调整")
+        operation_id = _new_stock_operation(conn, payload, now)
+        _insert_inventory_record(conn, "purchase_inventory_transactions", dict(
+            transaction_no=_inventory_number("PIT", now[:10]), lot_id=lot["id"], transaction_type="adjustment",
+            quantity_delta=delta, related_type="operation", related_id=operation_id,
+            from_location_id=lot["location_id"] if delta < 0 else None,
+            to_location_id=lot["location_id"] if delta > 0 else None, operator=payload["actor"],
+            remark=f"盘点调整：{lot['available_quantity']} -> {counted_quantity}；原因：{payload['reason']}", created_at=now))
+        conn.execute("UPDATE purchase_inventory_lots SET available_quantity=?,version=version+1,updated_at=? WHERE id=?",
+                     (counted_quantity, now, lot["id"]))
+        return _save_stock_operation_result(conn, operation_id, dict(lot_id=lot["id"], available_quantity=counted_quantity,
+                                                                   version=lot["version"] + 1))
+
+
+def update_purchase_invoice_status(conn, lot_id: int, new_status: str, remark: str, actor: str, now: str,
+                                   idempotency_key: str) -> dict:
+    payload = _stock_operation_payload(lot_id, remark, actor, idempotency_key, operation_type="invoice_status",
+                                       new_status=normalize_purchase_text(new_status))
+    if payload["new_status"] not in INVOICE_STATUSES:
+        raise PurchaseInventoryConflict("发票状态无效")
+    with _inventory_transaction(conn):
+        existing = _existing_stock_operation(conn, payload)
+        if existing is not None:
+            return existing
+        lot = _stock_lot(conn, payload["lot_id"])
+        if lot["invoice_status"] == payload["new_status"]:
+            raise PurchaseInventoryConflict("开票状态未变化")
+        operation_id = _new_stock_operation(conn, payload, now)
+        event_id = _insert_inventory_record(conn, "purchase_inventory_invoice_events", dict(lot_id=lot["id"],
+                    old_status=lot["invoice_status"], new_status=payload["new_status"], operator=payload["actor"],
+                    remark=payload["reason"], created_at=now))
+        conn.execute("UPDATE purchase_inventory_lots SET invoice_status=?,version=version+1,updated_at=? WHERE id=?",
+                     (payload["new_status"], now, lot["id"]))
+        return _save_stock_operation_result(conn, operation_id, dict(lot_id=lot["id"], event_id=event_id,
+                    invoice_status=payload["new_status"], version=lot["version"] + 1))
+
+
 def _ensure_restrictive_reference(
     conn, *, child: str, column: str, parent: str
 ) -> None:
@@ -441,10 +646,13 @@ def ensure_purchase_inventory_tables(conn) -> None:
             payload_hash TEXT NOT NULL,
             operator TEXT NOT NULL,
             reason TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    if "result_json" not in {row[1] for row in conn.execute("PRAGMA table_info(purchase_inventory_operations)")}:
+        conn.execute("ALTER TABLE purchase_inventory_operations ADD COLUMN result_json TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS purchase_inventory_transactions (

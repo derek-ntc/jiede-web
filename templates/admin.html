@@ -59,6 +59,12 @@
         <span>{{ arrival_record_count }} 条记录，记录到货物品、规格、数量、单价和供应商。</span>
       </a>
     {% endif %}
+    {% if can_view_purchase_inventory %}
+      <a class="module-card" href="{{ url_for('purchase_inventory', category='raw-material') }}">
+        <strong>采购库存</strong>
+        <span>按类别查询采购批次、库位与可用数量，支持移库和盘点调整。</span>
+      </a>
+    {% endif %}
     {% if can_manage_warehouse_inventory %}
       <a class="module-card" href="{{ url_for('admin_inventory_overview') }}">
         <strong>库存管理模块</strong>
