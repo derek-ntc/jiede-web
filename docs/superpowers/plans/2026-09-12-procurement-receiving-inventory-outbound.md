@@ -646,6 +646,8 @@ git commit -m "feat: add category purchase goods outbound"
 
 ### Task 8: Full verification and local acceptance
 
+Local integration checkpoint: automated suites, database-copy checks, and representative document QA are complete. Interactive browser acceptance is assigned to the controller and remains open. See `docs/2026-09-12-procurement-inventory-verification.md`; no deployment is authorized.
+
 **Files:**
 - Create: `tests/test_purchase_inventory_isolation.py`
 - Create: `docs/2026-09-12-procurement-inventory-usage.md`
@@ -656,7 +658,7 @@ git commit -m "feat: add category purchase goods outbound"
 - Consumes: all receipt, inventory, transfer, adjustment, outbound, and document behavior
 - Produces: a verified local release candidate; no deployment
 
-- [ ] **Step 1: Add end-to-end isolation and accounting tests**
+- [x] **Step 1: Add end-to-end isolation and accounting tests**
 
 ```python
 def test_receipt_transfer_adjust_outbound_and_void_preserve_domain_isolation(self):
@@ -672,7 +674,7 @@ def test_receipt_transfer_adjust_outbound_and_void_preserve_domain_isolation(sel
     self.assertEqual(purchase_inventory_invariant_errors(self.conn), [])
 ```
 
-- [ ] **Step 2: Run the complete automated suites**
+- [x] **Step 2: Run the complete automated suites**
 
 Run: `python -m unittest discover -s tests -v`
 
@@ -680,7 +682,7 @@ Run: `node --test tests/js/*.test.js`
 
 Expected: all tests PASS.
 
-- [ ] **Step 3: Run database integrity and inventory invariants on a disposable database copy**
+- [x] **Step 3: Run database integrity and inventory invariants on a disposable database copy**
 
 Run the application initialization on a copy in `/private/tmp`, then verify `PRAGMA integrity_check` returns `ok`, `PRAGMA foreign_key_check` is empty, `purchase_inventory_invariant_errors()` is empty, and product/sales table counts do not change during purchase-flow fixtures.
 
@@ -688,11 +690,11 @@ Run the application initialization on a copy in `/private/tmp`, then verify `PRA
 
 Verify supplier/order search, category fields, actual-value edits, split receipts, zero-qualified rows, over-receipt confirmation, batch rollback, history/detail, stock filters, transfer, quantity adjustment, invoice state, multi-lot outbound, insufficient-stock conflict, void, and permission visibility. Confirm existing product inventory and customer shipping pages still work.
 
-- [ ] **Step 5: Render and inspect representative documents**
+- [x] **Step 5: Render and inspect representative documents**
 
 Generate raw-material order Excel/PDF, carton order Excel/PDF, receipt Excel/PDF, inventory Excel, and outbound Excel/PDF. Confirm landscape A4, readable Chinese, no clipping, numeric General cells in raw-material orders, the two fixed terms only in raw-material orders, and no prices in unauthorized exports.
 
-- [ ] **Step 6: Write user and verification documents**
+- [x] **Step 6: Write user and verification documents**
 
 The usage guide must describe the four entry points, actual-versus-order behavior, batch receipt, transfer, adjustment, outbound, void, and permissions in user-facing Chinese. The verification report must record exact test counts, browser cases, document samples, database integrity, invariant results, and known limitations.
 
