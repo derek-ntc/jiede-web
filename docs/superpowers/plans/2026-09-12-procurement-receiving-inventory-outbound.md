@@ -637,7 +637,7 @@ Run: `node --test tests/js/purchase-inventory-outbound.test.js`
 
 Expected: PASS; outbound cannot write delivery-note, shipped-order, product-order, invoice, or product-inventory tables.
 
-- [ ] **Step 7: Commit outbound pages and documents**
+- [x] **Step 7: Commit outbound pages and documents**
 
 ```bash
 git add app.py procurement_documents.py templates/shipment_tabs.html templates/purchase_inventory_outbounds.html templates/purchase_inventory_outbound_form.html templates/purchase_inventory_outbound_detail.html static/purchase-inventory.css static/purchase-inventory-outbound.js tests/test_purchase_inventory_outbound_routes.py tests/test_purchase_inventory_outbound_exports.py tests/js/purchase-inventory-outbound.test.js
@@ -646,7 +646,7 @@ git commit -m "feat: add category purchase goods outbound"
 
 ### Task 8: Full verification and local acceptance
 
-Local integration checkpoint: automated suites, database-copy checks, and representative document QA are complete. Interactive browser acceptance is assigned to the controller and remains open. See `docs/2026-09-12-procurement-inventory-verification.md`; no deployment is authorized.
+Local integration checkpoint: automated suites, database-copy checks, representative document QA, and isolated interactive browser acceptance are complete. See `docs/2026-09-12-procurement-inventory-verification.md`; no deployment is authorized.
 
 **Files:**
 - Create: `tests/test_purchase_inventory_isolation.py`
@@ -686,7 +686,7 @@ Expected: all tests PASS.
 
 Run the application initialization on a copy in `/private/tmp`, then verify `PRAGMA integrity_check` returns `ok`, `PRAGMA foreign_key_check` is empty, `purchase_inventory_invariant_errors()` is empty, and product/sales table counts do not change during purchase-flow fixtures.
 
-- [ ] **Step 4: Perform local browser acceptance for all four categories**
+- [x] **Step 4: Perform local browser acceptance for all four categories**
 
 Verify supplier/order search, category fields, actual-value edits, split receipts, zero-qualified rows, over-receipt confirmation, batch rollback, history/detail, stock filters, transfer, quantity adjustment, invoice state, multi-lot outbound, insufficient-stock conflict, void, and permission visibility. Confirm existing product inventory and customer shipping pages still work.
 
@@ -698,7 +698,7 @@ Generate raw-material order Excel/PDF, carton order Excel/PDF, receipt Excel/PDF
 
 The usage guide must describe the four entry points, actual-versus-order behavior, batch receipt, transfer, adjustment, outbound, void, and permissions in user-facing Chinese. The verification report must record exact test counts, browser cases, document samples, database integrity, invariant results, and known limitations.
 
-- [ ] **Step 7: Commit the verified local release candidate**
+- [x] **Step 7: Commit the verified local release candidate**
 
 ```bash
 git add tests/test_purchase_inventory_isolation.py docs/2026-09-12-procurement-inventory-usage.md docs/2026-09-12-procurement-inventory-verification.md docs/superpowers/plans/2026-09-12-procurement-receiving-inventory-outbound.md
