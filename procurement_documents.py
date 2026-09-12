@@ -464,7 +464,7 @@ def _build_stock_workbook(model):
 
     def write(row, column, value, kind="text", bold=False):
         if kind == "money":
-            value = "未录价" if value is None else _excel_money(value)
+            value = _excel_money(value)
         if isinstance(value, str):
             value = _text(value)
         cell = sheet.cell(row, column, value)
@@ -511,6 +511,8 @@ def _build_stock_workbook(model):
                     value, height = "\n".join(lines), max(height, len(lines))
                 elif chunk:
                     value = None
+                elif column.kind == "money" and value is None:
+                    value = "未录价"
                 cell = write(row, index, value, column.kind)
                 cell.border = Border(bottom=Side(style="thin", color="BEC7CF"))
             sheet.row_dimensions[row].height = max(26, height * 15 + 8)

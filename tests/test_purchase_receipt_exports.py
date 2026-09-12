@@ -85,6 +85,37 @@ class PurchaseReceiptBuilderTests(unittest.TestCase):
         date_header = next(c for row in sheet for c in row if c.value == "入库日期")
         self.assertGreaterEqual(sheet.column_dimensions[date_header.column_letter].width, 13)
 
+    def test_long_receipt_price_only_appears_on_first_physical_row(self):
+        for price, expected in ((87654321, 876543.21), (0, 0), (None, "未录价")):
+            with self.subTest(price=price):
+                items = receipt_items()
+                items[0]["remark"] = "到货检查" * 200 + "结束标记"
+                items[0]["ordered"]["unit_price_minor"] = price
+                sheet = load_workbook(docs.build_purchase_receipt_workbook(sample_receipt(), items, include_prices=True)).active
+                header = next(c for row in sheet for c in row if c.value == "订单单价")
+                self.assertGreater(sheet.max_row, header.row + 2, "fixture must produce continuation rows")
+                self.assertEqual(sheet.cell(header.row + 1, header.column).value, expected)
+                self.assertTrue(all(sheet.cell(row, header.column).value is None
+                                    for row in range(header.row + 2, sheet.max_row + 1)))
+                self.assertIn("结束标记", "".join(str(c.value or "") for row in sheet for c in row))
+
+    def test_long_inventory_price_and_amount_only_appear_on_first_physical_row(self):
+        for price, amount, expected_price, expected_amount in (
+                (87654321, 6574074075, 876543.21, 65740740.75),
+                (0, 0, 0, 0), (None, None, "未录价", "未录价")):
+            with self.subTest(price=price):
+                item = dict(receipt_items()[0], **sample_receipt(), opening_quantity=98, available_quantity=75,
+                            material="长材质说明" * 200 + "结束标记", unit_price_minor=price, amount_minor=amount)
+                sheet = load_workbook(docs.build_purchase_inventory_workbook(
+                    {"category": "raw_material"}, [item], include_prices=True)).active
+                for label, expected in (("单价", expected_price), ("当前金额", expected_amount)):
+                    header = next(c for row in sheet for c in row if c.value == label)
+                    self.assertGreater(sheet.max_row, header.row + 2, "fixture must produce continuation rows")
+                    self.assertEqual(sheet.cell(header.row + 1, header.column).value, expected)
+                    self.assertTrue(all(sheet.cell(row, header.column).value is None
+                                        for row in range(header.row + 2, sheet.max_row + 1)))
+                self.assertIn("结束标记", "".join(str(c.value or "") for row in sheet for c in row).replace("\n", ""))
+
     def test_price_hidden_has_no_secrets_or_raw_order_terms_in_files(self):
         receipt, items = sample_receipt(), receipt_items()
         inventory = dict(items[0], **receipt, opening_quantity=98, available_quantity=75,
