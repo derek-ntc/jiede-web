@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 from openpyxl import load_workbook
@@ -162,3 +163,20 @@ class PurchaseTemplateFormTests(unittest.TestCase):
             self.assertRegex(html, r'<option value="1"[^>]*selected[^>]*>供方甲')
             self.assertRegex(html, r'data-supplier-field="name">供方甲</')
             self.assertEqual(self.data(html)["saved"]["id"], 1)
+
+    def test_purchase_asset_urls_refresh_when_either_resource_changes(self):
+        oid = self.create()
+        with tempfile.TemporaryDirectory() as folder:
+            static = Path(folder) / "static"
+            static.mkdir()
+            for name in ("style.css", "editor.js", "purchase-orders.css", "purchase-orders.js"):
+                (static / name).touch()
+                os.utime(static / name, (100, 100))
+            for filename, version in (("purchase-orders.js", 200), ("purchase-orders.css", 300)):
+                os.utime(static / filename, (version, version))
+                with patch.object(app, "BASE_DIR", Path(folder)):
+                    for url in ("/admin/purchases/raw-material/new", "/admin/purchases/raw-material", f"/admin/purchases/orders/{oid}"):
+                        html = self.client.get(url).get_data(as_text=True)
+                        self.assertIn(f'/static/purchase-orders.css?v={version}', html)
+                        if url.endswith("/new"):
+                            self.assertIn(f'/static/purchase-orders.js?v={version}', html)

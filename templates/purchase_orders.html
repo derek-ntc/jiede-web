@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ category_labels[category] }}{% endblock %}
-{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css') }}">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css', v=static_version) }}">{% endblock %}
 {% block content %}
 {% include "purchase_tabs.html" %}
 <section class="page-head"><h1>{{ category_labels[category] }}</h1>{% if can_manage_purchases %}<a class="button" href="{{ url_for('new_purchase_order', category=category_slug) }}">新建采购订单</a>{% endif %}</section>

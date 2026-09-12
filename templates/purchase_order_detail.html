@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}采购订单 {{ order.order_no }}{% endblock %}
-{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css') }}">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css', v=static_version) }}">{% endblock %}
 {% block content %}
 {% include "purchase_tabs.html" %}
 <section class="page-head"><div><h1>{{ category_labels[category] }} {{ order.order_no }}</h1><p>{{ status_labels[order.status] }}</p></div>

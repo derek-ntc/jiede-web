@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ '编辑' if order.id else '新建' }}{{ category_labels[category] }}{% endblock %}
-{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css') }}">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css', v=static_version) }}">{% endblock %}
 {% block content %}
 {% include "purchase_tabs.html" %}
 <h1>{{ '编辑' if order.id else '新建' }}{{ category_labels[category] }}</h1>
@@ -43,4 +43,4 @@
   <script type="application/json" data-supplier-data>{{ supplier_data|tojson }}</script>
 </form>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='purchase-orders.js') }}" defer></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='purchase-orders.js', v=static_version) }}" defer></script>{% endblock %}

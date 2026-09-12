@@ -461,6 +461,8 @@ def upload_limits():
             (BASE_DIR / "static" / "production-followups.js").stat().st_mtime if (BASE_DIR / "static" / "production-followups.js").exists() else 0,
             (BASE_DIR / "static" / "assembly_shipping.js").stat().st_mtime if (BASE_DIR / "static" / "assembly_shipping.js").exists() else 0,
             (BASE_DIR / "static" / "order_shipping.js").stat().st_mtime if (BASE_DIR / "static" / "order_shipping.js").exists() else 0,
+            (BASE_DIR / "static" / "purchase-orders.js").stat().st_mtime if (BASE_DIR / "static" / "purchase-orders.js").exists() else 0,
+            (BASE_DIR / "static" / "purchase-orders.css").stat().st_mtime if (BASE_DIR / "static" / "purchase-orders.css").exists() else 0,
         )),
         "current_user_role": current_user_role(),
         "current_admin_username": current_admin_username(),
