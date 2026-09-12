@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ category_labels[category] }}出库{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-inventory.css', v=static_version) }}">{% endblock %}
+{% block content %}
+<h1>采购货物出库 · {{ category_labels[category] }}</h1>
+{% include "purchase_outbound_tabs.html" %}
+<p>内部领用采购库存，不生成客户送货单或销售开票来源。已过账单据通过作废冲销纠正。</p>
+<p><a class="button" href="{{ url_for('new_purchase_outbound', category=category_slug) }}">选择批次并出库</a></p>
+{% include "purchase_outbound_filters.html" %}
+<p>显示最近 100 张符合筛选的出库单。</p>
+<div class="table-wrap"><table><thead><tr><th>出库单号</th><th>出库日期</th><th>领用人</th><th>经办人</th><th>状态</th><th>备注</th></tr></thead><tbody>
+{% for record in records %}<tr><td><a href="{{ url_for('purchase_outbound_detail', outbound_id=record.id) }}">{{ record.outbound_no }}</a></td><td>{{ record.outbound_at }}</td><td>{{ record.used_by }}</td><td>{{ record.operator }}</td><td>{{ '已作废' if record.status == 'voided' else '已过账' }}</td><td>{{ record.remark }}</td></tr>
+{% else %}<tr><td colspan="6">没有匹配的采购出库单。</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}

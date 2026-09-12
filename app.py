@@ -137,6 +137,7 @@ from procurement_inventory import (
     post_purchase_receipt, receipt_voidability, void_purchase_receipt,
     fetch_purchase_inventory, transfer_purchase_inventory, adjust_purchase_inventory,
     update_purchase_invoice_status, parse_purchase_category_slug,
+    load_outbound_candidates, post_purchase_outbound, void_purchase_outbound,
 )
 from reconciliation import (
     TAX_RATE_PPM,
@@ -2162,6 +2163,7 @@ def user_can_access_admin_modules():
         user_has_permission("purchase_manage"),
         user_has_permission("purchase_receipt"),
         user_has_permission("purchase_inventory_view"),
+        user_has_permission("purchase_inventory_outbound"),
         user_has_permission("purchase_followups"),
         user_has_permission("carton_purchases"),
         user_has_permission("warehouse_inventory"),
@@ -12188,6 +12190,151 @@ def purchase_inventory_invoice_status(lot_id):
     return purchase_inventory_change(lot_id, "invoice-status")
 
 
+def purchase_outbound_document(conn, outbound_id):
+    """One price-free projection for detail and exports, never live master labels."""
+    header = conn.execute("SELECT id,outbound_no,outbound_at,used_by,operator,remark,status,created_at,voided_at,voided_by "
+                          "FROM purchase_inventory_outbounds WHERE id=?", (outbound_id,)).fetchone()
+    if header is None:
+        abort(404)
+    rows = conn.execute("SELECT i.*,l.lot_no,r.order_no FROM purchase_inventory_outbound_items i "
+                        "JOIN purchase_inventory_lots l ON l.id=i.lot_id "
+                        "JOIN purchase_receipts r ON r.id=l.receipt_id WHERE i.outbound_id=? ORDER BY i.id",
+                        (outbound_id,)).fetchall()
+    return dict(header), [dict(row) for row in rows]
+
+
+def purchase_outbound_context(category):
+    context = purchase_receipt_context(category)
+    context.update(outbound_navigation=True)
+    return context
+
+
+@app.route("/admin/shipping/purchase-goods/<category>")
+@permission_required("purchase_inventory_outbound")
+def purchase_outbounds(category):
+    category = purchase_category_from_slug(category)
+    filters = {key: request.args.get(key, "").strip() for key in
+               ("supplier_id", "order_no", "q", "location_id", "outbound_from", "outbound_to", "status")}
+    where, params = ["i.category=?"], [category]
+    for field, column in (("supplier_id", "l.supplier_id"), ("location_id", "i.location_id")):
+        if filters[field]:
+            where.append(f"{column}=?")
+            params.append(filters[field])
+    if filters["order_no"]:
+        where.append("instr(r.order_no,?)>0")
+        params.append(filters["order_no"])
+    if filters["q"]:
+        fields = ("i.item_name", "i.drawing_no", "i.material", "i.spec", "i.dimension_text", "i.surface", "l.lot_no")
+        where.append("(" + " OR ".join(f"instr(COALESCE({f},''),?)>0" for f in fields) + ")")
+        params.extend([filters["q"]] * len(fields))
+    for key, op in (("outbound_from", ">="), ("outbound_to", "<=")):
+        if filters[key]:
+            where.append(f"o.outbound_at{op}?")
+            params.append(filters[key])
+    if filters["status"]:
+        if filters["status"] not in {"posted", "voided"}:
+            abort(400)
+        where.append("o.status=?")
+        params.append(filters["status"])
+    with get_db() as conn:
+        records = conn.execute("SELECT DISTINCT o.id,o.outbound_no,o.outbound_at,o.used_by,o.operator,o.status,o.remark "
+                               "FROM purchase_inventory_outbounds o JOIN purchase_inventory_outbound_items i ON i.outbound_id=o.id "
+                               "JOIN purchase_inventory_lots l ON l.id=i.lot_id JOIN purchase_receipts r ON r.id=l.receipt_id "
+                               "WHERE " + " AND ".join(where) + " ORDER BY o.id DESC LIMIT 100", params).fetchall()
+        suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
+        locations = conn.execute("SELECT id,code,name FROM warehouse_locations ORDER BY code").fetchall()
+    return render_template("purchase_inventory_outbounds.html", records=records, filters=filters,
+                           suppliers=suppliers, locations=locations, **purchase_outbound_context(category))
+
+
+@app.route("/admin/shipping/purchase-goods/<category>/new", methods=["GET", "POST"])
+@permission_required("purchase_inventory_outbound")
+def new_purchase_outbound(category):
+    category = purchase_category_from_slug(category)
+    if request.method == "POST":
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="提交格式无效"), 400
+        require_inventory_csrf(payload)
+        try:
+            if payload.get("category") != category:
+                raise PurchaseInventoryConflict("采购类别与当前页面不一致")
+            try:
+                payload["idempotency_key"] = normalize_purchase_text(payload.get("idempotency_key"))
+            except ValueError as error:
+                raise PurchaseInventoryConflict(str(error)) from error
+            with get_db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                duplicate = conn.execute("SELECT 1 FROM purchase_inventory_outbounds WHERE idempotency_key=?",
+                                         (payload["idempotency_key"],)).fetchone() is not None
+                result = post_purchase_outbound(conn, payload, current_admin_username(),
+                    datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"))
+                conn.commit()
+        except PurchaseInventoryConflict as error:
+            with get_db() as conn:
+                candidates = load_outbound_candidates(conn, category, {})
+            return jsonify(error=str(error), needs_confirmation=False, current=error.current, candidates=candidates), 409
+        return jsonify(id=result["id"], outbound_no=result["outbound_no"], status=result["status"], duplicate=duplicate,
+                       redirect_url=url_for("purchase_outbound_detail", outbound_id=result["id"])), 200 if duplicate else 201
+    filters = purchase_inventory_filters(category)
+    with get_db() as conn:
+        try:
+            rows = load_outbound_candidates(conn, category, filters)
+        except ValueError as error:
+            abort(400, description=str(error))
+        suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
+        locations = conn.execute("SELECT id,code,name FROM warehouse_locations WHERE enabled=1 ORDER BY code").fetchall()
+    return render_template("purchase_inventory_outbound_form.html", rows=rows, filters=filters, suppliers=suppliers,
+                           locations=locations, operator=current_admin_username(), today=datetime.now().date().isoformat(),
+                           client_data=dict(category=category, csrf_token=inventory_csrf_token(), idempotency_key=secrets.token_urlsafe(32)),
+                           **purchase_outbound_context(category))
+
+
+@app.route("/admin/shipping/purchase-goods/records/<int:outbound_id>")
+@permission_required("purchase_inventory_outbound")
+def purchase_outbound_detail(outbound_id):
+    with get_db() as conn:
+        outbound, rows = purchase_outbound_document(conn, outbound_id)
+    return render_template("purchase_inventory_outbound_detail.html", outbound=outbound, rows=rows,
+                           **purchase_outbound_context(rows[0]["category"] if rows else "raw_material"))
+
+
+@app.route("/admin/shipping/purchase-goods/records/<int:outbound_id>/void", methods=["POST"])
+@permission_required("purchase_inventory_outbound")
+def void_purchase_outbound_record(outbound_id):
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if not isinstance(payload, dict):
+        return jsonify(error="提交格式无效"), 400
+    require_inventory_csrf(payload)
+    try:
+        with get_db() as conn:
+            purchase_outbound_document(conn, outbound_id)
+            result = void_purchase_outbound(conn, outbound_id, current_admin_username(),
+                datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"))
+            conn.commit()
+    except PurchaseInventoryConflict as error:
+        return jsonify(error=str(error), needs_confirmation=False, current=error.current), 409
+    target = url_for("purchase_outbound_detail", outbound_id=outbound_id)
+    if not request.is_json:
+        return redirect(target)
+    return jsonify(id=result["id"], status=result["status"], redirect_url=target)
+
+
+@app.route("/admin/shipping/purchase-goods/records/<int:outbound_id>/export.<export_format>")
+@permission_required("purchase_inventory_outbound")
+def export_purchase_outbound(outbound_id, export_format):
+    from procurement_documents import build_purchase_outbound_workbook, build_purchase_outbound_pdf
+    if export_format not in {"xlsx", "pdf"}:
+        abort(404)
+    with get_db() as conn:
+        outbound, rows = purchase_outbound_document(conn, outbound_id)
+    builder = build_purchase_outbound_workbook if export_format == "xlsx" else build_purchase_outbound_pdf
+    return send_file(builder(outbound, rows),
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if export_format == "xlsx" else "application/pdf",
+                     as_attachment=export_format == "xlsx" or request.args.get("download") == "1",
+                     download_name=f"{outbound['outbound_no']}-purchase-outbound.{export_format}")
+
+
 def purchase_receipt_context(category):
     context = purchase_page_context(category)
     dimensions = {"raw_material": ["length", "width", "thickness"], "carton": ["length", "width", "height"]}
@@ -12425,7 +12572,7 @@ def purchase_order_detail(order_id, category=None):
 @app.after_request
 def prevent_purchase_export_caching(response):
     # Also cover routing-level 404s (invalid IDs), cancelled orders, and redirects.
-    if re.fullmatch(r"/admin/(?:purchases/orders/[^/]+|purchase-receipts/records/[^/]+|purchase-inventory/[^/]+)/export\.[^/]+", request.path):
+    if re.fullmatch(r"/admin/(?:purchases/orders/[^/]+|purchase-receipts/records/[^/]+|purchase-inventory/[^/]+|shipping/purchase-goods/records/[^/]+)/export\.[^/]+", request.path):
         response.headers["Cache-Control"] = "private, no-store"
     return response
 

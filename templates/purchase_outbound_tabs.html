@@ -1,0 +1,4 @@
+{% include "shipment_tabs.html" %}
+<nav class="purchase-tabs" aria-label="采购出库类别">
+  {% for key,label in category_labels.items() %}<a href="{{ url_for('new_purchase_outbound' if request.endpoint == 'new_purchase_outbound' else 'purchase_outbounds', category=key.replace('_','-')) }}" {% if key == category %}aria-current="page" class="active-nav-link"{% endif %}>{{ label }}出库</a>{% endfor %}
+</nav>

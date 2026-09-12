@@ -1,0 +1,12 @@
+<form method="get" class="panel receipt-filters">
+  <label>供应商<select name="supplier_id"><option value="">全部供应商</option>{% for supplier in suppliers %}<option value="{{ supplier.id }}" {% if filters.supplier_id == supplier.id|string %}selected{% endif %}>{{ supplier.name }}</option>{% endfor %}</select></label>
+  <label>采购订单号<input name="order_no" value="{{ filters.order_no }}"></label>
+  <label>名称 / 图号 / 规格 / 批次<input name="q" value="{{ filters.q }}"></label>
+  <label>库位<select name="location_id"><option value="">全部库位</option>{% for location in locations %}<option value="{{ location.id }}" {% if filters.location_id == location.id|string %}selected{% endif %}>{{ location.code }} · {{ location.name }}</option>{% endfor %}</select></label>
+  {% if request.endpoint == 'purchase_outbounds' %}
+  <label>出库日期从<input type="date" name="outbound_from" value="{{ filters.outbound_from }}"></label>
+  <label>至<input type="date" name="outbound_to" value="{{ filters.outbound_to }}"></label>
+  <label>状态<select name="status"><option value="">全部状态</option><option value="posted" {% if filters.status == 'posted' %}selected{% endif %}>已过账</option><option value="voided" {% if filters.status == 'voided' %}selected{% endif %}>已作废</option></select></label>
+  {% endif %}
+  <button type="submit">查询</button><a href="{{ url_for(request.endpoint, category=category_slug) }}">清空</a>
+</form>

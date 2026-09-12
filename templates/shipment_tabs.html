@@ -2,5 +2,6 @@
   {% if can_manage_shipped %}
     <a href="{{ url_for('shipment_operations') }}" {% if request.endpoint == 'shipment_operations' %}aria-current="page"{% endif %}>发货操作</a>
   {% endif %}
-  <a href="{{ url_for('shipped_orders') }}" {% if request.endpoint == 'shipped_orders' %}aria-current="page"{% endif %}>已发货清单</a>
+  {% if can_view_shipped %}<a href="{{ url_for('shipped_orders') }}" {% if request.endpoint == 'shipped_orders' %}aria-current="page"{% endif %}>已发货清单</a>{% endif %}
+  {% if can_outbound_purchase_inventory %}<a href="{{ url_for('purchase_outbounds', category='raw-material') }}" {% if outbound_navigation %}aria-current="page"{% endif %}>采购货物出库</a>{% endif %}
 </nav>

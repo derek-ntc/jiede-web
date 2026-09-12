@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ category_labels[category] }}批量出库{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-inventory.css', v=static_version) }}">{% endblock %}
+{% block content %}
+<h1>{{ category_labels[category] }}批量出库</h1>
+{% include "purchase_outbound_tabs.html" %}
+<p>先筛选批次，再勾选并填写领用数量。仅扣减明确勾选的批次；任一行无效时整单不保存。</p>
+{% include "purchase_outbound_filters.html" %}
+<form data-outbound-form method="post">
+  <div class="panel receipt-filters">
+    <label>领用人<input name="used_by" required maxlength="4000" autocomplete="off"></label>
+    <label>出库日期<input name="outbound_at" type="date" required value="{{ today }}"></label>
+    <label>经办人<input value="{{ operator }}" readonly aria-readonly="true"></label>
+    <label>出库备注<textarea name="remark" maxlength="4000"></textarea></label>
+  </div>
+  <div class="table-wrap"><table class="purchase-outbound-editor"><thead><tr><th>选择</th><th>批次 / 来源订单</th><th>实际物品资料</th><th>供应商</th><th>库位</th><th>当前可用数量</th><th>出库数量</th><th>行备注</th></tr></thead><tbody>
+  {% for row in rows %}<tr data-outbound-row data-lot-id="{{ row.id }}" data-version="{{ row.version }}" data-available="{{ row.available_quantity }}">
+    <td><input type="checkbox" data-field="selected" aria-label="选择 {{ row.lot_no }}"></td>
+    <td>{{ row.lot_no }}<br>{{ row.order_no }}</td>
+    <td class="outbound-actual">{% for field in actual_fields %}{% if row[field] is not none and row[field] != '' %}<div>{{ field_labels[field] }}：{{ row[field] }}</div>{% endif %}{% endfor %}</td>
+    <td>{{ row.supplier_name }}</td><td>{{ row.location_code }} · {{ row.location_name }}</td>
+    <td data-current-quantity>{{ row.available_quantity }}</td>
+    <td><input data-field="quantity" type="number" min="1" max="{{ row.available_quantity }}" step="1" inputmode="numeric" aria-label="{{ row.lot_no }} 出库数量"></td>
+    <td><textarea data-field="remark" maxlength="4000" aria-label="{{ row.lot_no }} 行备注"></textarea></td>
+  </tr>{% else %}<tr><td colspan="8">没有可出库的采购库存。</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p data-outbound-message role="status" aria-live="polite"></p>
+  <div class="form-actions"><button type="submit" {% if not rows %}disabled{% endif %}>确认批量出库</button><a href="{{ url_for('purchase_outbounds', category=category_slug) }}">返回出库记录</a></div>
+  <noscript><p>批量出库需要启用 JavaScript。当前页面不会在脚本停用时保存。</p></noscript>
+</form>
+<script type="application/json" data-outbound-data>{{ client_data|tojson }}</script>
+<script src="{{ url_for('static', filename='purchase-inventory-outbound.js', v=static_version) }}" defer></script>
+{% endblock %}

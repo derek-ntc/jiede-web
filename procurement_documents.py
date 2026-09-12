@@ -540,7 +540,10 @@ def build_purchase_receipt_workbook(receipt, items, *, include_prices: bool) -> 
 
 
 def build_purchase_receipt_pdf(receipt, items, *, include_prices: bool) -> BytesIO:
-    model = _receipt_document_view(receipt, items, include_prices)
+    return _build_stock_pdf(_receipt_document_view(receipt, items, include_prices))
+
+
+def _build_stock_pdf(model):
     stream = BytesIO()
     font = _pdf_font()
     document = SimpleDocTemplate(stream, pagesize=landscape(A4), leftMargin=24, rightMargin=24,
@@ -615,3 +618,33 @@ def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) ->
         metadata.append("开票状态：" + _INVOICE_LABELS[filters["invoice_status"]])
     metadata.append("包含零库存：" + ("是" if str(filters.get("include_zero")) == "1" else "否"))
     return _build_stock_workbook(dict(title="采购库存清单", metadata=metadata, columns=columns, rows=projected))
+
+
+def _outbound_document_view(outbound, items):
+    outbound = dict(outbound)
+    columns = [Column("category", "类别", 12), Column("actual", "物品 / 图号 / 规格尺寸", 38),
+               Column("supplier_name", "供应商", 21), Column("order_no", "来源采购订单", 25),
+               Column("lot_no", "库存批次", 29), Column("location", "出库库位", 22),
+               Column("quantity", "出库数量", 12, "number"), Column("remark", "行备注", 28)]
+    rows = []
+    for source in items:
+        item = dict(source)
+        rows.append(dict(category=PURCHASE_CATEGORY_LABELS[item["category"]], actual=_snapshot_description(item),
+                         supplier_name=_text(item.get("supplier_name")), order_no=_text(item.get("order_no")),
+                         lot_no=_text(item.get("lot_no")), location=_join(item.get("location_code"), item.get("location_name")),
+                         quantity=int(item["quantity"]), remark=_text(item.get("remark"))))
+    metadata = [f"出库单号：{_text(outbound['outbound_no'])}",
+                f"领用人：{_text(outbound['used_by'])}    经办人：{_text(outbound['operator'])}",
+                f"状态：{'已作废' if outbound['status'] == 'voided' else '已过账'}    过账时间：{_text(outbound.get('created_at'))}"]
+    if outbound.get("voided_at"):
+        metadata.append(f"作废人：{_text(outbound.get('voided_by'))}    作废时间：{_text(outbound['voided_at'])}")
+    return dict(title="采购出库单", metadata=metadata, date_label="出库日期", date=date.fromisoformat(outbound["outbound_at"][:10]),
+                columns=columns, rows=rows, notes=["出库备注：" + _text(outbound.get("remark"))])
+
+
+def build_purchase_outbound_workbook(outbound, items) -> BytesIO:
+    return _build_stock_workbook(_outbound_document_view(outbound, items))
+
+
+def build_purchase_outbound_pdf(outbound, items) -> BytesIO:
+    return _build_stock_pdf(_outbound_document_view(outbound, items))

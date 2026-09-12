@@ -16,3 +16,25 @@
 .purchase-stock-change { max-width: 720px; display: grid; gap: 1rem; }
 .purchase-stock-change label { display: grid; gap: .4rem; }
 .purchase-stock-error { color: #9c2424; }
+.purchase-outbound-editor { min-width: 1100px; }
+.purchase-outbound-editor td { vertical-align: top; }
+.purchase-outbound-editor input[type="number"] { width: 100px; }
+.purchase-outbound-editor textarea { min-width: 150px; }
+.purchase-outbound-editor input[type="checkbox"] { width: 20px; height: 20px; }
+.outbound-actual { min-width: 180px; }
+[data-outbound-message]:not(:empty) { padding: 12px; background: #fff3dd; color: #713f12; border-radius: 6px; }
+.purchase-outbound-document td { overflow-wrap: anywhere; white-space: pre-wrap; vertical-align: top; }
+.outbound-number { text-align: right; }
+.outbound-remark { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media print {
+  @page { size: A4 landscape; margin: 10mm; }
+  body:has(.purchase-outbound-document) .topbar,
+  body:has(.purchase-outbound-document) .outbound-no-print,
+  body:has(.purchase-outbound-document) .flash { display: none !important; }
+  .purchase-outbound-document { font-size: 10pt; }
+  .purchase-outbound-document .table-wrap { overflow: visible; }
+  .purchase-outbound-document table { width: 100%; table-layout: fixed; min-width: 0; }
+  .purchase-outbound-document thead { display: table-header-group; }
+  .purchase-outbound-document th, .purchase-outbound-document td { padding: 5px; }
+  .purchase-outbound-document h1 { font-size: 18pt; }
+}

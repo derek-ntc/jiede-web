@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}采购出库单 {{ outbound.outbound_no }}{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-inventory.css', v=static_version) }}">{% endblock %}
+{% block content %}
+<div class="outbound-no-print">{% include "purchase_outbound_tabs.html" %}</div>
+<article class="purchase-outbound-document">
+  <h1>采购出库单</h1>
+  <p>出库单号：{{ outbound.outbound_no }}　出库日期：{{ outbound.outbound_at }}　类别：{{ category_labels[category] }}</p>
+  <p>领用人：{{ outbound.used_by }}　经办人：{{ outbound.operator }}</p>
+  <p>状态：{{ '已作废' if outbound.status == 'voided' else '已过账' }}　过账时间：{{ outbound.created_at }}</p>
+  {% if outbound.voided_at %}<p>作废人：{{ outbound.voided_by }}　作废时间：{{ outbound.voided_at }}</p>{% endif %}
+  <div class="table-wrap"><table><thead><tr><th>物品 / 图号 / 规格尺寸</th><th>供应商</th><th>来源订单 / 批次</th><th>出库库位</th><th>出库数量</th><th>行备注</th></tr></thead><tbody>
+    {% for row in rows %}<tr><td>{% for field in actual_fields %}{% if row[field] is not none and row[field] != '' %}<div>{{ field_labels[field] }}：{{ row[field] }}</div>{% endif %}{% endfor %}</td><td>{{ row.supplier_name }}</td><td>{{ row.order_no }}<br>{{ row.lot_no }}</td><td>{{ row.location_code }} · {{ row.location_name }}</td><td class="outbound-number">{{ row.quantity }}</td><td>{{ row.remark }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="outbound-remark">出库备注：{{ outbound.remark }}</p>
+</article>
+<div class="form-actions outbound-no-print">
+  <button type="button" onclick="window.print()">打印出库单</button>
+  <a href="{{ url_for('export_purchase_outbound', outbound_id=outbound.id, export_format='xlsx') }}">导出 Excel</a>
+  <a href="{{ url_for('export_purchase_outbound', outbound_id=outbound.id, export_format='pdf') }}" target="_blank" rel="noopener">预览 PDF</a>
+  <a href="{{ url_for('export_purchase_outbound', outbound_id=outbound.id, export_format='pdf', download=1) }}">下载 PDF</a>
+  <a href="{{ url_for('purchase_outbounds', category=category_slug) }}">返回出库记录</a>
+  {% if outbound.status == 'posted' %}<form method="post" action="{{ url_for('void_purchase_outbound_record', outbound_id=outbound.id) }}" onsubmit="return confirm('作废将恢复原批次库存并保留冲销记录，确定继续？')"><input type="hidden" name="csrf_token" value="{{ inventory_csrf_token() }}"><button type="submit">作废并恢复库存</button></form>{% endif %}
+</div>
+{% endblock %}

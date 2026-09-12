@@ -13,6 +13,11 @@
   </section>
 
   <section class="module-grid">
+    {% if can_outbound_purchase_inventory %}
+      <a class="module-card" href="{{ url_for('purchase_outbounds', category='raw-material') }}">
+        <strong>采购货物出库</strong><span>按批次领用采购库存，查看出库单和作废记录。</span>
+      </a>
+    {% endif %}
     {% if can_manage_finance %}
       <a class="module-card" href="{{ url_for('finance_invoices') }}">
         <strong>财务开票模块</strong>
