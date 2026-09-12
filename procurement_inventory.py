@@ -500,6 +500,118 @@ def update_purchase_invoice_status(conn, lot_id: int, new_status: str, remark: s
                     invoice_status=payload["new_status"], version=lot["version"] + 1))
 
 
+def load_outbound_candidates(conn, category: str, filters: dict) -> list[dict]:
+    """Return selectable, price-free stock; caller-supplied filters cannot widen category."""
+    rows = fetch_purchase_inventory(conn, dict(filters, category=category, include_zero="0"), include_prices=False)
+    enabled = {row[0] for row in conn.execute("SELECT id FROM warehouse_locations WHERE enabled=1")}
+    posted = {row[0] for row in conn.execute("SELECT id FROM purchase_receipts WHERE status='posted'")}
+    return [row for row in rows if row["location_id"] in enabled and row["receipt_id"] in posted]
+
+
+def _normalize_outbound_payload(payload):
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("出库资料无效")
+        normalized = dict(category=parse_purchase_category_slug(payload.get("category")),
+                          outbound_at=_purchase_date(payload.get("outbound_at")),
+                          used_by=normalize_purchase_text(payload.get("used_by")),
+                          remark=normalize_purchase_text(payload.get("remark")),
+                          idempotency_key=normalize_purchase_text(payload.get("idempotency_key")))
+        if not normalized["used_by"]:
+            raise ValueError("请填写领用人")
+        if not normalized["idempotency_key"]:
+            raise ValueError("缺少防重复提交标识")
+        sources = payload.get("rows")
+        if not isinstance(sources, list) or not sources or any(not isinstance(row, dict) for row in sources):
+            raise ValueError("请选择有效的出库明细")
+        rows = [dict(lot_id=_purchase_id(row.get("lot_id")),
+                     quantity=parse_purchase_inventory_quantity(row.get("quantity")),
+                     expected_version=parse_purchase_inventory_quantity(row.get("expected_version")),
+                     remark=normalize_purchase_text(row.get("remark"))) for row in sources]
+        if len({row["lot_id"] for row in rows}) != len(rows):
+            raise ValueError("不能重复选择同一库存批次")
+        normalized["rows"] = sorted(rows, key=lambda row: row["lot_id"])
+        return normalized
+    except ValueError as error:
+        raise PurchaseInventoryConflict(str(error)) from error
+
+
+def _load_outbound(conn, outbound_id):
+    try:
+        outbound_id = _purchase_id(outbound_id)
+    except ValueError as error:
+        raise PurchaseInventoryConflict(str(error)) from error
+    row = conn.execute("SELECT * FROM purchase_inventory_outbounds WHERE id=?", (outbound_id,)).fetchone()
+    if row is None:
+        raise PurchaseInventoryConflict("采购出库单不存在")
+    return dict(row)
+
+
+def post_purchase_outbound(conn, payload: dict, actor: str, now: str) -> dict:
+    """Deduct only selected lots and snapshot actual facts atomically; caller commits.
+
+    The caller supplies the authenticated actor, explicit category, and each
+    candidate's version as expected_version. Retry identity excludes actor/time.
+    """
+    normalized = _normalize_outbound_payload(payload)
+    digest = _payload_digest(normalized)
+    with _inventory_transaction(conn):
+        existing = conn.execute("SELECT * FROM purchase_inventory_outbounds WHERE idempotency_key=?",
+                                (normalized["idempotency_key"],)).fetchone()
+        if existing is not None:
+            if existing["payload_hash"] != digest:
+                raise PurchaseInventoryConflict("重复提交标识已用于不同的出库内容")
+            return dict(existing)
+        selected = []
+        for row in normalized["rows"]:
+            lot = _stock_lot(conn, row["lot_id"], row["expected_version"])
+            current = {key: lot[key] for key in ("id", "category", "available_quantity", "version", "location_id")}
+            if lot["category"] != normalized["category"]:
+                raise PurchaseInventoryConflict("不能跨采购类别出库", current=current)
+            if lot["available_quantity"] < row["quantity"]:
+                raise PurchaseInventoryConflict("库存数量不足", current=current)
+            selected.append((row, lot))
+        outbound_id = _insert_inventory_record(conn, "purchase_inventory_outbounds", dict(
+            outbound_no=_inventory_number("POUT", normalized["outbound_at"]),
+            outbound_at=normalized["outbound_at"], used_by=normalized["used_by"], operator=actor,
+            remark=normalized["remark"], status="posted", idempotency_key=normalized["idempotency_key"],
+            payload_hash=digest, created_at=now))
+        for row, lot in selected:
+            snapshot = {key: lot[key] for key in (*ACTUAL_FIELDS, "category", "supplier_name",
+                                                  "location_id", "location_code", "location_name")}
+            _insert_inventory_record(conn, "purchase_inventory_outbound_items", dict(
+                snapshot, outbound_id=outbound_id, lot_id=lot["id"], quantity=row["quantity"], remark=row["remark"]))
+            conn.execute("UPDATE purchase_inventory_lots SET available_quantity=available_quantity-?,"
+                         "version=version+1,updated_at=? WHERE id=?", (row["quantity"], now, lot["id"]))
+            _insert_inventory_record(conn, "purchase_inventory_transactions", dict(
+                transaction_no=_inventory_number("PIT", now[:10]), lot_id=lot["id"], transaction_type="outbound",
+                quantity_delta=-row["quantity"], related_type="outbound", related_id=outbound_id,
+                from_location_id=lot["location_id"], operator=actor, remark=row["remark"], created_at=now))
+        return _load_outbound(conn, outbound_id)
+
+
+def void_purchase_outbound(conn, outbound_id: int, actor: str, now: str) -> dict:
+    """Restore the exact original lots once, even if their location is now disabled."""
+    with _inventory_transaction(conn):
+        outbound = _load_outbound(conn, outbound_id)
+        if outbound["status"] == "voided":
+            return outbound
+        items = conn.execute("SELECT * FROM purchase_inventory_outbound_items WHERE outbound_id=? ORDER BY lot_id",
+                             (outbound["id"],)).fetchall()
+        for item in items:
+            lot = _stock_lot(conn, item["lot_id"])
+            conn.execute("UPDATE purchase_inventory_lots SET available_quantity=available_quantity+?,"
+                         "version=version+1,updated_at=? WHERE id=?", (item["quantity"], now, lot["id"]))
+            _insert_inventory_record(conn, "purchase_inventory_transactions", dict(
+                transaction_no=_inventory_number("PIT", now[:10]), lot_id=lot["id"], transaction_type="reversal",
+                quantity_delta=item["quantity"], related_type="outbound", related_id=outbound["id"],
+                to_location_id=item["location_id"], operator=actor,
+                remark=f"出库作废：{outbound['outbound_no']}；{item['remark']}", created_at=now))
+        conn.execute("UPDATE purchase_inventory_outbounds SET status='voided',voided_by=?,voided_at=? WHERE id=?",
+                     (actor, now, outbound["id"]))
+        return _load_outbound(conn, outbound["id"])
+
+
 def _ensure_restrictive_reference(
     conn, *, child: str, column: str, parent: str
 ) -> None:
@@ -775,6 +887,11 @@ def ensure_purchase_inventory_tables(conn) -> None:
         )
         """
     )
+
+    outbound_columns = {row[1] for row in conn.execute("PRAGMA table_info(purchase_inventory_outbound_items)")}
+    for field in ("length", "width", "height", "thickness"):
+        if field not in outbound_columns:
+            conn.execute(f"ALTER TABLE purchase_inventory_outbound_items ADD COLUMN {field} REAL")
 
     indexes = (
         ("idx_purchase_receipts_order", "purchase_receipts", "purchase_order_id"),
