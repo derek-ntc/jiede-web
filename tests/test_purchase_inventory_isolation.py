@@ -222,7 +222,7 @@ class PurchaseInventoryIsolationTests(unittest.TestCase):
     def test_repeated_initialization_of_disposable_database_copy_preserves_full_workflow(self):
         self.run_flow("other")
         original = app.DB_PATH
-        with tempfile.TemporaryDirectory(prefix="procurement-copy-", dir="/private/tmp") as folder:
+        with tempfile.TemporaryDirectory(prefix="procurement-copy-") as folder:
             copied = Path(folder) / "copy.sqlite"
             with app.get_db() as source, sqlite3.connect(copied) as target:
                 source.backup(target)
