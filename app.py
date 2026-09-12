@@ -130,6 +130,7 @@ from procurement import (
     supplier_snapshot,
     update_purchase_order,
 )
+from procurement_inventory import ensure_purchase_inventory_tables
 from reconciliation import (
     TAX_RATE_PPM,
     build_reconciliation_workbook,
@@ -626,6 +627,7 @@ def init_db():
         ensure_carton_purchase_table(conn)
         ensure_arrival_record_tables(conn)
         ensure_inventory_tables(conn)
+        ensure_purchase_inventory_tables(conn)
         ensure_assembly_shipping_tables(conn)
         ensure_finance_tables(conn)
         ensure_reconciliation_tables(conn)
