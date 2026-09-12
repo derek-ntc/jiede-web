@@ -12256,24 +12256,34 @@ def new_purchase_outbound(category):
         if not isinstance(payload, dict):
             return jsonify(error="提交格式无效"), 400
         require_inventory_csrf(payload)
+        key = None
         try:
-            if payload.get("category") != category:
-                raise PurchaseInventoryConflict("采购类别与当前页面不一致")
             try:
-                payload["idempotency_key"] = normalize_purchase_text(payload.get("idempotency_key"))
+                key = payload["idempotency_key"] = normalize_purchase_text(payload.get("idempotency_key"))
             except ValueError as error:
                 raise PurchaseInventoryConflict(str(error)) from error
             with get_db() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 duplicate = conn.execute("SELECT 1 FROM purchase_inventory_outbounds WHERE idempotency_key=?",
                                          (payload["idempotency_key"],)).fetchone() is not None
+                if payload.get("category") != category:
+                    raise PurchaseInventoryConflict("采购类别与当前页面不一致")
                 result = post_purchase_outbound(conn, payload, current_admin_username(),
                     datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"))
                 conn.commit()
         except PurchaseInventoryConflict as error:
             with get_db() as conn:
+                # A rejected revision may reuse a key whose original command already
+                # committed. Classify by persisted identity, never by error wording.
+                existing = conn.execute("SELECT id,outbound_no FROM purchase_inventory_outbounds WHERE idempotency_key=?",
+                                        (key,)).fetchone()
                 candidates = load_outbound_candidates(conn, category, {})
-            return jsonify(error=str(error), needs_confirmation=False, current=error.current, candidates=candidates), 409
+            data = dict(error=str(error), needs_confirmation=False, current=error.current, candidates=candidates,
+                        conflict_code="idempotency_key_used" if existing else "revision_safe")
+            if existing:
+                data["existing_outbound"] = dict(id=existing["id"], outbound_no=existing["outbound_no"],
+                    redirect_url=url_for("purchase_outbound_detail", outbound_id=existing["id"]))
+            return jsonify(**data), 409
         return jsonify(id=result["id"], outbound_no=result["outbound_no"], status=result["status"], duplicate=duplicate,
                        redirect_url=url_for("purchase_outbound_detail", outbound_id=result["id"])), 200 if duplicate else 201
     filters = purchase_inventory_filters(category)

@@ -42,8 +42,11 @@
   const data = JSON.parse(document.querySelector('[data-outbound-data]').textContent);
   const elements = Array.from(form.querySelectorAll('[data-outbound-row]'));
   const message = form.querySelector('[data-outbound-message]');
+  const existingLink = form.querySelector('[data-existing-outbound]');
   const submit = form.querySelector('button[type="submit"]');
   let inFlight = false;
+  let pendingBody = null;
+  let recoveryRequired = false;
   function readState() {
     return {usedBy: form.elements.used_by.value, outboundAt: form.elements.outbound_at.value,
       remark: form.elements.remark.value, rows: elements.map(el => ({lotId: Number(el.dataset.lotId),
@@ -53,10 +56,13 @@
   }
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (inFlight) return;
+    if (inFlight || recoveryRequired) return;
     const state = readState();
-    const check = validateOutbound(state);
-    if (!check.valid) { message.textContent = check.error; return; }
+    if (pendingBody === null) {
+      const check = validateOutbound(state);
+      if (!check.valid) { message.textContent = check.error; return; }
+      pendingBody = JSON.stringify(buildPayload(state, data));
+    }
     inFlight = true;
     submit.disabled = true;
     // Freeze edits while a command is in flight; preserve the exact key/content on network retry.
@@ -65,11 +71,22 @@
     try {
       const response = await fetch(form.action || window.location.href, {method: 'POST',
         headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-        body: JSON.stringify(buildPayload(state, data))});
+        body: pendingBody});
       if (response.redirected) throw new Error('登录状态或权限已变化，请在新窗口重新登录后重试');
       const result = await response.json();
-      if (response.ok) { window.location.assign(result.redirect_url); return; }
-      if (response.status === 409 && Array.isArray(result.candidates)) {
+      if (response.ok) {
+        recoveryRequired = true;
+        window.location.assign(result.redirect_url);
+        return;
+      }
+      if (response.status === 409 && result.conflict_code === 'idempotency_key_used') {
+        recoveryRequired = true;
+        message.textContent = '该提交标识已有出库单，不能把修改内容另存为第二张。填写内容已保留，请先查看原出库单核对。';
+        if (result.existing_outbound && existingLink) {
+          existingLink.href = result.existing_outbound.redirect_url;
+          existingLink.hidden = false;
+        }
+      } else if (response.status === 409 && result.conflict_code === 'revision_safe' && Array.isArray(result.candidates)) {
         const refreshed = refreshCandidates(state, result.candidates);
         refreshed.rows.forEach((row, index) => {
           const el = elements[index];
@@ -79,16 +96,17 @@
           el.querySelector('[data-current-quantity]').textContent = row.unavailable ? '不可出库' : String(row.availableQuantity);
           el.querySelector('[data-field="quantity"]').max = row.availableQuantity;
         });
-        // A definitive conflict saved nothing. New reviewed content receives a new command key.
+        // Only the explicit unused-key classification allows a revised command.
+        pendingBody = null;
         data.idempotency_key = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(24)),
           byte => byte.toString(16).padStart(2, '0')).join('');
         message.textContent = (result.error || '库存已变化') + '。已更新当前可用数量；填写内容已保留，请复核后再次提交。';
-      } else message.textContent = result.error || '出库未保存，请复核后重试';
+      } else message.textContent = (result.error || '提交结果尚未确认') + '。再次提交只核对上次原始内容，不提交后续编辑。';
     } catch (error) {
-      message.textContent = error.message + '。填写内容与提交标识已保留，请勿重复新建单据。';
+      message.textContent = error.message + '。原始提交内容与标识已保留；再次提交只核对原始内容，不提交后续编辑。请勿重复新建单据。';
     } finally {
       inFlight = false;
-      submit.disabled = false;
+      submit.disabled = recoveryRequired;
       inputs.forEach(input => { input.disabled = false; });
     }
   });

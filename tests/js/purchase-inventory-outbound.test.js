@@ -57,19 +57,30 @@ function mount(response) {
   }};
   const message = {textContent: ''};
   const button = {disabled: false};
+  const existingLink = {hidden: true};
   let handler, sent, destination;
+  const requests = [];
   const data = {category: 'raw_material', csrf_token: 'csrf', idempotency_key: 'same-key'};
   const form = {elements: {used_by: {value: '王师傅'}, outbound_at: {value: '2026-09-12'}, remark: {value: '备注'}},
     querySelectorAll(selector) { return selector === '[data-outbound-row]' ? [el] : Object.values(controls); },
-    querySelector(selector) { return selector === '[data-outbound-message]' ? message : button; },
+    querySelector(selector) {
+      if (selector === '[data-outbound-message]') return message;
+      if (selector === '[data-existing-outbound]') return existingLink;
+      return button;
+    },
     addEventListener(event, callback) { handler = callback; }};
   vm.runInNewContext(fs.readFileSync(require.resolve('../../static/purchase-inventory-outbound.js'), 'utf8'), {
     document: {querySelector(selector) { return selector === '[data-outbound-form]' ? form : {textContent: JSON.stringify(data)}; }},
     window: {location: {href: '/new', assign(url) { destination = url; }}},
     crypto: {getRandomValues(array) { return array.fill(7); }},
-    fetch: async (_, options) => { sent = JSON.parse(options.body); if (response instanceof Error) throw response; return response; }
+    fetch: async (_, options) => {
+      sent = JSON.parse(options.body); requests.push(sent);
+      const result = typeof response === 'function' ? await response(sent, requests.length) : response;
+      if (result instanceof Error) throw result;
+      return result;
+    }
   });
-  return {form, controls, el, quantityText, message, button,
+  return {form, controls, el, quantityText, message, button, existingLink, requests,
     submit: () => handler({preventDefault() {}}), sent: () => sent, destination: () => destination};
 }
 test('mounted form validates only selected lots without native invalid unchecked fields blocking submit', () => {
@@ -77,7 +88,7 @@ test('mounted form validates only selected lots without native invalid unchecked
   assert.equal(ui.form.noValidate, true);
 });
 test('mounted conflict preserves inputs and refreshes version using non-secure-context crypto', async () => {
-  const ui = mount({status: 409, ok: false, json: async () => ({error: '库存已变更', candidates: [{id: 1, version: 2, available_quantity: 5}]})});
+  const ui = mount({status: 409, ok: false, json: async () => ({error: '库存已变更', conflict_code: 'revision_safe', candidates: [{id: 1, version: 2, available_quantity: 5}]})});
   await ui.submit();
   assert.equal(ui.controls.quantity.value, '2');
   assert.equal(ui.controls.remark.value, '机架');
@@ -88,6 +99,40 @@ test('mounted conflict preserves inputs and refreshes version using non-secure-c
   assert.equal(ui.sent().rows[0].expected_version, 2);
   assert.notEqual(ui.sent().idempotency_key, 'same-key');
   assert.equal(ui.button.disabled, false);
+});
+test('lost success response then edits retries the exact pending command and redirects to the original', async () => {
+  const ui = mount((sent, count) => count === 1 ? new Error('lost response') :
+    {ok: true, json: async () => ({duplicate: true, redirect_url: '/records/1'})});
+  await ui.submit();
+  ui.controls.quantity.value = '4';
+  ui.controls.remark.value = 'edited row';
+  ui.form.elements.used_by.value = 'edited recipient';
+  ui.form.elements.outbound_at.value = '';
+  ui.form.elements.remark.value = 'edited header';
+  await ui.submit();
+  assert.equal(ui.requests.length, 2, 'recovery cannot be blocked by edits invalidating the draft');
+  assert.deepEqual(ui.requests[1], ui.requests[0]);
+  assert.equal(ui.destination(), '/records/1');
+});
+test('used key conflict never rotates or resubmits and provides existing-document recovery', async () => {
+  const ui = mount({status: 409, ok: false, json: async () => ({error: 'changed retry',
+    conflict_code: 'idempotency_key_used', existing_outbound: {id: 1, redirect_url: '/records/1'},
+    candidates: [{id: 1, version: 2, available_quantity: 8}]})});
+  await ui.submit();
+  ui.controls.quantity.value = '3';
+  await ui.submit();
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.button.disabled, true);
+  assert.equal(ui.existingLink.hidden, false);
+  assert.equal(ui.existingLink.href, '/records/1');
+  assert.equal(ui.controls.quantity.value, '3');
+});
+test('unclassified conflict remains unresolved and keeps exact pending command', async () => {
+  const ui = mount({status: 409, ok: false, json: async () => ({error: 'unknown', candidates: [{id: 1, version: 2, available_quantity: 8}]})});
+  await ui.submit();
+  ui.controls.quantity.value = '3';
+  await ui.submit();
+  assert.deepEqual(ui.requests[1], ui.requests[0]);
 });
 test('network failure retains exact idempotency key and successful retry redirects', async () => {
   const ui = mount(new Error('network unavailable'));

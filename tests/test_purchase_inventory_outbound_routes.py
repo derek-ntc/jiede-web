@@ -70,11 +70,39 @@ class PurchaseOutboundRouteTests(unittest.TestCase):
             pi.adjust_purchase_inventory(conn, self.lot_id, 5, "盘点", "keeper", "2026-09-12", 1, "adjust")
         response = self.client.post(self.new_url, json=self.data())
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json.get("conflict_code"), "revision_safe")
         self.assertEqual(response.json["candidates"][0]["available_quantity"], 5)
         self.assertEqual(response.json["candidates"][0]["version"], 2)
         self.assertFalse(response.json["needs_confirmation"])
         for secret in ("unit_price", "amount_minor", "987654", "currency"):
             self.assertNotIn(secret, response.text)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_outbounds"), 0)
+
+    def test_lost_success_changed_retry_is_classified_used_and_original_retry_never_deducts_twice(self):
+        original = self.data()
+        first = self.client.post(self.new_url, json=original)
+        self.assertEqual(first.status_code, 201)
+        # Simulate a client not receiving this successful response, then submitting edits.
+        for changed in (self.data(used_by="edited recipient"), self.data(category="carton"),
+                        self.data(used_by=""), self.data(rows=[dict(lot_id=self.lot_id, expected_version=2, quantity=4)])):
+            result = self.client.post(self.new_url, json=changed)
+            self.assertEqual(result.status_code, 409)
+            self.assertEqual(result.json.get("conflict_code"), "idempotency_key_used")
+            self.assertEqual(result.json["existing_outbound"]["id"], first.json["id"])
+            self.assertEqual(result.json["existing_outbound"]["redirect_url"], first.json["redirect_url"])
+            self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_outbounds"), 1)
+            self.assertEqual(self.scalar("SELECT available_quantity FROM purchase_inventory_lots"), 98)
+        recovered = self.client.post(self.new_url, json=original)
+        self.assertEqual(recovered.status_code, 200)
+        self.assertTrue(recovered.json["duplicate"])
+        self.assertEqual(recovered.json["id"], first.json["id"])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_transactions WHERE transaction_type='outbound'"), 1)
+
+    def test_validation_conflict_is_safe_only_while_key_has_no_saved_command(self):
+        result = self.client.post(self.new_url, json=self.data(used_by=""))
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(result.json.get("conflict_code"), "revision_safe")
+        self.assertNotIn("existing_outbound", result.json)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_outbounds"), 0)
 
     def test_permissions_csrf_and_category_cannot_be_bypassed(self):

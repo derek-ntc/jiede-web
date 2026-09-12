@@ -25,6 +25,7 @@
   </tr>{% else %}<tr><td colspan="8">没有可出库的采购库存。</td></tr>{% endfor %}
   </tbody></table></div>
   <p data-outbound-message role="status" aria-live="polite"></p>
+  <a data-existing-outbound hidden target="_blank" rel="noopener">查看原出库单</a>
   <div class="form-actions"><button type="submit" {% if not rows %}disabled{% endif %}>确认批量出库</button><a href="{{ url_for('purchase_outbounds', category=category_slug) }}">返回出库记录</a></div>
   <noscript><p>批量出库需要启用 JavaScript。当前页面不会在脚本停用时保存。</p></noscript>
 </form>
