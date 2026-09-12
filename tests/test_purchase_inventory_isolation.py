@@ -1,4 +1,5 @@
 """Real HTTP workflows must not change product, sales, or legacy history data."""
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 import sqlite3
@@ -54,15 +55,22 @@ class PurchaseInventoryIsolationTests(unittest.TestCase):
                       if not r[0].startswith(("purchase_inventory_", "sqlite_"))
                       and r[0] not in {"purchase_receipts", "purchase_receipt_items", "purchase_orders"}]
             result = {t: [tuple(r) for r in conn.execute(f'SELECT * FROM "{t}" ORDER BY rowid')] for t in tables}
-            # Only receipt-derived status and its audit metadata may change on the source order.
-            columns = [r[1] for r in conn.execute("PRAGMA table_info(purchase_orders)")
-                       if r[1] not in {"status", "updated_at", "updated_by"}]
-            result["purchase_orders"] = [tuple(r) for r in conn.execute(
-                "SELECT " + ",".join(columns) + " FROM purchase_orders ORDER BY id")]
+            result["purchase_orders"] = [dict(r) for r in conn.execute("SELECT * FROM purchase_orders ORDER BY id")]
             return result
 
-    def assert_consistent(self, before):
-        self.assertEqual(self.isolated_snapshot(), before)
+    def assert_consistent(self, before, *, receipt_order_id=None, receipt_status=None):
+        current = self.isolated_snapshot()
+        if receipt_order_id is not None:
+            # This exception exists only at the first receipt/void boundary, never
+            # across transfer, adjustment, invoice status, outbound, or retries.
+            old = next(row for row in before["purchase_orders"] if row["id"] == receipt_order_id)
+            changed = next(row for row in current["purchase_orders"] if row["id"] == receipt_order_id)
+            self.assertEqual(changed["status"], receipt_status)
+            self.assertEqual(changed["updated_by"], "receiver")
+            datetime.fromisoformat(changed["updated_at"])
+            for field in ("status", "updated_by", "updated_at"):
+                changed[field] = old[field]
+        self.assertEqual(current, before, "isolated business snapshot changed")
         with app.get_db() as conn:
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -87,6 +95,8 @@ class PurchaseInventoryIsolationTests(unittest.TestCase):
         response = self.client.post(url, json=payload)
         self.assertEqual(response.status_code, 201, response.text)
         receipt = response.json
+        self.assert_consistent(before, receipt_order_id=oid, receipt_status="received")
+        before = self.isolated_snapshot()
         self.assertEqual(self.client.post(url, json=payload).status_code, 200)
         self.assertEqual(self.scalar("SELECT status FROM purchase_orders WHERE id=?", oid), "received")
         self.assert_consistent(before)
@@ -135,14 +145,47 @@ class PurchaseInventoryIsolationTests(unittest.TestCase):
             with self.subTest(category=category):
                 self.run_flow(category)
 
+    def test_isolation_guard_detects_unrelated_order_status_and_audit_changes_during_receipt(self):
+        # A real receipt side effect on an unrelated order must fail the workflow guard.
+        for field, value in (("status", "cancelled"), ("updated_by", "unexpected"), ("updated_at", "2000-01-01")):
+            with self.subTest(field=field):
+                with app.get_db() as conn:
+                    original = conn.execute(f"SELECT {field} FROM purchase_orders WHERE id=?", (self.order_id,)).fetchone()[0]
+                    conn.execute(f"CREATE TRIGGER isolation_fault AFTER INSERT ON purchase_receipts BEGIN "
+                                 f"UPDATE purchase_orders SET {field}='{value}' WHERE id={self.order_id}; END")
+                try:
+                    with self.assertRaisesRegex(AssertionError, "isolated business snapshot changed"):
+                        self.receive("raw_material", "unrelated-fault-" + field)
+                finally:
+                    with app.get_db() as conn:
+                        conn.execute("DROP TRIGGER isolation_fault")
+                        conn.execute(f"UPDATE purchase_orders SET {field}=? WHERE id=?", (original, self.order_id))
+
+    def test_isolation_guard_detects_source_order_status_and_audit_changes_during_stock_operations(self):
+        receipt, lot_id, before = self.receive("raw_material", "stock-fault")
+        oid = self.scalar("SELECT purchase_order_id FROM purchase_receipts WHERE id=?", receipt["id"])
+        with app.get_db() as conn:
+            conn.execute(f"CREATE TRIGGER isolation_fault AFTER INSERT ON purchase_inventory_transactions "
+                         f"WHEN NEW.transaction_type='transfer_out' BEGIN UPDATE purchase_orders "
+                         f"SET status='cancelled',updated_by='unexpected' WHERE id={oid}; END")
+        self.change(lot_id, "transfer", "raw_material", "fault-transfer", quantity=40,
+                    target_location_id=self.target_id, expected_version=1)
+        with self.assertRaisesRegex(AssertionError, "isolated business snapshot changed"):
+            self.assert_consistent(before)
+
     def test_unused_receipt_void_reverses_stock_once_without_rewriting_order_or_legacy_history(self):
         for category in ("raw_material", "carton", "outsourcing", "other"):
             with self.subTest(category=category):
                 receipt, lot_id, before = self.receive(category, "void-" + category)
-                for _ in range(2):
+                oid = self.scalar("SELECT purchase_order_id FROM purchase_receipts WHERE id=?", receipt["id"])
+                for attempt in range(2):
                     result = self.client.post(receipt["redirect_url"] + "/void", json={"csrf_token": self.csrf})
                     self.assertEqual(result.status_code, 200, result.text)
-                    self.assert_consistent(before)
+                    if attempt == 0:
+                        self.assert_consistent(before, receipt_order_id=oid, receipt_status="ordered")
+                    else:
+                        self.assert_consistent(before)
+                    before = self.isolated_snapshot()
                 self.assertEqual(self.scalar("SELECT available_quantity FROM purchase_inventory_lots WHERE id=?", lot_id), 0)
                 self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_transactions WHERE lot_id=?", lot_id), 2)
 
