@@ -87,7 +87,7 @@
 
       <div class="form-actions">
         <button type="submit">保存订单</button>
-        <a class="button secondary" href="{{ url_for('admin_orders') }}">取消</a>
+        <a class="button secondary" href="{{ url_for('order_group_detail', anchor_id=order.id, q=request.args.get('q', ''), customer=request.args.get('customer', ''), sort=request.args.get('sort', 'ordered_at'), direction=request.args.get('direction', 'desc')) }}">取消</a>
       </div>
     </form>
   </section>

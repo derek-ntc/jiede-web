@@ -92,3 +92,21 @@ class OrderGroupTests(unittest.TestCase):
             order = self.order(conn)
         response = self.client.post(f'/admin/orders/{order}/edit?q=P-100', data={})
         self.assertEqual(parse_qs(urlsplit(response.location).query), {'q': ['P-100']})
+
+    def test_edit_cancel_returns_to_group_with_all_filter_context(self):
+        import re
+        from html import unescape
+        from urllib.parse import parse_qs, urlsplit
+        with app.get_db() as conn:
+            order = self.order(conn)
+        response = self.client.get(f'/admin/orders/{order}/edit', query_string={
+            'q': 'P-100', 'customer': '客户A', 'sort': 'order_no', 'direction': 'asc'})
+        self.assertEqual(response.status_code, 200)
+        links = {label: unescape(href) for href, label in re.findall(
+            r'<a\b[^>]*href="([^"]+)"[^>]*>(返回订单明细|取消)</a>',
+            response.get_data(as_text=True))}
+        self.assertEqual(links['取消'], links['返回订单明细'])
+        target = urlsplit(links['取消'])
+        self.assertEqual(target.path, f'/admin/orders/groups/{order}')
+        self.assertEqual(parse_qs(target.query), {
+            'q': ['P-100'], 'customer': ['客户A'], 'sort': ['order_no'], 'direction': ['asc']})
