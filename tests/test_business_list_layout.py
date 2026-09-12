@@ -226,6 +226,25 @@ class BusinessListLayoutTests(unittest.TestCase):
                         result = subprocess.run(['node', '--check'], input=script, text=True, capture_output=True)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_order_auto_width_caps_align_with_every_rendered_column(self):
+        for username, role in [('admin', 'admin'), ('reader', 'operator')]:
+            with self.subTest(username=username):
+                self.login(username, role)
+                html = self.client.get(f'/admin/orders/groups/{self.order}').get_data(as_text=True)
+                table = re.search(r'<table class="order-table">(.*?)</table>', html, re.DOTALL).group(1)
+                header = re.search(r'<thead>(.*?)</thead>', table, re.DOTALL).group(1)
+                labels = [' '.join(re.sub(r'<[^>]+>', ' ', value).split())
+                          for value in re.findall(r'<th\b[^>]*>(.*?)</th>', header, re.DOTALL)]
+                caps_source = re.search(r'const maxAutoWidths = \[(.*?)\];', html, re.DOTALL).group(1)
+                caps = [int(value) for value in re.findall(r'\d+', caps_source)]
+
+                self.assertEqual(len(caps), len(labels))
+                self.assertEqual(len(re.findall(r'<col\b', table)), len(labels))
+                specification = labels.index('规格型号')
+                self.assertEqual(labels[specification - 1:specification + 2], ['产品', '规格型号', '客户'])
+                self.assertEqual(caps[specification - 1:specification + 2], [142, 112, 104])
+                self.assertEqual(caps[-2:], [132, 132])
+
     def test_long_order_remark_has_an_expandable_escaped_copy(self):
         remark = '按客户图纸加工，检验后独立包装。<script>unsafe()</script>'
         with app.get_db() as conn:
