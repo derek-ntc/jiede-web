@@ -138,6 +138,42 @@ class PurchaseInventorySchemaTests(unittest.TestCase):
         lot_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         return supplier_id, order_id, order_item_id, location_id, receipt_id, receipt_item_id, lot_id
 
+    def seed_transfer_lot(self):
+        context = self.seed_receipt_lot()
+        (
+            supplier_id,
+            order_id,
+            order_item_id,
+            location_id,
+            receipt_id,
+            receipt_item_id,
+            source_lot_id,
+        ) = context
+        self.conn.execute(
+            """
+            INSERT INTO purchase_inventory_lots (
+                lot_no, category, origin_receipt_item_id, source_lot_id, source_kind,
+                item_name, drawing_no, material, dimension_text, surface, spec, unit,
+                supplier_id, supplier_name, purchase_order_id, purchase_order_item_id,
+                receipt_id, location_id, opening_quantity, available_quantity,
+                currency, invoice_status, created_at, updated_at
+            ) VALUES ('LOT-2', 'raw_material', ?, ?, 'transfer', '钢板', 'DWG-1',
+                      'Q235', '100x50', '喷砂', '', '张', ?, '供应商甲', ?, ?, ?, ?,
+                      2, 2, 'CNY', 'pending', 'now', 'now')
+            """,
+            (
+                receipt_item_id,
+                source_lot_id,
+                supplier_id,
+                order_id,
+                order_item_id,
+                receipt_id,
+                location_id,
+            ),
+        )
+        transfer_lot_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return (*context, transfer_lot_id)
+
     def test_schema_is_idempotent_and_uses_shared_locations(self):
         """Schema reruns must preserve all tables and keep locations shared."""
         ensure_purchase_inventory_tables(self.conn)
@@ -194,6 +230,7 @@ class PurchaseInventorySchemaTests(unittest.TestCase):
                 parse_purchase_category_slug(value)
 
         self.assertEqual(parse_purchase_inventory_quantity("1"), 1)
+        self.assertEqual(parse_purchase_inventory_quantity(0, allow_zero=True), 0)
         self.assertEqual(
             parse_purchase_inventory_quantity("0", allow_zero=True), 0
         )
@@ -203,6 +240,66 @@ class PurchaseInventorySchemaTests(unittest.TestCase):
         for value in (-1, "-1", "1.0", True, "2147483648"):
             with self.subTest(zero_quantity=value), self.assertRaises(ValueError):
                 parse_purchase_inventory_quantity(value, allow_zero=True)
+
+    def test_invariant_checker_reports_one_way_transfer_pair_quantity_mismatch(self):
+        """A directed transfer link must be audited even without its reciprocal update."""
+        *_, location_id, _, _, source_lot_id, transfer_lot_id = self.seed_transfer_lot()
+        self.conn.execute(
+            """
+            INSERT INTO purchase_inventory_transactions (
+                transaction_no, lot_id, transaction_type, quantity_delta,
+                from_location_id, operator, created_at
+            ) VALUES ('TX-ONE-WAY-OUT', ?, 'transfer_out', -2, ?, 'buyer', 'now')
+            """,
+            (source_lot_id, location_id),
+        )
+        out_transaction_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self.conn.execute(
+            """
+            INSERT INTO purchase_inventory_transactions (
+                transaction_no, lot_id, transaction_type, quantity_delta,
+                to_location_id, paired_transaction_id, operator, created_at
+            ) VALUES ('TX-ONE-WAY-IN', ?, 'transfer_in', 1, ?, ?, 'buyer', 'now')
+            """,
+            (transfer_lot_id, location_id, out_transaction_id),
+        )
+
+        errors = purchase_inventory_invariant_errors(self.conn)
+
+        self.assertTrue(
+            any("transfer pair quantity mismatch" in error for error in errors),
+            errors,
+        )
+
+    def test_invariant_checker_reports_missing_origin_for_transfer_lot(self):
+        """Every lot must retain its original receipt item, including transfer lots."""
+        *_, transfer_lot_id = self.seed_transfer_lot()
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute(
+            "DROP TRIGGER IF EXISTS "
+            "trg_purchase_inventory_lots_origin_receipt_item_id_require_update"
+        )
+        self.conn.execute(
+            """
+            UPDATE purchase_inventory_lots
+            SET origin_receipt_item_id = 999
+            WHERE id = ?
+            """,
+            (transfer_lot_id,),
+        )
+
+        errors = purchase_inventory_invariant_errors(self.conn)
+
+        self.assertTrue(
+            any(
+                "orphaned source record" in error
+                and "origin" in error
+                and f"id={transfer_lot_id}" in error
+                for error in errors
+            ),
+            errors,
+        )
 
     def test_quantity_constraints_require_integer_storage_and_valid_bounds(self):
         """Fractional, negative, and internally inconsistent quantities must be rejected."""

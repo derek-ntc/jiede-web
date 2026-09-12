@@ -69,7 +69,8 @@ def parse_purchase_inventory_quantity(
 ) -> int:
     """Parse a bounded integer quantity, optionally accepting zero."""
     pattern = r"\d+" if allow_zero else r"[1-9]\d*"
-    if isinstance(value, bool) or not re.fullmatch(pattern, str(value or "")):
+    text = "" if value is None else str(value)
+    if isinstance(value, bool) or not re.fullmatch(pattern, text):
         raise ValueError("数量必须为非负整数" if allow_zero else "数量必须为正整数")
     quantity = int(value)
     if quantity > _PURCHASE_INVENTORY_QUANTITY_MAX:
@@ -453,6 +454,7 @@ def purchase_inventory_invariant_errors(conn) -> list[str]:
             f"opening={row['opening_quantity']}, qualified={row['qualified_quantity']})"
         )
 
+    reported_transfer_pairs = set()
     for row in conn.execute(
         """
         SELECT first.id AS first_id, first.transaction_no AS first_no,
@@ -464,11 +466,14 @@ def purchase_inventory_invariant_errors(conn) -> list[str]:
           ON paired.id = first.paired_transaction_id
         WHERE first.transaction_type IN ('transfer_out','transfer_in')
           AND paired.transaction_type IN ('transfer_out','transfer_in')
-          AND first.id < paired.id
           AND abs(first.quantity_delta) <> abs(paired.quantity_delta)
         ORDER BY first.id
         """
     ):
+        pair = tuple(sorted((row["first_id"], row["paired_id"])))
+        if pair in reported_transfer_pairs:
+            continue
+        reported_transfer_pairs.add(pair)
         errors.append(
             "transfer pair quantity mismatch: "
             f"{row['first_no']} ({row['first_delta']}) / "
@@ -502,14 +507,13 @@ def purchase_inventory_invariant_errors(conn) -> list[str]:
 
     orphan_queries = (
         (
-            "receipt lot origin",
+            "lot origin",
             """
             SELECT lots.id
             FROM purchase_inventory_lots AS lots
             LEFT JOIN purchase_receipt_items AS items
               ON items.id = lots.origin_receipt_item_id
-            WHERE lots.source_kind = 'receipt'
-              AND (lots.origin_receipt_item_id IS NULL OR items.id IS NULL)
+            WHERE lots.origin_receipt_item_id IS NULL OR items.id IS NULL
             """,
         ),
         (
