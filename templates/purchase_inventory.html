@@ -20,6 +20,7 @@
   <label><input type="checkbox" name="include_zero" value="1" {% if filters.include_zero == '1' %}checked{% endif %}>包含零库存批次</label>
   <button type="submit">查询</button><a href="{{ url_for('purchase_inventory', category=category_slug) }}">清空</a>
 </form>
+<p><a class="button" href="{{ export_url }}">导出当前筛选 Excel</a> 导出仅包含当前筛选的采购批次，按横向 A4、单页宽打印，内容遵循当前账号权限。</p>
 <div class="table-wrap"><table class="purchase-stock-table"><thead><tr>
   <th>批次号</th><th>供应商</th><th>采购订单 / 到货单</th><th>入库日期 / 批次创建</th>
   {% for field in actual_fields %}<th>{{ field_labels[field] }}</th>{% endfor %}

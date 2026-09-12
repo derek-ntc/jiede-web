@@ -47,6 +47,10 @@ CATEGORY_DOCUMENT_COLUMNS = {
     "outsourcing": (Column("identity", "物品／图号", 27), _MATERIAL, Column("details", "尺寸／厚度／表面", 30, optional=True), *_TAIL, *_PRICES, *_END),
     "other": (Column("identity", "物品／规格", 30), Column("details", "材质／尺寸／厚度／表面", 34, optional=True), *_TAIL, *_PRICES, *_END),
 }
+RAW_MATERIAL_TERMS = (
+    "产品交付时必须标识明确，并附上产品合格证及出厂检测报告。",
+    "订单要求纳入供应商考核，依照质量协议与物流协议。",
+)
 
 
 def sanitize_document_text(value):
@@ -103,6 +107,8 @@ def purchase_document_view(order, items, *, include_prices):
                 value = date.fromisoformat(item[column.key]) if item.get(column.key) else None
             else:
                 value = item.get(column.key)
+            if category == "raw_material" and column.kind == "number" and value is not None:
+                value = Decimal(str(value))
             row[column.key] = _text(value) if column.kind == "text" else value
         rows.append(row)
     columns = [column for column in columns if not column.optional or any(row[column.key] not in (None, "") for row in rows)]
@@ -124,6 +130,7 @@ def purchase_document_view(order, items, *, include_prices):
                   supplier_fields={key: _text(order.get("supplier_" + key)) for key in ("name", "code", "contact", "phone", "email", "address")},
                   delivery_fields={key: _text(order.get(key)) for key in ("delivery_address", "recipient", "recipient_phone", "remark")},
                   created_by=_text(order.get("created_by")))
+    result["standard_terms"] = RAW_MATERIAL_TERMS if category == "raw_material" else ()
     if any(column.kind == "money" for column in columns):
         totals = [row["line_total"] for row in rows]
         result["total"] = sum(totals, Decimal(0)) if all(value is not None for value in totals) else None
@@ -246,6 +253,8 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
                 elif column.kind == "money" and value is None:
                     value = "未录价"
                 cell = write(row, index, value, kind=column.kind)
+                if order["category"] == "raw_material" and column.kind == "number":
+                    cell.number_format = "General"
                 if column.kind == "money" and isinstance(cell.value, str):
                     height = max(height, len(_wrapped_lines(cell.value, max(4, widths[index - 1] - 2))))
                 if column.kind == "date":
@@ -264,6 +273,8 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
     full_line("\n".join(model["delivery"][:2]), bordered=True)
     for line in model["delivery"][2:]:
         full_line(line, bordered=True)
+    for index, term in enumerate(model["standard_terms"], 1):
+        full_line(f"{index}. {term}", bordered=True)
     paired_line("下单日期：", model["purchased_at"], "经办人：", model["created_by"], left_kind="date")
     paired_line("确认回传", "", "签字：", "")
     if model["company"][1:]:
@@ -372,6 +383,7 @@ def build_purchase_order_pdf(order, items, *, include_prices: bool) -> BytesIO:
         story.extend((Spacer(1, 7), paragraph("合计（RMB／人民币）：" + total)))
     footer = [Spacer(1, 9)]
     footer.extend(paragraph(line) for line in model["delivery"])
+    footer.extend(paragraph(f"{index}. {term}") for index, term in enumerate(model["standard_terms"], 1))
     footer.append(Spacer(1, 7))
     # Company footer flows with the document, so long contact data cannot cover details.
     footer.extend(paragraph(line) for line in model["company"])
@@ -387,3 +399,217 @@ def build_purchase_order_pdf(order, items, *, include_prices: bool) -> BytesIO:
     document.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
     stream.seek(0)
     return stream
+
+
+_INVOICE_LABELS = {"not_required": "无需开票", "pending": "待开票", "invoiced": "已开票"}
+_ACTUAL_LABELS = (("item_name", "名称"), ("drawing_no", "图号"), ("material", "材质"),
+                  ("spec", "规格"), ("dimension_text", "尺寸说明"), ("length", "长 mm"),
+                  ("width", "宽 mm"), ("height", "高 mm"), ("thickness", "厚 mm"),
+                  ("surface", "表面"), ("unit", "单位"))
+
+
+def _snapshot_description(item):
+    return "\n".join(f"{label}：{_text(item[key])}" for key, label in _ACTUAL_LABELS
+                     if item.get(key) not in (None, ""))
+
+
+def _receipt_document_view(receipt, items, include_prices):
+    receipt = dict(receipt)
+    columns = [Column("ordered", "订单资料", 29), Column("actual", "实际资料", 29),
+               Column("ordered_quantity", "订购数量", 10, "number"),
+               Column("actual_quantity", "实际到货", 10, "number"),
+               Column("qualified_quantity", "合格入库", 10, "number"),
+               Column("location", "入库库位", 18), Column("invoice_status", "开票状态", 10),
+               Column("lot_no", "库存批次", 26), Column("remark", "备注", 22)]
+    if include_prices:
+        columns.append(Column("unit_price", "订单单价", 17, "money"))
+    rows = []
+    for source in items:
+        item = dict(source)
+        ordered = dict(item.get("ordered") or {})
+        row = dict(ordered=_snapshot_description(ordered), actual=_snapshot_description(item),
+                   ordered_quantity=ordered.get("ordered_quantity"), actual_quantity=item.get("actual_quantity"),
+                   qualified_quantity=item.get("qualified_quantity"), location=_join(item.get("location_code"), item.get("location_name")),
+                   invoice_status=_INVOICE_LABELS[item["invoice_status"]], lot_no=item.get("lot_no") or "未建库存",
+                   remark=_text(item.get("remark")))
+        if include_prices:
+            row["unit_price"] = _money(ordered.get("unit_price_minor"))
+        rows.append(row)
+    metadata = [f"到货单号：{_text(receipt['receipt_no'])}    采购订单：{_text(receipt['order_no'])}",
+                f"类别：{PURCHASE_CATEGORY_LABELS[receipt['category']]}    供应商：{_text(receipt.get('supplier_name'))}",
+                f"状态：{'已作废' if receipt['status'] == 'voided' else '已过账'}    过账人：{_text(receipt.get('posted_by'))}    过账时间：{_text(receipt.get('posted_at'))}"]
+    if receipt.get("voided_at"):
+        metadata.append(f"作废人：{_text(receipt.get('voided_by'))}    作废时间：{_text(receipt['voided_at'])}")
+    return dict(title="采购到货单", metadata=metadata, date_label="到货日期", date=date.fromisoformat(receipt["received_at"][:10]),
+                columns=columns, rows=rows, notes=["到货备注：" + _text(receipt.get("remark"))])
+
+
+def _build_stock_workbook(model):
+    """Print-oriented snapshot tables; literal text and bounded continuation rows."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = model["title"]
+    sheet.sheet_view.showGridLines = False
+    columns = model["columns"]
+    count = len(columns)
+    widths = [column.width * 145 / sum(c.width for c in columns) for column in columns]
+    for index, column in enumerate(columns):
+        if column.kind == "date":
+            widths[index] = max(widths[index], 13)
+        if column.kind == "money":
+            labels = [f"¥{row[column.key]:,.2f}" for row in model["rows"] if row[column.key] is not None]
+            widths[index] = max([widths[index]] + [len(label) + 2 for label in labels])
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+
+    def write(row, column, value, kind="text", bold=False):
+        if kind == "money":
+            value = "未录价" if value is None else _excel_money(value)
+        if isinstance(value, str):
+            value = _text(value)
+        cell = sheet.cell(row, column, value)
+        if isinstance(value, str):
+            cell.data_type = "s"
+        cell.font = Font(name="Arial Unicode MS", size=10, bold=bold)
+        cell.alignment = Alignment(horizontal="right" if kind in ("number", "money") else "left", vertical="center", wrap_text=True,
+                                   indent=1 if kind in ("number", "money") else 0)
+        cell.number_format = {"date": "yyyy-mm-dd", "money": '"¥"#,##0.00'}.get(kind, "General")
+        return cell
+
+    def line(value, bold=False):
+        lines = _wrapped_lines(value, sum(widths) - 8)
+        for offset in range(0, len(lines), 12):
+            row = sheet.max_row + 1 if sheet["A1"].value is not None else 1
+            sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=count)
+            write(row, 1, "\n".join(lines[offset:offset + 12]), bold=bold)
+            sheet.row_dimensions[row].height = max(24, len(lines[offset:offset + 12]) * 15 + 8)
+
+    line(model["title"], bold=True)
+    sheet["A1"].font = Font(name="Arial Unicode MS", size=18, bold=True)
+    sheet.row_dimensions[1].height = 30
+    for value in model["metadata"]:
+        line(value)
+    if model.get("date"):
+        row = sheet.max_row + 1
+        write(row, 1, model["date_label"])
+        write(row, 2, model["date"], "date")
+        sheet.row_dimensions[row].height = 24
+    header = sheet.max_row + 1
+    for index, column in enumerate(columns, 1):
+        cell = write(header, index, column.label, bold=True)
+        cell.fill = PatternFill("solid", fgColor="E8EDF2")
+    sheet.row_dimensions[header].height = 30
+    for source in model["rows"]:
+        parts = {c.key: _wrapped_lines(source.get(c.key), max(4, widths[i] - 3))
+                 for i, c in enumerate(columns) if c.kind == "text"}
+        for chunk in range(max([1] + [(len(lines) + 11) // 12 for lines in parts.values()])):
+            row, height = sheet.max_row + 1, 1
+            for index, column in enumerate(columns, 1):
+                value = source.get(column.key)
+                if column.kind == "text":
+                    lines = parts[column.key][chunk * 12:(chunk + 1) * 12]
+                    value, height = "\n".join(lines), max(height, len(lines))
+                elif chunk:
+                    value = None
+                cell = write(row, index, value, column.kind)
+                cell.border = Border(bottom=Side(style="thin", color="BEC7CF"))
+            sheet.row_dimensions[row].height = max(26, height * 15 + 8)
+    if not model["rows"]:
+        line("没有匹配的采购库存。")
+    for value in model.get("notes", ()):
+        line(value)
+    sheet.freeze_panes = f"A{header + 1}"
+    sheet.print_title_rows = f"{header}:{header}"
+    sheet.print_area = f"A1:{get_column_letter(count)}{sheet.max_row}"
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight = 1, 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_margins = PageMargins(left=.3, right=.3, top=.35, bottom=.4, header=.15, footer=.18)
+    sheet.oddFooter.center.text = "&P / &N"
+    stream = BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return stream
+
+
+def build_purchase_receipt_workbook(receipt, items, *, include_prices: bool) -> BytesIO:
+    return _build_stock_workbook(_receipt_document_view(receipt, items, include_prices))
+
+
+def build_purchase_receipt_pdf(receipt, items, *, include_prices: bool) -> BytesIO:
+    model = _receipt_document_view(receipt, items, include_prices)
+    stream = BytesIO()
+    font = _pdf_font()
+    document = SimpleDocTemplate(stream, pagesize=landscape(A4), leftMargin=24, rightMargin=24,
+                                 topMargin=24, bottomMargin=30, title=model["title"], author="")
+    body = ParagraphStyle("receipt", fontName=font, fontSize=9, leading=12, wordWrap="CJK")
+    title = ParagraphStyle("receipt-title", parent=body, fontSize=18, leading=24, alignment=TA_CENTER)
+
+    def paragraph(value, style=body):
+        return Paragraph(escape(_text(value)).replace("\n", "<br/>"), style)
+
+    story = [paragraph(model["title"], title), Spacer(1, 8)]
+    story.extend(paragraph(value) for value in model["metadata"])
+    story.extend([paragraph(f"{model['date_label']}：{model['date']}"), Spacer(1, 8)])
+    columns = model["columns"]
+    widths = [document.width * c.width / sum(c.width for c in columns) for c in columns]
+    rows = [[paragraph(c.label) for c in columns]]
+    for source in model["rows"]:
+        parts = []
+        for column, width in zip(columns, widths):
+            value = source[column.key]
+            if column.kind == "money":
+                value = "未录价" if value is None else f"¥{value:,.2f}"
+            parts.append(_pdf_cell_parts(paragraph(value), width - 8))
+        for chunk in range(max(len(p) for p in parts)):
+            rows.append([p[chunk] if chunk < len(p) else "" for p in parts])
+    table = Table(rows, colWidths=widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EDF2")),
+        ("LINEBELOW", (0, 0), (-1, -1), .3, colors.HexColor("#BEC7CF")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.extend([table, Spacer(1, 8)])
+    story.extend(paragraph(value) for value in model["notes"])
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(font, 8)
+        canvas.drawCentredString(landscape(A4)[0] / 2, 14, f"第 {doc.page} 页")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    stream.seek(0)
+    return stream
+
+
+def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) -> BytesIO:
+    columns = [Column("lot_no", "库存批次", 26), Column("supplier_name", "供应商", 20),
+               Column("order_no", "采购订单", 24), Column("receipt_no", "到货单", 26),
+               Column("received_at", "入库日期", 15, "date"), Column("actual", "实际资料", 30),
+               Column("opening_quantity", "入库数量", 10, "number"),
+               Column("available_quantity", "当前可用数量", 12, "number"),
+               Column("location", "当前库位", 18), Column("invoice_status", "开票状态", 11)]
+    if include_prices:
+        columns += [Column("unit_price", "单价", 18, "money"), Column("amount", "当前金额", 20, "money")]
+    projected = []
+    for source in rows:
+        item = dict(source)
+        row = {key: item.get(key) for key in ("lot_no", "supplier_name", "order_no", "receipt_no", "opening_quantity", "available_quantity")}
+        row.update(received_at=date.fromisoformat(item["received_at"][:10]), actual=_snapshot_description(item),
+                   location=_join(item.get("location_code"), item.get("location_name")), invoice_status=_INVOICE_LABELS[item["invoice_status"]])
+        if include_prices:
+            row.update(unit_price=_money(item.get("unit_price_minor")), amount=_money(item.get("amount_minor")))
+        projected.append(row)
+    metadata = ["类别：" + PURCHASE_CATEGORY_LABELS[filters["category"]]]
+    for key, label in (("supplier_id", "供应商编号"), ("order_no", "采购订单号"), ("receipt_no", "到货单号"),
+                       ("q", "物品关键词"), ("location_id", "库位编号"), ("received_from", "入库日期从"), ("received_to", "入库日期至")):
+        if filters.get(key):
+            metadata.append(f"{label}：{_text(filters[key])}")
+    if filters.get("invoice_status"):
+        metadata.append("开票状态：" + _INVOICE_LABELS[filters["invoice_status"]])
+    metadata.append("包含零库存：" + ("是" if str(filters.get("include_zero")) == "1" else "否"))
+    return _build_stock_workbook(dict(title="采购库存清单", metadata=metadata, columns=columns, rows=projected))

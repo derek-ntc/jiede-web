@@ -12071,10 +12071,7 @@ def purchase_orders(category):
 @permission_required("purchase_inventory_view")
 def purchase_inventory(category):
     category = purchase_category_from_slug(category)
-    filters = {key: request.args.get(key, "").strip() for key in (
-        "supplier_id", "order_no", "receipt_no", "q", "location_id", "received_from", "received_to",
-        "invoice_status", "include_zero")}
-    filters["category"] = category
+    filters = purchase_inventory_filters(category)
     with get_db() as conn:
         try:
             rows = fetch_purchase_inventory(conn, filters, user_can_view_purchase_prices())
@@ -12082,8 +12079,34 @@ def purchase_inventory(category):
             abort(400, description=str(error))
         suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
         locations = conn.execute("SELECT id,code,name FROM warehouse_locations ORDER BY code,id").fetchall()
+    export_filters = {key: value for key, value in filters.items() if key != "category" and value}
     return render_template("purchase_inventory.html", rows=rows, filters=filters, suppliers=suppliers,
-                           locations=locations, **purchase_receipt_context(category))
+                           locations=locations, export_url=url_for("export_purchase_inventory", category=category.replace("_", "-"), **export_filters),
+                           **purchase_receipt_context(category))
+
+
+def purchase_inventory_filters(category):
+    filters = {key: request.args.get(key, "").strip() for key in (
+        "supplier_id", "order_no", "receipt_no", "q", "location_id", "received_from", "received_to",
+        "invoice_status", "include_zero")}
+    filters["category"] = category
+    return filters
+
+
+@app.route("/admin/purchase-inventory/<category>/export.xlsx")
+@permission_required("purchase_inventory_view")
+def export_purchase_inventory(category):
+    from procurement_documents import build_purchase_inventory_workbook
+    category = purchase_category_from_slug(category)
+    filters = purchase_inventory_filters(category)
+    with get_db() as conn:
+        try:
+            rows = fetch_purchase_inventory(conn, filters, user_can_view_purchase_prices())
+        except ValueError as error:
+            abort(400, description=str(error))
+    return send_file(build_purchase_inventory_workbook(filters, rows, include_prices=user_can_view_purchase_prices()),
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True,
+                     download_name=f"purchase-inventory-{category}.xlsx")
 
 
 def purchase_inventory_change(lot_id, action):
@@ -12274,25 +12297,35 @@ def new_purchase_receipt(category, order_id):
 @app.route("/admin/purchase-receipts/records/<int:receipt_id>")
 @permission_required("purchase_receipt")
 def purchase_receipt_detail(receipt_id):
+    from procurement_inventory import load_purchase_receipt_document
     with get_db() as conn:
-        receipt = conn.execute("SELECT * FROM purchase_receipts WHERE id=?", (receipt_id,)).fetchone()
-        if receipt is None:
+        try:
+            receipt, rows = load_purchase_receipt_document(conn, receipt_id, include_prices=user_can_view_purchase_prices())
+        except PurchaseInventoryConflict:
             abort(404)
-        order, items = load_purchase_order(conn, receipt["purchase_order_id"])
-        ordered = {item["id"]: dict(item) for item in items}
-        rows = []
-        for row in conn.execute("SELECT i.*, w.code AS location_code,w.name AS location_name,l.lot_no,l.id AS lot_id "
-                                "FROM purchase_receipt_items i JOIN warehouse_locations w ON w.id=i.location_id "
-                                "LEFT JOIN purchase_inventory_lots l ON l.origin_receipt_item_id=i.id AND l.source_kind='receipt' "
-                                "WHERE i.receipt_id=? ORDER BY i.id", (receipt_id,)):
-            item = dict(row)
-            item["ordered"] = ordered[item["purchase_order_item_id"]]
-            item["differences"] = [field for field in ACTUAL_FIELDS if item[field] != item["ordered"][field]]
-            rows.append(item)
         can_void, void_reason = receipt_voidability(conn, receipt_id)
-    return render_template("purchase_receipt_detail.html", receipt=dict(receipt), order=purchase_receipt_projection(dict(order)),
-                           rows=purchase_receipt_projection(rows), can_void=can_void, void_reason=void_reason,
-                           **purchase_receipt_context(order["category"]))
+    return render_template("purchase_receipt_detail.html", receipt=receipt, order=receipt,
+                           rows=rows, can_void=can_void, void_reason=void_reason,
+                           **purchase_receipt_context(receipt["category"]))
+
+
+@app.route("/admin/purchase-receipts/records/<int:receipt_id>/export.<export_format>")
+@permission_required("purchase_receipt")
+def export_purchase_receipt(receipt_id, export_format):
+    from procurement_documents import build_purchase_receipt_workbook, build_purchase_receipt_pdf
+    from procurement_inventory import load_purchase_receipt_document
+    if export_format not in {"xlsx", "pdf"}:
+        abort(404)
+    with get_db() as conn:
+        try:
+            receipt, rows = load_purchase_receipt_document(conn, receipt_id, include_prices=user_can_view_purchase_prices())
+        except PurchaseInventoryConflict:
+            abort(404)
+    builder = build_purchase_receipt_workbook if export_format == "xlsx" else build_purchase_receipt_pdf
+    return send_file(builder(receipt, rows, include_prices=user_can_view_purchase_prices()),
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if export_format == "xlsx" else "application/pdf",
+                     as_attachment=export_format == "xlsx" or request.args.get("download") == "1",
+                     download_name=f"{receipt['receipt_no']}-purchase-receipt.{export_format}")
 
 
 @app.route("/admin/purchase-receipts/records/<int:receipt_id>/void", methods=["POST"])
@@ -12392,7 +12425,7 @@ def purchase_order_detail(order_id, category=None):
 @app.after_request
 def prevent_purchase_export_caching(response):
     # Also cover routing-level 404s (invalid IDs), cancelled orders, and redirects.
-    if re.fullmatch(r"/admin/purchases/orders/[^/]+/export\.[^/]+", request.path):
+    if re.fullmatch(r"/admin/(?:purchases/orders/[^/]+|purchase-receipts/records/[^/]+|purchase-inventory/[^/]+)/export\.[^/]+", request.path):
         response.headers["Cache-Control"] = "private, no-store"
     return response
 

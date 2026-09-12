@@ -17,9 +17,9 @@ class PurchaseInventoryTests(unittest.TestCase):
 
     def setUp(self):
         self.setUp_receipt()
+        self.conn.execute("UPDATE purchase_orders SET order_no='PO-RAW' WHERE id=?", (self.order_id,))
         self.post(self.payload(qualified="100"))
         self.lot_id = self.scalar("SELECT id FROM purchase_inventory_lots")
-        self.conn.execute("UPDATE purchase_orders SET order_no='PO-RAW' WHERE id=?", (self.order_id,))
         self.conn.execute("INSERT INTO warehouse_locations VALUES (2,'RAW-B','备用区',1),(3,'OLD','停用',0)")
         self.conn.commit()
 

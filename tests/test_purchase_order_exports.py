@@ -38,9 +38,12 @@ def pdf_pages(stream):
     executable = shutil.which("pdftotext")
     if not executable:
         raise unittest.SkipTest("PDF text QA requires Poppler pdftotext")
-    result = subprocess.run([executable, "-layout", "-", "-"], input=stream.getvalue(),
+    # Content-order extraction keeps wrapped cells together; -layout interleaves
+    # neighboring columns between the lines of one long value. Visual layout is
+    # verified separately with rendered PNGs, not inferred from text ordering.
+    result = subprocess.run([executable, "-raw", "-", "-"], input=stream.getvalue(),
                             capture_output=True, check=True)
-    return [page for page in result.stdout.decode().split("\f") if page.strip()]
+    return [page.replace("\n", "") for page in result.stdout.decode().split("\f") if page.strip()]
 
 
 def workbook_text(stream):
@@ -51,6 +54,25 @@ class PurchaseOrderBuilderTests(unittest.TestCase):
     def setUp(self):
         self.docs = importlib.import_module("procurement_documents")
         self.order, self.items = sample_order(), sample_items()
+
+    def test_raw_material_numeric_cells_use_general_format(self):
+        items = sample_items()
+        items[0].update(length="1200.5", width="600", thickness="2.5", ordered_quantity="3")
+        sheet = load_workbook(self.docs.build_purchase_order_workbook(sample_order("raw_material"), items, include_prices=False)).active
+        header = next(row for row in sheet if any(c.value == "数量" for c in row))
+        for label, value in (("长 mm", 1200.5), ("宽 mm", 600), ("厚度 mm", 2.5), ("数量", 3)):
+            cell = sheet.cell(header[0].row + 1, next(c.column for c in header if c.value == label))
+            self.assertEqual((cell.value, cell.data_type, cell.number_format), (value, "n", "General"))
+
+    def test_fixed_terms_only_on_raw_orders_and_custom_remark_separate(self):
+        terms = ("产品交付时必须标识明确，并附上产品合格证及出厂检测报告。", "订单要求纳入供应商考核，依照质量协议与物流协议。")
+        for category in ("raw_material", "carton", "outsourcing", "other"):
+            for builder, extract in ((self.docs.build_purchase_order_workbook, workbook_text), (self.docs.build_purchase_order_pdf, lambda s: "".join(pdf_pages(s)))):
+                with self.subTest(category=category, builder=builder.__name__):
+                    text = "".join(extract(builder(sample_order(category), sample_items(), include_prices=False)).split())
+                    for term in terms:
+                        self.assertEqual(term in text, category == "raw_material")
+                    self.assertIn("订单备注：请工作日送货", text)
 
     def test_carton_historical_dimension_text_exports_alongside_dimensions_and_remark(self):
         order = sample_order("carton")

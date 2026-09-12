@@ -24,6 +24,28 @@ _CATEGORY_SQL = ",".join(f"'{category}'" for category in sorted(PURCHASE_CATEGOR
 ACTUAL_FIELDS = ("item_name", "drawing_no", "material", "dimension_text",
                  "surface", "spec", "unit", "length", "width", "height", "thickness")
 INVOICE_STATUSES = {"not_required", "pending", "invoiced"}
+ORDERED_SNAPSHOT_FIELDS = (*ACTUAL_FIELDS, "ordered_quantity", "unit_price_minor")
+
+
+def _ordered_snapshot(item):
+    return json.dumps({key: item[key] for key in ORDERED_SNAPSHOT_FIELDS}, ensure_ascii=False, sort_keys=True)
+
+
+def load_purchase_receipt_document(conn, receipt_id, *, include_prices):
+    """Read saved receipt facts, never mutable order or warehouse master values."""
+    receipt = _load_receipt(conn, receipt_id)
+    rows = []
+    for source in conn.execute(
+        "SELECT i.*,l.id AS lot_id,l.lot_no FROM purchase_receipt_items i "
+        "LEFT JOIN purchase_inventory_lots l ON l.origin_receipt_item_id=i.id AND l.source_kind='receipt' "
+        "WHERE i.receipt_id=? ORDER BY i.id", (receipt_id,)):
+        row = dict(source)
+        ordered = json.loads(row.pop("ordered_snapshot_json"))
+        row["ordered"] = {key: ordered.get(key) for key in ORDERED_SNAPSHOT_FIELDS
+                          if include_prices or key != "unit_price_minor"}
+        row["differences"] = [key for key in ACTUAL_FIELDS if row[key] != row["ordered"][key]]
+        rows.append(row)
+    return receipt, rows
 
 
 class PurchaseInventoryConflict(ValueError):
@@ -202,9 +224,13 @@ def post_purchase_receipt(conn, payload: dict, actor: str, now: str) -> dict:
         header = {field: normalized[field] for field in ("purchase_order_id", "received_at", "remark", "idempotency_key")}
         header.update(receipt_no=_inventory_number("PR", normalized["received_at"]), status="posted", payload_hash=digest,
                       created_by=actor, posted_by=actor, created_at=now, posted_at=now)
+        header.update({key: order[key] for key in ("order_no", "category", "supplier_name")})
         receipt_id = _insert_inventory_record(conn, "purchase_receipts", header)
         for row in normalized["rows"]:
-            receipt_item_id = _insert_inventory_record(conn, "purchase_receipt_items", dict(row, receipt_id=receipt_id))
+            location = next(item for item in current["locations"] if item["id"] == row["location_id"])
+            receipt_item_id = _insert_inventory_record(conn, "purchase_receipt_items", dict(
+                row, receipt_id=receipt_id, location_code=location["code"], location_name=location["name"],
+                ordered_snapshot_json=_ordered_snapshot(items[row["purchase_order_item_id"]])))
             if row["qualified_quantity"] == 0:
                 continue
             lot = {field: row[field] for field in ACTUAL_FIELDS}
@@ -213,6 +239,7 @@ def post_purchase_receipt(conn, payload: dict, actor: str, now: str) -> dict:
                        supplier_id=order["supplier_id"], supplier_name=order["supplier_name"],
                        purchase_order_id=order["id"], purchase_order_item_id=row["purchase_order_item_id"],
                        receipt_id=receipt_id, location_id=row["location_id"], opening_quantity=row["qualified_quantity"],
+                       location_code=location["code"], location_name=location["name"],
                        available_quantity=row["qualified_quantity"], unit_price_minor=items[row["purchase_order_item_id"]]["unit_price_minor"],
                        currency=order["currency"], invoice_status=row["invoice_status"], created_at=now, updated_at=now)
             lot_id = _insert_inventory_record(conn, "purchase_inventory_lots", lot)
@@ -274,7 +301,7 @@ def fetch_purchase_inventory(conn, filters: dict, include_prices: bool) -> list[
     columns = ["id", "lot_no", "category", "origin_receipt_item_id", "source_lot_id", "source_kind",
                *ACTUAL_FIELDS, "supplier_id", "supplier_name", "purchase_order_id", "purchase_order_item_id",
                "receipt_id", "location_id", "opening_quantity", "available_quantity", "invoice_status",
-               "version", "created_at", "updated_at"]
+               "version", "created_at", "updated_at", "location_code", "location_name"]
     if include_prices:
         columns += ["unit_price_minor", "currency"]
     where, params = ["l.category=?"], [category]
@@ -284,7 +311,7 @@ def fetch_purchase_inventory(conn, filters: dict, include_prices: bool) -> list[
         if filters.get(field):
             where.append(f"l.{field}=?")
             params.append(_purchase_id(filters[field]))
-    for field, column in (("order_no", "o.order_no"), ("receipt_no", "r.receipt_no")):
+    for field, column in (("order_no", "r.order_no"), ("receipt_no", "r.receipt_no")):
         value = normalize_purchase_text(filters.get(field))
         if value:
             where.append(f"instr({column},?)>0")
@@ -306,9 +333,8 @@ def fetch_purchase_inventory(conn, filters: dict, include_prices: bool) -> list[
         where.append("l.invoice_status=?")
         params.append(status)
     rows = conn.execute("SELECT " + ",".join(f"l.{field}" for field in columns) +
-                        ",o.order_no,r.receipt_no,r.received_at,w.code AS location_code,w.name AS location_name "
-                        "FROM purchase_inventory_lots l JOIN purchase_orders o ON o.id=l.purchase_order_id "
-                        "JOIN purchase_receipts r ON r.id=l.receipt_id JOIN warehouse_locations w ON w.id=l.location_id "
+                        ",r.order_no,r.receipt_no,r.received_at "
+                        "FROM purchase_inventory_lots l JOIN purchase_receipts r ON r.id=l.receipt_id "
                         "WHERE " + " AND ".join(where) + " ORDER BY l.id DESC", params).fetchall()
     result = [dict(row) for row in rows]
     if include_prices:
@@ -397,7 +423,7 @@ def transfer_purchase_inventory(conn, lot_id: int, quantity: int, target_locatio
             return existing
         source = _stock_lot(conn, payload["lot_id"], payload["expected_version"])
         quantity = payload["quantity"]
-        target = conn.execute("SELECT enabled FROM warehouse_locations WHERE id=?", (target_location_id,)).fetchone()
+        target = conn.execute("SELECT enabled,code,name FROM warehouse_locations WHERE id=?", (target_location_id,)).fetchone()
         if target is None or not target["enabled"] or source["location_id"] == target_location_id:
             raise PurchaseInventoryConflict("请选择与原库位不同的启用库位")
         if source["available_quantity"] < quantity:
@@ -409,6 +435,7 @@ def transfer_purchase_inventory(conn, lot_id: int, quantity: int, target_locatio
         lot = {k: v for k, v in source.items() if k != "id"}
         lot.update(lot_no=_inventory_number("PIL", now[:10]), source_lot_id=source["id"], source_kind="transfer",
                    location_id=target_location_id, opening_quantity=quantity, available_quantity=quantity,
+                   location_code=target["code"], location_name=target["name"],
                    version=1, created_at=now, updated_at=now)
         target_lot_id = _insert_inventory_record(conn, "purchase_inventory_lots", lot)
         common = dict(related_type="operation", related_id=operation_id, from_location_id=source["location_id"],
@@ -636,6 +663,28 @@ def ensure_purchase_inventory_tables(conn) -> None:
         )
         """
     )
+    # Old receipts can only be reconstructed from their linked values at migration
+    # time. Backfill once; later startup must never overwrite saved snapshots.
+    for table, names in (("purchase_receipts", ("order_no", "category", "supplier_name")),
+                         ("purchase_receipt_items", ("location_code", "location_name", "ordered_snapshot_json")),
+                         ("purchase_inventory_lots", ("location_code", "location_name"))):
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name in names:
+            if name not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+    conn.execute("UPDATE purchase_receipts SET " + ",".join(
+        f"{key}=(SELECT {key} FROM purchase_orders WHERE id=purchase_receipts.purchase_order_id)"
+        for key in ("order_no", "category", "supplier_name")) + " WHERE category=''")
+    legacy = conn.execute("SELECT id,purchase_order_item_id,location_id FROM purchase_receipt_items WHERE ordered_snapshot_json='' ").fetchall()
+    for row in legacy:
+        item = conn.execute("SELECT * FROM purchase_order_items WHERE id=?", (row[1],)).fetchone()
+        location = conn.execute("SELECT code,name FROM warehouse_locations WHERE id=?", (row[2],)).fetchone()
+        conn.execute("UPDATE purchase_receipt_items SET ordered_snapshot_json=?,location_code=?,location_name=? WHERE id=?",
+                     (_ordered_snapshot(item), location[0], location[1], row[0]))
+    conn.execute("UPDATE purchase_inventory_lots SET "
+                 "location_code=(SELECT code FROM warehouse_locations WHERE id=purchase_inventory_lots.location_id),"
+                 "location_name=(SELECT name FROM warehouse_locations WHERE id=purchase_inventory_lots.location_id) "
+                 "WHERE location_code=''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS purchase_inventory_operations (
