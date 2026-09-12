@@ -34,15 +34,16 @@ class Column:
 
 
 _MATERIAL = Column("material", "材质", 15)
-_LENGTH = Column("length", "长", 10, "number")
-_WIDTH = Column("width", "宽", 10, "number")
+_LENGTH = Column("length", "长 mm", 10, "number")
+_WIDTH = Column("width", "宽 mm", 10, "number")
 _QUANTITY = Column("ordered_quantity", "数量", 15, "number")
-_TAIL = (Column("unit", "单位", 7, optional=True), _QUANTITY)
+_UNIT = Column("unit", "单位", 7)
+_TAIL = (_QUANTITY, _UNIT)
 _PRICES = (Column("unit_price", "单价", 16, "money"), Column("line_total", "金额", 17, "money"))
-_END = (Column("expected_at", "预计到货日期", 17, "date"), Column("remark", "其他要求", 29))
+_END = (Column("expected_at", "预计到货日期", 19, "date"), Column("remark", "备注", 29))
 CATEGORY_DOCUMENT_COLUMNS = {
-    "raw_material": (_MATERIAL, _LENGTH, _WIDTH, Column("thickness", "厚度", 10, "number"), Column("surface", "表面", 14), _QUANTITY, *_END),
-    "carton": (_MATERIAL, _LENGTH, _WIDTH, Column("height", "高", 10, "number"), _QUANTITY, *_PRICES, *_END),
+    "raw_material": (Column("item_name", "物品名称", 20), _MATERIAL, _LENGTH, _WIDTH, Column("thickness", "厚度 mm", 12, "number"), Column("surface", "表面", 14), *_TAIL, *_END),
+    "carton": (Column("item_name", "物品名称", 20), _MATERIAL, _LENGTH, _WIDTH, Column("height", "高 mm", 10, "number"), Column("dimension_text", "尺寸说明/历史尺寸", 24), *_TAIL, *_PRICES, *_END),
     "outsourcing": (Column("identity", "物品／图号", 27), _MATERIAL, Column("details", "尺寸／厚度／表面", 30, optional=True), *_TAIL, *_PRICES, *_END),
     "other": (Column("identity", "物品／规格", 30), Column("details", "材质／尺寸／厚度／表面", 34, optional=True), *_TAIL, *_PRICES, *_END),
 }
@@ -96,12 +97,6 @@ def purchase_document_view(order, items, *, include_prices):
                 value = _join(item.get("item_name"), item.get("drawing_no" if category == "outsourcing" else "spec"))
             elif column.key == "details":
                 value = details
-            elif column.key == "remark" and category == "carton" and item.get("dimension_text"):
-                # Keep the established carton columns/print widths, while exposing
-                # free-text historical dimensions alongside the numeric columns.
-                value = "尺寸说明/历史尺寸：" + _text(item["dimension_text"])
-                if item.get("remark"):
-                    value += "\n" + _text(item["remark"])
             elif column.kind == "money":
                 value = _money(item.get(column.key + "_minor"))
             elif column.kind == "date":
@@ -125,7 +120,10 @@ def purchase_document_view(order, items, *, include_prices):
     company.extend(label + _text(profile[key]) for key, label in (("address", "地址："), ("contact", "联系人："), ("phone", "电话："), ("email", "邮箱：")) if profile.get(key))
     result = dict(order_no=_text(order["order_no"]), category=PURCHASE_CATEGORY_LABELS[category],
                   status=PURCHASE_STATUS_LABELS[order["status"]], purchased_at=date.fromisoformat(order["purchased_at"]),
-                  supplier=[line for line in supplier if line], delivery=delivery, company=company, columns=columns, rows=rows)
+                  supplier=[line for line in supplier if line], delivery=delivery, company=company, columns=columns, rows=rows,
+                  supplier_fields={key: _text(order.get("supplier_" + key)) for key in ("name", "code", "contact", "phone", "email", "address")},
+                  delivery_fields={key: _text(order.get(key)) for key in ("delivery_address", "recipient", "recipient_phone", "remark")},
+                  created_by=_text(order.get("created_by")))
     if any(column.kind == "money" for column in columns):
         totals = [row["line_total"] for row in rows]
         result["total"] = sum(totals, Decimal(0)) if all(value is not None for value in totals) else None
@@ -164,8 +162,8 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
             widths[index] = max([widths[index]] + [len(label) + 3 for label in labels])
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[get_column_letter(index)].width = width
-    font = Font(name="Arial Unicode MS", size=11, color="202833")
-    rule = Side(style="hair", color="BFC7CF")
+    font = Font(name="Arial Unicode MS", size=10, color="000000")
+    rule = Side(style="thin", color="000000")
 
     def write(row, col, value, *, kind="text", bold=False, center=False):
         if kind == "money":
@@ -173,36 +171,62 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
         cell = sheet.cell(row, col, value)
         if isinstance(value, str):
             cell.data_type = "s"  # Never interpret supplier/item text as Excel formulas.
-        cell.font = Font(name=font.name, size=font.sz, color="202833", bold=bold)
+        cell.font = Font(name=font.name, size=font.sz, color="000000", bold=bold)
         cell.alignment = Alignment(horizontal="center" if center else "right" if kind in ("number", "money") else "left", vertical="center", wrap_text=True)
         cell.number_format = {"money": '"¥"#,##0.00', "date": "yyyy-mm-dd", "number": "#,##0.########"}.get(kind, "General")
         return cell
 
-    def full_line(value, *, bold=False, center=False, size=11):
+    def full_line(value, *, bold=False, center=False, size=10, bordered=False):
         for start in range(0, len(lines := _wrapped_lines(value, 138)), 12):
             row = sheet.max_row + 1 if sheet.cell(1, 1).value is not None else 1
             sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=count)
             cell = write(row, 1, "\n".join(lines[start:start + 12]), bold=bold, center=center)
-            cell.font = Font(name=font.name, size=size, color="202833", bold=bold)
+            cell.font = Font(name=font.name, size=size, color="000000", bold=bold)
             sheet.row_dimensions[row].height = max(size + 10, len(lines[start:start + 12]) * 16 + 7)
+            if bordered:
+                for col in range(1, count + 1):
+                    sheet.cell(row, col).border = Border(top=rule, bottom=rule, left=rule, right=rule)
 
+    def paired_line(left_label, left_value, right_label, right_value, *, left_kind="text"):
+        # The middle table column may be a narrow unit column. Pick a nearby
+        # label column that can hold Chinese header labels without extra lines.
+        middle = min((index for index in range(3, count) if widths[index - 1] >= 10),
+                     key=lambda index: abs(index - (count // 2 + 1)), default=count // 2 + 1)
+        sections = ((1, left_label, "text"), (2, left_value, left_kind),
+                    (middle, right_label, "text"), (middle + 1, right_value, "text"))
+        spans = {2: middle - 1, middle + 1: count}
+        text_lines = {col: _wrapped_lines(value, max(4, sum(widths[col - 1:spans.get(col, col)]) - 2))
+                      for col, value, kind in sections if kind == "text"}
+        for chunk in range(max([1] + [(len(lines) + 11) // 12 for lines in text_lines.values()])):
+            row = sheet.max_row + 1
+            height = 1
+            for col, value, kind in sections:
+                if col in spans:
+                    sheet.merge_cells(start_row=row, start_column=col, end_row=row, end_column=spans[col])
+                if kind == "text":
+                    lines = text_lines[col][chunk * 12:(chunk + 1) * 12]
+                    value = "\n".join(lines)
+                    height = max(height, len(lines))
+                elif chunk:
+                    value = None
+                write(row, col, value, kind=kind)
+            for col in range(1, count + 1):
+                sheet.cell(row, col).border = Border(top=rule, bottom=rule, left=rule, right=rule)
+            sheet.row_dimensions[row].height = max(22, height * 14 + 7)
+
+    full_line(model["company"][0], bold=True, center=True, size=16)
     full_line("采购订单", bold=True, center=True, size=20)
-    full_line(model["order_no"], center=True)
-    full_line(f"{model['category']}    状态：{model['status']}")
-    row = sheet.max_row + 1
-    write(row, 1, "采购日期：")
-    sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
-    write(row, 2, model["purchased_at"], kind="date")
-    sheet.row_dimensions[row].height = 24
-    for line in model["supplier"]:
-        full_line(line)
-    if "total" in model:
-        full_line("币种：RMB／人民币")
+    supplier = model["supplier_fields"]
+    paired_line("供应商：", supplier["name"], "代码：", supplier["code"])
+    paired_line("联系人：", supplier["contact"], "电话：", supplier["phone"])
+    paired_line("供应商地址：", supplier["address"], "订单号：", model["order_no"])
+    full_line("邮箱：" + supplier["email"], bordered=True)
+    full_line(f"{model['category']}明细    状态：{model['status']}" + ("    币种：RMB／人民币" if "total" in model else ""), center=True)
     header_row = sheet.max_row + 1
     for index, column in enumerate(columns, 1):
         cell = write(header_row, index, column.label, bold=True, center=True)
-        cell.fill = PatternFill("solid", fgColor="E8EDF2")
-        cell.border = Border(top=rule, bottom=rule, right=rule)
+        cell.fill = PatternFill("solid", fgColor="F0F0F0")
+        cell.border = Border(top=rule, bottom=rule, left=rule, right=rule)
     sheet.row_dimensions[header_row].height = 34
     for source in model["rows"]:
         # Split exceptionally long text into continuation rows, never clip at Excel's height limit.
@@ -226,8 +250,8 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
                     height = max(height, len(_wrapped_lines(cell.value, max(4, widths[index - 1] - 2))))
                 if column.kind == "date":
                     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = Border(bottom=rule, right=rule)
-            sheet.row_dimensions[row].height = max(29, height * 16 + 8)
+                cell.border = Border(top=rule, bottom=rule, left=rule, right=rule)
+            sheet.row_dimensions[row].height = max(26, height * 14 + 8)
     if "total" in model:
         row = sheet.max_row + 1
         total_column = count // 2 + 1
@@ -237,9 +261,13 @@ def build_purchase_order_workbook(order, items, *, include_prices: bool) -> Byte
         total = write(row, total_column, model["total"] if model["total"] is not None else "未完整录价", kind="money", bold=True)
         total_width = sum(widths[total_column - 1:])
         sheet.row_dimensions[row].height = max(29, len(_wrapped_lines(total.value, max(4, total_width - 2))) * 16 + 8)
-    full_line("\n".join(model["delivery"][:2]))
-    for line in model["delivery"][2:] + model["company"]:
-        full_line(line)
+    full_line("\n".join(model["delivery"][:2]), bordered=True)
+    for line in model["delivery"][2:]:
+        full_line(line, bordered=True)
+    paired_line("下单日期：", model["purchased_at"], "经办人：", model["created_by"], left_kind="date")
+    paired_line("确认回传", "", "签字：", "")
+    if model["company"][1:]:
+        full_line("    ".join(model["company"][1:]))
     sheet.freeze_panes = f"A{header_row + 1}"
     sheet.print_title_rows = f"{header_row}:{header_row}"
     sheet.print_area = f"A1:{get_column_letter(count)}{sheet.max_row}"

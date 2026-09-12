@@ -71,8 +71,8 @@ class PurchaseOrderBuilderTests(unittest.TestCase):
 
     def test_category_columns_do_not_export_irrelevant_storage_fields(self):
         contracts = {
-            "raw_material": (["材质", "长", "宽", "厚度", "表面", "数量", "预计到货日期", "其他要求"], ["高", "图号", "规格", "单价"]),
-            "carton": (["材质", "长", "宽", "高", "数量", "单价", "金额", "预计到货日期", "其他要求"], ["厚度", "表面", "图号"]),
+            "raw_material": (["物品名称", "材质", "长 mm", "宽 mm", "厚度 mm", "表面", "数量", "单位", "预计到货日期", "备注"], ["高 mm", "图号", "规格", "单价"]),
+            "carton": (["物品名称", "材质", "长 mm", "宽 mm", "高 mm", "尺寸说明/历史尺寸", "数量", "单位", "单价", "金额", "预计到货日期", "备注"], ["厚度 mm", "表面", "图号"]),
             "outsourcing": (["物品／图号", "材质", "尺寸／厚度／表面", "单位", "数量", "单价", "金额"], ["规格", "高"]),
             "other": (["物品／规格", "材质／尺寸／厚度／表面", "单位", "数量", "单价", "金额"], ["图号", "高"]),
         }
@@ -87,12 +87,12 @@ class PurchaseOrderBuilderTests(unittest.TestCase):
                     self.assertNotIn(value, header)
                 text = "".join(pdf_pages(self.docs.build_purchase_order_pdf(sample_order(category), self.items, include_prices=True)))
                 for value in required:
-                    self.assertIn(value, "".join(text.split()))
+                    self.assertIn("".join(value.split()), "".join(text.split()))
 
-    def test_raw_and_carton_have_exact_document_columns_without_unit(self):
+    def test_raw_and_carton_have_complete_template_columns_in_order(self):
         for category, expected in {
-            "raw_material": ["材质", "长", "宽", "厚度", "表面", "数量", "预计到货日期", "其他要求"],
-            "carton": ["材质", "长", "宽", "高", "数量", "单价", "金额", "预计到货日期", "其他要求"],
+            "raw_material": ["物品名称", "材质", "长 mm", "宽 mm", "厚度 mm", "表面", "数量", "单位", "预计到货日期", "备注"],
+            "carton": ["物品名称", "材质", "长 mm", "宽 mm", "高 mm", "尺寸说明/历史尺寸", "数量", "单位", "单价", "金额", "预计到货日期", "备注"],
         }.items():
             with self.subTest(category=category):
                 order = sample_order(category)
@@ -100,7 +100,8 @@ class PurchaseOrderBuilderTests(unittest.TestCase):
                 header = next([cell.value for cell in row] for row in sheet if any(cell.value == "数量" for cell in row))
                 self.assertEqual(header, expected)
                 pages = pdf_pages(self.docs.build_purchase_order_pdf(order, self.items, include_prices=True))
-                self.assertNotIn("单位", "".join(pages))
+                self.assertIn("单位", "".join(pages))
+                self.assertIn("精密支架001", "".join("".join(pages).split()))
 
     def test_pdf_long_detail_has_one_header_per_page_and_no_header_only_page(self):
         self.items[0]["remark"] = "到货检查" * 999 + "结束标记"
@@ -267,7 +268,7 @@ class PurchaseOrderBuilderTests(unittest.TestCase):
 
     def test_carton_header_date_print_width_and_pdf_delivery_block_stay_readable(self):
         sheet = load_workbook(self.docs.build_purchase_order_workbook(sample_order("carton"), self.items, include_prices=True)).active
-        date_cell = next(cell for cell in sheet[4] if cell.is_date)
+        date_cell = next(cell for row in sheet for cell in row if cell.value == datetime(2026, 9, 9))
         span = next((area for area in sheet.merged_cells.ranges if date_cell.coordinate in area), None)
         width = sum(sheet.column_dimensions[get_column_letter(col)].width for col in range(span.min_col, span.max_col + 1)) if span else sheet.column_dimensions[date_cell.column_letter].width
         self.assertGreaterEqual(width, 14)

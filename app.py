@@ -11993,12 +11993,17 @@ def purchase_category_from_slug(slug):
 
 
 def purchase_page_context(category):
-    fields = list(CATEGORY_VISIBLE_FIELDS[category]) + ["quantity", "unit", "expected_at", "remark"]
+    fields = [field for field in CATEGORY_VISIBLE_FIELDS[category] if field != "unit_price"] + ["quantity", "unit"]
+    if "unit_price" in CATEGORY_VISIBLE_FIELDS[category]:
+        fields.append("unit_price")
+    fields += ["expected_at", "remark"]
     if not user_can_view_purchase_prices():
         fields = [field for field in fields if field != "unit_price"]
     labels = dict(PURCHASE_FIELD_LABELS)
     if category == "carton":
         labels["dimension_text"] = "尺寸说明/历史尺寸"
+    if category in {"raw_material", "carton", "outsourcing"}:
+        labels.update(length="长 mm", width="宽 mm", height="高 mm", thickness="厚度 mm", remark="备注")
     return dict(category=category, category_slug=category.replace("_", "-"), category_labels=PURCHASE_CATEGORY_LABELS,
                 status_labels=PURCHASE_STATUS_LABELS, field_labels=labels, fields=fields)
 
@@ -12050,10 +12055,12 @@ def purchase_orders(category):
 
 
 def purchase_form_response(conn, category, order=None, items=None, error=None, submitted=None):
-    suppliers = conn.execute("SELECT id,name FROM suppliers WHERE active=1 ORDER BY name").fetchall()
+    suppliers = [dict(row) for row in conn.execute("SELECT id,code,name,contact,phone,email,address FROM suppliers WHERE active=1 ORDER BY name")]
+    saved_supplier = None if order is None else dict(id=order["supplier_id"], **{
+        field: order["supplier_" + field] for field in ("code", "name", "contact", "phone", "email", "address")})
     profiles = conn.execute("SELECT * FROM purchase_delivery_profiles WHERE active=1 ORDER BY is_default DESC,id").fetchall()
     if order is None:
-        order = dict(status="draft", purchased_at=datetime.now().date().isoformat())
+        order = dict(status="draft", purchased_at=datetime.now().date().isoformat(), created_by=current_admin_username())
         default = next((profile for profile in profiles if profile["is_default"]), None)
         if default:
             order.update(delivery_profile_id=default["id"], delivery_address=default["delivery_address"], recipient=default["recipient"], recipient_phone=default["phone"], remark=default["default_remark"])
@@ -12079,7 +12086,17 @@ def purchase_form_response(conn, category, order=None, items=None, error=None, s
         submitted_ids = {item.get("id") for item in items}
         items.extend(item for identifier, item in saved_items.items() if identifier not in submitted_ids
                      and (item.get("legacy_source") is not None or item.get("legacy_id") is not None))
-    return render_template("purchase_order_form.html", order=order, items=items, suppliers=suppliers, profiles=profiles, error=error, **purchase_page_context(category)), 400 if error else 200
+    selected_id = str(order.get("supplier_id", ""))
+    supplier_display = saved_supplier if saved_supplier and str(saved_supplier["id"]) == selected_id else next((supplier for supplier in suppliers if str(supplier["id"]) == selected_id), {})
+    supplier_options = list(suppliers)
+    if saved_supplier and not any(supplier["id"] == saved_supplier["id"] for supplier in suppliers):
+        # Keep the historical selection visible; save still requires an active supplier.
+        supplier_options.append(dict(saved_supplier, inactive=True))
+    profile = conn.execute("SELECT company_name FROM reconciliation_company_profile WHERE id=1").fetchone()
+    company_name = profile["company_name"] if profile and profile["company_name"] else "宁波市杰德机械科技有限公司"
+    return render_template("purchase_order_form.html", order=order, items=items, suppliers=supplier_options,
+                           supplier_display=supplier_display, supplier_data=dict(suppliers=suppliers, saved=saved_supplier),
+                           company_name=company_name, profiles=profiles, error=error, **purchase_page_context(category)), 400 if error else 200
 
 
 @app.route("/admin/purchases/<category>/new", methods=["GET", "POST"])
@@ -12105,8 +12122,10 @@ def new_purchase_order(category):
 def purchase_order_detail(order_id, category=None):
     with get_db() as conn:
         order, items = purchase_order_or_404(conn, order_id, category)
+        profile = conn.execute("SELECT company_name FROM reconciliation_company_profile WHERE id=1").fetchone()
+        company_name = profile["company_name"] if profile and profile["company_name"] else "宁波市杰德机械科技有限公司"
     order, items = purchase_price_projection(order, items)
-    return render_template("purchase_order_detail.html", order=order, items=items, **purchase_page_context(order["category"]))
+    return render_template("purchase_order_detail.html", order=order, items=items, company_name=company_name, **purchase_page_context(order["category"]))
 
 
 @app.after_request

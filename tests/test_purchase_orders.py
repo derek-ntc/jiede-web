@@ -299,7 +299,7 @@ class PurchaseOrderRouteTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn('value="第一行保留"', html)
         self.assertIn('value="第二行保留"', html)
-        self.assertIn('value="保留我的输入"', html)
+        self.assertIn('>保留我的输入</textarea>', html)
         self.assertNotIn("54321.99", html)
         self.assertNotIn("unit_price", html)
 
