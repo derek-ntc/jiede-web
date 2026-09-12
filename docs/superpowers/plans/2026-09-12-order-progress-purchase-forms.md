@@ -27,7 +27,7 @@
 
 **Interfaces:** Add `shipping_workflow.customer_recipient_defaults(row) -> dict` returning `recipient_name`, `recipient_phone`, `address`, `recipient_source` (`recipient`, `contact`, `missing`). Existing `create_delivery_notes(...)` and page defaults consume it. Preserve customer ID separately.
 
-- [ ] Write unit and route regression tests before production changes. Start with a behavioral assertion:
+- [x] Write unit and route regression tests before production changes. Start with a behavioral assertion:
 
 ```python
 row = dict(contact='王工', phone='012345', recipient_name='', recipient_phone='', address='仓库')
@@ -37,8 +37,8 @@ self.assertEqual((actual['recipient_name'], actual['recipient_phone']), ('王工
 
 Also test explicit recipient precedence, one dedicated field missing (no mixed contact fallback), whitespace, absent customer, explicit empty overrides, multi-customer isolation, persisted note unchanged after customer edits, and DOM customer switching/manual edits surviving preview.
 
-- [ ] Run `/Users/derek/Documents/jiede-web/.venv/bin/python -W ignore::DeprecationWarning -m unittest tests.test_recipient_defaults -v`; record the expected missing-function/default behavior failure.
-- [ ] Implement a single resolver. Its core branch is:
+- [x] Run `/Users/derek/Documents/jiede-web/.venv/bin/python -W ignore::DeprecationWarning -m unittest tests.test_recipient_defaults -v`; record the expected missing-function/default behavior failure.
+- [x] Implement a single resolver. Its core branch is:
 
 ```python
 name = str(row.get('recipient_name') or '').strip()
@@ -51,8 +51,8 @@ if not name and not phone:
 ```
 
 Convert sqlite rows to dict before use. Query contact/phone in both page and note creation. Keep explicit per-customer/assembly overrides last, including empty strings. Show contact-source warning or missing-field warning, without copying source metadata into customer records. Do not alter confirmation tokens or inventory behavior.
-- [ ] Run focused tests plus `tests.test_delivery_note_workflow`; inspect real DOM behavior tests for both modes. Run full unittest suite once before commit.
-- [ ] Commit scoped changes and report RED/GREEN, browser/default source checks, exact files and tests.
+- [x] Run focused tests plus `tests.test_delivery_note_workflow`; inspect real DOM behavior tests for both modes. Run full unittest suite once before commit.
+- [x] Commit scoped changes and report RED/GREEN, browser/default source checks, exact files and tests.
 
 ### Task 2: Order summary navigation and order-linked quantity progress
 
@@ -68,7 +68,7 @@ Convert sqlite rows to dict before use. Query contact/phone in both page and not
 - `order_production.validate_order_production_change(conn, order_id, manual_id, quantity)` prevents swapping product with linked card and quantity below recorded completion; post-update recomputation normalizes completion flags.
 - Routes: `/admin/orders/groups/<int:anchor_id>`; `/admin/production-followups/orders/<int:anchor_id>`; POST `/admin/production-followups/orders/<int:order_id>/start`; POST `/admin/production-followups/<int:followup_id>/processes/<int:step_id>/quantity`. Legacy cards accessible through `view=legacy` on existing follow-up page.
 
-- [ ] Write failing tests for grouping and persisted progress. Group fixture:
+- [x] Write failing tests for grouping and persisted progress. Group fixture:
 
 ```python
 rows = [dict(id=1, customer='A', order_no='SO1', ordered_at='2026-09-12', assembly_drawing_no='DZ30', assembly_set_quantity=100),
@@ -80,8 +80,8 @@ self.assertEqual(group_order_rows(rows)[0]['assembly_set_quantity'], 100)
 
 Exercise actual temporary DB and Flask routes: same product across orders/cards stays independent; old cards remain order_id NULL; no GET writes; duplicate start creates one card; 80/200 gives 40%; repeated 80 remains 80; invalid -1, fraction, >200 and stale versions rejected without audit/quantity changes; cross-card step IDs forbidden; order quantity 50 rejected after completion80; demand increase changes progress/status without changing80; deletion protection survives resetting quantities to0; process removal confirmation and audit retention; ordinary multi-line groups and matching-product keyword show entire group; changed anchor and customer not trusted; existing permissions/CSRF and filters preserved.
 
-- [ ] Run `python -W ignore::DeprecationWarning -m unittest tests.test_order_groups tests.test_order_production -v` with the Python path in Global Constraints; record expected failures before implementation.
-- [ ] Implement grouping as a presentation layer, not a migration that rewrites orders:
+- [x] Run `python -W ignore::DeprecationWarning -m unittest tests.test_order_groups tests.test_order_production -v` with the Python path in Global Constraints; record expected failures before implementation.
+- [x] Implement grouping as a presentation layer, not a migration that rewrites orders:
 
 ```python
 groups = {}
@@ -91,7 +91,7 @@ for row in rows:
 ```
 
 Filter by matched groups, then load all group members. Preserve ordering/sort/filter state and existing order detail actions. Use anchor IDs resolved on server. List ordinary orders by product summary/count, assembly orders by drawing/sets; dates span earliest/latest and all rows must be shipped for completed status. Do not sum mixed units. Keep old list as a reusable detail partial to preserve actions.
-- [ ] Add idempotent schema and quantity mutation service. Use `BEGIN IMMEDIATE`/existing savepoint conventions with unique non-null order_id. Quantities validate decimal digit integer strings and cap at current demand. Mutation SQL must compare version:
+- [x] Add idempotent schema and quantity mutation service. Use `BEGIN IMMEDIATE`/existing savepoint conventions with unique non-null order_id. Quantities validate decimal digit integer strings and cap at current demand. Mutation SQL must compare version:
 
 ```sql
 UPDATE production_followup_process_steps
@@ -100,9 +100,9 @@ WHERE id=? AND followup_id=? AND version=?
 ```
 
 Reject zero changed rows as conflict. Audit contains followup/order/step identity, name snapshot, before/after quantity, user/time and event, retained if a confirmed step is deleted. Start uses existing product process snapshot/remark defaults. Do not alter legacy unlinked card statuses or infer old quantities. Linked card complete/revert endpoints must funnel through new quantity mutation; existing step deletion and whole-card deletion endpoints must enforce spec guards, not only the new page. Link identity immutable; customer changes on linked card must not diverge from order.
-- [ ] Build order-first follow-up pages with real forms for quantities, explicit begin tracking, add/delete/move/remark controls, version and CSRF fields; empty process message. Summary process percent is sum(qty)/(demand*step_count), never inventory. Process card shows order identity, demand, per-process numbers and remarks. Old cards use existing layout through legacy tab. Registered routes must use existing permission names and existing menu links must lead to new default summary.
-- [ ] Cover every order editing/import/update path that can modify demand or manual_id with production guards; guard order/product deletion paths that could orphan new order links. Enforce new guards transactionally. Preserve all pre-existing finance, inventory and shipping protections.
-- [ ] Run focused new tests plus production process/customer/order/inventory/shipping regressions; full suite once. Verify browser navigation and progress with temporary fixture DB only. Commit and provide report with migration preservation, RED/GREEN and all commands/results.
+- [x] Build order-first follow-up pages with real forms for quantities, explicit begin tracking, add/delete/move/remark controls, version and CSRF fields; empty process message. Summary process percent is sum(qty)/(demand*step_count), never inventory. Process card shows order identity, demand, per-process numbers and remarks. Old cards use existing layout through legacy tab. Registered routes must use existing permission names and existing menu links must lead to new default summary.
+- [x] Cover every order editing/import/update path that can modify demand or manual_id with production guards; guard order/product deletion paths that could orphan new order links. Enforce new guards transactionally. Preserve all pre-existing finance, inventory and shipping protections.
+- [x] Run focused new tests plus production process/customer/order/inventory/shipping regressions; full suite once. Verify browser navigation and progress with temporary fixture DB only. Commit and provide report with migration preservation, RED/GREEN and all commands/results.
 
 ### Task 3: Purchase order-style forms and template-based Excel
 
@@ -110,7 +110,7 @@ Reject zero changed rows as conflict. Audit contains followup/order/step identit
 
 **Interfaces:** Keep `build_purchase_order_workbook(order, items, *, include_prices) -> BytesIO` and `purchase_document_view(...)`. Extend display model with structured supplier/header/delivery fields while retaining current PDF fields. Use supplier snapshot from saved order, current supplier data only for newly selected supplier. Page default JSON whitelists supplier id/code/name/contact/phone/email/address (no bank fields or prices).
 
-- [ ] Read user template with spreadsheet skill: `/Users/derek/Desktop/原材料采购模板.xlsx`. Do not edit it or import its example data. Add workbook behavior tests using openpyxl:
+- [x] Read user template with spreadsheet skill: `/Users/derek/Desktop/原材料采购模板.xlsx`. Do not edit it or import its example data. Add workbook behavior tests using openpyxl:
 
 ```python
 sheet = load_workbook(build_purchase_order_workbook(order, items, include_prices=False)).active
@@ -123,15 +123,15 @@ self.assertIn('镀锌板', values)
 ```
 
 Also assert names/units for all categories, print area includes company row and footer, row/header repetition, numeric/date vs text safe values and leading zeros; long remark rows; no price leakage; supplier change populates visible data and switching back/edit error preserves intended snapshot; existing order old supplier snapshot remains unchanged after supplier edits; receipt/item identities unaffected.
-- [ ] Run focused tests and record RED before implementation.
-- [ ] Reshape form/detail into template zones: company/title; supplier+code/contact/phone/address/orderNo; items; receiving address/recipient/phone; remarks; purchased date/operator; save/export. Raw columns in exact order: item_name,material,length,width,thickness,surface,quantity,unit,expected_at,remark. Carton retains height/dimension_text/prices; outsourcing retains drawing/dimensions/thickness/surface/prices. Add amount display only with price permission, preserve integer-cent arithmetic and missing-price semantics.
-- [ ] Feed supplier JSON and JS selection handler without trusting submitted snapshot fields. Existing supplier display must use saved header on edit until user switches supplier. Current backend snapshot refresh behavior must match that contract on save; no automatic historical refresh.
-- [ ] Build Excel template-shaped header/footer with dynamic item rows, merge cells, black borders, readable fonts, landscape A4 `fitToWidth=1`, `fitToHeight=0`, print area from first company row through last footer, repeated item header, numeric/date cells and text-forced strings. Do not hardcode template customers/products/people; derive company metadata from current profile, recipient from saved order, dates from actual order, operator from created_by. Existing PDF must gain missing raw item_name/unit fields but no wholesale PDF restyling needed.
-- [ ] Run focused Python and Node tests and full suite once. Render/inspect short and multi-page Excel/PDF outputs in temp directory, verify no cropping/hidden company row, dates or contacts. Commit scoped changes and report artifacts/test paths and concerns.
+- [x] Run focused tests and record RED before implementation.
+- [x] Reshape form/detail into template zones: company/title; supplier+code/contact/phone/address/orderNo; items; receiving address/recipient/phone; remarks; purchased date/operator; save/export. Raw columns in exact order: item_name,material,length,width,thickness,surface,quantity,unit,expected_at,remark. Carton retains height/dimension_text/prices; outsourcing retains drawing/dimensions/thickness/surface/prices. Add amount display only with price permission, preserve integer-cent arithmetic and missing-price semantics.
+- [x] Feed supplier JSON and JS selection handler without trusting submitted snapshot fields. Existing supplier display must use saved header on edit until user switches supplier. Current backend snapshot refresh behavior must match that contract on save; no automatic historical refresh.
+- [x] Build Excel template-shaped header/footer with dynamic item rows, merge cells, black borders, readable fonts, landscape A4 `fitToWidth=1`, `fitToHeight=0`, print area from first company row through last footer, repeated item header, numeric/date cells and text-forced strings. Do not hardcode template customers/products/people; derive company metadata from current profile, recipient from saved order, dates from actual order, operator from created_by. Existing PDF must gain missing raw item_name/unit fields but no wholesale PDF restyling needed.
+- [x] Run focused Python and Node tests and full suite once. Render/inspect short and multi-page Excel/PDF outputs in temp directory, verify no cropping/hidden company row, dates or contacts. Commit scoped changes and report artifacts/test paths and concerns.
 
 ## Final integration
 
-- [ ] Independent task reviews after each deliverable, fix important findings with focused tests.
-- [ ] Full regression with `/Users/derek/Documents/jiede-web/.venv/bin/python -W ignore::DeprecationWarning -m unittest discover -s tests`, plus targeted Node tests using available Node runtime.
-- [ ] Browser check temporary-data instance only; do not use customer database for test mutations.
-- [ ] Whole-change review from starting commit `ba9caf1`; document local usage and test outcome, no push/deployment without new request.
+- [x] Independent task reviews after each deliverable, fix important findings with focused tests.
+- [x] Full regression with `/Users/derek/Documents/jiede-web/.venv/bin/python -W ignore::DeprecationWarning -m unittest discover -s tests`, plus targeted Node tests using available Node runtime.
+- [x] Browser check temporary-data instance only; do not use customer database for test mutations.
+- [x] Whole-change review from starting commit `ba9caf1`; document local usage and test outcome, no push/deployment without new request.
