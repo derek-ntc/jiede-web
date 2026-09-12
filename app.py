@@ -126,11 +126,16 @@ from procurement import (
     migrate_legacy_procurement,
     next_supplier_code,
     normalize_purchase_order_payload,
+    normalize_purchase_text,
     normalize_supplier_payload,
     supplier_snapshot,
     update_purchase_order,
 )
-from procurement_inventory import ensure_purchase_inventory_tables
+from procurement_inventory import (
+    ACTUAL_FIELDS, PurchaseInventoryConflict, ensure_purchase_inventory_tables,
+    load_receivable_orders, load_receipt_preview, receipt_preview_token,
+    post_purchase_receipt, receipt_voidability, void_purchase_receipt,
+)
 from reconciliation import (
     TAX_RATE_PPM,
     build_reconciliation_workbook,
@@ -12056,6 +12061,156 @@ def purchase_orders(category):
             orders.append(purchase_price_projection(order, items)[0])
         suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
     return render_template("purchase_orders.html", orders=orders, filters=filters, suppliers=suppliers, **purchase_page_context(category))
+
+
+def purchase_receipt_context(category):
+    context = purchase_page_context(category)
+    dimensions = {"raw_material": ["length", "width", "thickness"], "carton": ["length", "width", "height"]}
+    context.update(receipt_navigation=True, actual_fields=["item_name", "drawing_no", "material", "dimension_text",
+                   "surface", "spec", "unit"] + dimensions.get(category, ["length", "width", "height", "thickness"]),
+                   invoice_labels={"not_required": "无需开票", "pending": "待开票", "invoiced": "已开票"})
+    return context
+
+
+def purchase_receipt_projection(value):
+    """Price-blind presentation applies recursively, including conflict snapshots."""
+    if isinstance(value, dict):
+        return {key: purchase_receipt_projection(item) for key, item in value.items()
+                if user_can_view_purchase_prices() or key not in {
+                    "unit_price", "unit_price_minor", "line_total", "line_total_minor", "order_total",
+                    "amount", "amount_minor", "total_minor"}}
+    if isinstance(value, list):
+        return [purchase_receipt_projection(item) for item in value]
+    return value
+
+
+def signed_purchase_receipt_preview(preview):
+    # Signed data is readable by clients: include only a digest, never the full snapshot.
+    return URLSafeTimedSerializer(app.secret_key, salt="purchase-receipt-preview-v1").dumps(dict(
+        digest=receipt_preview_token(preview), order_id=preview["order"]["id"],
+        category=preview["order"]["category"], operator=current_admin_username()))
+
+
+def purchase_receipt_conflict_response(error):
+    data = dict(error=str(error), needs_confirmation=error.needs_confirmation)
+    if error.current is not None:
+        data.update(current=purchase_receipt_projection(error.current),
+                    preview_token=signed_purchase_receipt_preview(error.current))
+    return jsonify(**data), 409
+
+
+@app.route("/admin/purchase-receipts/<category>")
+@permission_required("purchase_receipt")
+def purchase_receipts(category):
+    category = purchase_category_from_slug(category)
+    filters = purchase_order_filters_from_request()
+    with get_db() as conn:
+        orders = []
+        for order in load_receivable_orders(conn, category, filters):
+            rows = load_receipt_preview(conn, order["id"])["rows"]
+            order.update(item_summary=" / ".join(row["item_name"] or row["drawing_no"] or row["material"] for row in rows),
+                         ordered_quantity=sum(row["ordered_quantity"] for row in rows),
+                         actual_quantity=sum(row["actual_quantity"] for row in rows),
+                         remaining_quantity=sum(row["remaining_quantity"] for row in rows))
+            orders.append(order)
+        suppliers = conn.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall()
+        records = conn.execute("SELECT r.id,r.receipt_no,r.received_at,r.status,o.order_no FROM purchase_receipts r "
+                               "JOIN purchase_orders o ON o.id=r.purchase_order_id WHERE o.category=? "
+                               "ORDER BY r.id DESC LIMIT 50", (category,)).fetchall()
+    return render_template("purchase_receipts.html", orders=purchase_receipt_projection(orders), filters=filters,
+                           suppliers=suppliers, records=records, **purchase_receipt_context(category))
+
+
+@app.route("/admin/purchase-receipts/<category>/<int:order_id>/new", methods=["GET", "POST"])
+@permission_required("purchase_receipt")
+def new_purchase_receipt(category, order_id):
+    category_slug = category
+    category = purchase_category_from_slug(category)
+    if request.method == "POST":
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify(error="提交格式无效"), 400
+        require_inventory_csrf(payload)
+        token = payload.get("preview_token")
+        try:
+            if not isinstance(token, str) or len(token) > 10000:
+                raise BadSignature("invalid token")
+            snapshot = URLSafeTimedSerializer(app.secret_key, salt="purchase-receipt-preview-v1").loads(token, max_age=7200)
+        except BadSignature:
+            return jsonify(error="预览凭证已失效，请重新打开入库页面", needs_confirmation=False), 409
+        if (not isinstance(snapshot, dict) or snapshot.get("order_id") != order_id
+                or snapshot.get("category") != category or snapshot.get("operator") != current_admin_username()):
+            abort(403)
+        payload = dict(payload, purchase_order_id=order_id, category=category, preview_token=snapshot.get("digest"))
+        try:
+            try:
+                payload["idempotency_key"] = normalize_purchase_text(payload.get("idempotency_key"))
+            except ValueError as error:
+                raise PurchaseInventoryConflict(str(error)) from error
+            with get_db() as conn:
+                # Reserve writer before retry detection so concurrent matching posts receive 200.
+                conn.execute("BEGIN IMMEDIATE")
+                purchase_order_or_404(conn, order_id, category_slug)
+                duplicate = conn.execute("SELECT 1 FROM purchase_receipts WHERE idempotency_key=?",
+                                         (payload["idempotency_key"],)).fetchone() is not None
+                result = post_purchase_receipt(conn, payload, current_admin_username(), datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"))
+        except PurchaseInventoryConflict as error:
+            return purchase_receipt_conflict_response(error)
+        return jsonify(id=result["id"], receipt_no=result["receipt_no"], status=result["status"], duplicate=duplicate,
+                       redirect_url=url_for("purchase_receipt_detail", receipt_id=result["id"])), 200 if duplicate else 201
+    with get_db() as conn:
+        purchase_order_or_404(conn, order_id, category_slug)
+        preview = load_receipt_preview(conn, order_id)
+    if preview["order"]["status"] not in {"ordered", "partially_received", "received"}:
+        abort(409, description="草稿或已取消的采购订单不能到货")
+    client_data = dict(preview_token=signed_purchase_receipt_preview(preview), csrf_token=inventory_csrf_token(),
+                       idempotency_key=secrets.token_urlsafe(32))
+    return render_template("purchase_receipt_form.html", preview=purchase_receipt_projection(preview),
+                           client_data=client_data, today=datetime.now().date().isoformat(), **purchase_receipt_context(category))
+
+
+@app.route("/admin/purchase-receipts/records/<int:receipt_id>")
+@permission_required("purchase_receipt")
+def purchase_receipt_detail(receipt_id):
+    with get_db() as conn:
+        receipt = conn.execute("SELECT * FROM purchase_receipts WHERE id=?", (receipt_id,)).fetchone()
+        if receipt is None:
+            abort(404)
+        order, items = load_purchase_order(conn, receipt["purchase_order_id"])
+        ordered = {item["id"]: dict(item) for item in items}
+        rows = []
+        for row in conn.execute("SELECT i.*, w.code AS location_code,w.name AS location_name,l.lot_no,l.id AS lot_id "
+                                "FROM purchase_receipt_items i JOIN warehouse_locations w ON w.id=i.location_id "
+                                "LEFT JOIN purchase_inventory_lots l ON l.origin_receipt_item_id=i.id AND l.source_kind='receipt' "
+                                "WHERE i.receipt_id=? ORDER BY i.id", (receipt_id,)):
+            item = dict(row)
+            item["ordered"] = ordered[item["purchase_order_item_id"]]
+            item["differences"] = [field for field in ACTUAL_FIELDS if item[field] != item["ordered"][field]]
+            rows.append(item)
+        can_void, void_reason = receipt_voidability(conn, receipt_id)
+    return render_template("purchase_receipt_detail.html", receipt=dict(receipt), order=purchase_receipt_projection(dict(order)),
+                           rows=purchase_receipt_projection(rows), can_void=can_void, void_reason=void_reason,
+                           **purchase_receipt_context(order["category"]))
+
+
+@app.route("/admin/purchase-receipts/records/<int:receipt_id>/void", methods=["POST"])
+@permission_required("purchase_receipt")
+def void_purchase_receipt_record(receipt_id):
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if not isinstance(payload, dict):
+        return jsonify(error="提交格式无效"), 400
+    require_inventory_csrf(payload)
+    try:
+        with get_db() as conn:
+            if conn.execute("SELECT 1 FROM purchase_receipts WHERE id=?", (receipt_id,)).fetchone() is None:
+                abort(404)
+            result = void_purchase_receipt(conn, receipt_id, current_admin_username(), datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"))
+    except PurchaseInventoryConflict as error:
+        return purchase_receipt_conflict_response(error)
+    redirect_url = url_for("purchase_receipt_detail", receipt_id=receipt_id)
+    if not request.is_json:
+        return redirect(redirect_url)
+    return jsonify(id=result["id"], status=result["status"], redirect_url=redirect_url)
 
 
 def purchase_form_response(conn, category, order=None, items=None, error=None, submitted=None):

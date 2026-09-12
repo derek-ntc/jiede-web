@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ category_labels[category] }}批量入库{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-inventory.css', v=static_version) }}">{% endblock %}
+{% block content %}
+{% include "purchase_tabs.html" %}
+<h1>{{ category_labels[category] }}批量入库</h1>
+<p>{{ preview.order.supplier_name }} · {{ preview.order.order_no }} · {{ preview.order.purchased_at }} · {{ status_labels[preview.order.status] }}</p>
+<p>勾选本次到货明细，核对并修改实际资料。修改仅保存为本次到货快照，不改变采购订单；仅合格数量进入库存。</p>
+<form method="post" data-receipt-form class="panel" novalidate>
+  <div class="receipt-filters"><label>到货日期<input type="date" name="received_at" value="{{ today }}" required></label><label>到货备注<input name="remark"></label></div>
+  <div class="table-wrap"><table class="receipt-editor"><thead><tr><th>本次入库</th><th>订购数量</th><th>累计到货</th><th>累计合格</th><th>剩余数量</th>{% for field in actual_fields %}<th>实际{{ field_labels[field] }}</th>{% endfor %}{% if can_view_purchase_prices %}<th>订单单价（RMB）</th>{% endif %}<th>实际到货数量</th><th>合格入库数量</th><th>仓位</th><th>发票状态</th><th>备注</th></tr></thead><tbody>
+  {% for item in preview.rows %}<tr data-receipt-row data-item-id="{{ item.id }}">
+    <td><input type="checkbox" data-row-selected aria-label="选择第 {{ loop.index }} 行" {% if item.remaining_quantity > 0 %}checked{% endif %}></td>
+    <td>{{ item.ordered_quantity }}</td><td data-current-actual>{{ item.actual_quantity }}</td><td data-current-qualified>{{ item.qualified_quantity }}</td><td data-current-remaining>{{ item.remaining_quantity }}</td>
+    {% for field in actual_fields %}<td><input data-field="{{ field }}" aria-label="实际{{ field_labels[field] }}" value="{{ item[field] if item[field] is not none else '' }}" {% if field in ['length','width','height','thickness'] %}type="number" step="any" min="0.000000001"{% endif %}></td>{% endfor %}
+    {% if can_view_purchase_prices %}<td>{{ '%.2f'|format(item.unit_price_minor / 100) if item.unit_price_minor is not none else '未录价' }}</td>{% endif %}
+    <td><input type="number" min="1" step="1" data-field="actual_quantity" aria-label="实际到货数量" value="{{ item.remaining_quantity }}" required></td>
+    <td><input type="number" min="0" step="1" data-field="qualified_quantity" aria-label="合格入库数量" value="{{ item.remaining_quantity }}" required></td>
+    <td><select data-field="location_id" aria-label="仓位" required><option value="">请选择仓位</option>{% for location in preview.locations %}<option value="{{ location.id }}">{{ location.code }} · {{ location.name }}</option>{% endfor %}</select></td>
+    <td><select data-field="invoice_status" aria-label="发票状态">{% for key,label in invoice_labels.items() %}<option value="{{ key }}" {% if key == 'pending' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+    <td><input data-field="remark" aria-label="行备注" value="{{ item.remark }}"></td>
+  </tr>{% endfor %}</tbody></table></div>
+  <p role="alert" data-receipt-message></p><div data-conflict-summary aria-live="polite"></div>
+  <button type="button" data-refresh-preview hidden>采用最新预览（保留填写值）</button>
+  <div class="form-actions"><button type="submit" {% if not preview.locations %}disabled{% endif %}>确认批量入库</button><a href="{{ url_for('purchase_receipts', category=category_slug) }}">返回列表</a></div>
+  {% if not preview.locations %}<p role="alert">没有启用的仓位，请先联系仓库管理员配置仓位。</p>{% endif %}
+  <noscript><p role="alert">批量入库需要启用 JavaScript。</p></noscript>
+  <script type="application/json" data-receipt-data>{{ client_data|tojson }}</script>
+</form>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='purchase-receipts.js', v=static_version) }}" defer></script>{% endblock %}

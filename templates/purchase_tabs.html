@@ -1,9 +1,15 @@
 <nav class="purchase-tabs" aria-label="采购分类">
-  {% if can_view_purchases %}
+  {% if can_receive_purchases and receipt_navigation %}
+  {% for key, label in [('raw_material', '原材料入库'), ('carton', '纸箱入库'), ('outsourcing', '外协入库'), ('other', '其他入库')] %}
+    <a class="button {{ 'secondary' if key != category else '' }}" href="{{ url_for('purchase_receipts', category=key.replace('_', '-')) }}" {% if key == category %}aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+  {% if can_view_purchases %}<a class="button secondary" href="{{ url_for('purchase_orders', category=category.replace('_', '-')) }}">采购订单</a>{% endif %}
+  {% elif can_view_purchases %}
   {% for key, label in [('raw_material', '原材料'), ('carton', '纸箱'), ('outsourcing', '外协'), ('other', '其他')] %}
     <a class="button {{ 'secondary' if key != category else '' }}" href="{{ url_for('purchase_orders', category=key.replace('_', '-')) }}" {% if key == category %}aria-current="page"{% endif %}>{{ label }}</a>
   {% endfor %}
   {% endif %}
+  {% if can_receive_purchases and not receipt_navigation %}<a class="button secondary" href="{{ url_for('purchase_receipts', category=(category or 'raw_material').replace('_', '-')) }}">采购订单入库</a>{% endif %}
   {% if can_manage_carton_purchases %}
     <a class="button {{ '' if request.endpoint == 'admin_arrival_records' else 'secondary' }}" href="{{ url_for('admin_arrival_records') }}" {% if request.endpoint == 'admin_arrival_records' %}aria-current="page"{% endif %}>到货记录（历史）</a>
   {% endif %}

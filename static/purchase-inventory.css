@@ -1,0 +1,12 @@
+.purchase-tabs, .receipt-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-bottom: 18px; }
+.receipt-filters label { display: grid; gap: 6px; min-width: 180px; }
+.receipt-filters p { margin: 4px 16px 4px 0; }
+.receipt-editor { min-width: 1900px; }
+.receipt-editor input:not([type="checkbox"]), .receipt-editor select { min-width: 100px; width: 100%; box-sizing: border-box; }
+.receipt-editor input[type="checkbox"] { width: 20px; height: 20px; }
+.receipt-editor td { vertical-align: top; }
+.receipt-order-value { display: block; color: #735d30; font-size: .9em; }
+[data-receipt-message]:not(:empty) { padding: 12px; background: #fff3dd; color: #713f12; border-radius: 6px; }
+[data-conflict-summary]:not(:empty) { white-space: pre-line; margin: 12px 0; padding: 12px; border: 1px solid #d6dce5; }
+.form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 18px; }
+@media (max-width: 700px) { .receipt-filters label { min-width: 0; width: 100%; } }

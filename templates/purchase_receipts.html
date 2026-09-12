@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ category_labels[category] }}入库{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-inventory.css', v=static_version) }}">{% endblock %}
+{% block content %}
+{% include "purchase_tabs.html" %}
+<h1>{{ category_labels[category] }} — 采购订单入库</h1>
+<form method="get" action="{{ url_for('purchase_receipts', category=category_slug) }}" class="panel receipt-filters">
+  <label>供应商<select name="supplier_id"><option value="">全部供应商</option>{% for supplier in suppliers %}<option value="{{ supplier.id }}" {% if filters.supplier_id == supplier.id|string %}selected{% endif %}>{{ supplier.name }}</option>{% endfor %}</select></label>
+  <label>采购订单号<input name="order_no" value="{{ filters.order_no }}"></label>
+  <label>物品关键词<input name="q" value="{{ filters.q }}" placeholder="名称、图号、材质或规格"></label>
+  <button type="submit">查询</button><a href="{{ url_for('purchase_receipts', category=category_slug) }}">清空</a>
+</form>
+<div class="table-wrap"><table><thead><tr><th>供应商</th><th>订单号</th><th>下单日期</th><th>物品摘要</th><th>状态</th><th>订购数量</th><th>累计到货</th><th>剩余数量</th><th>操作</th></tr></thead><tbody>
+{% for order in orders %}<tr><td>{{ order.supplier_name }}</td><td>{{ order.order_no }}</td><td>{{ order.purchased_at }}</td><td>{{ order.item_summary }}</td><td>{{ status_labels[order.status] }}</td><td>{{ order.ordered_quantity }}</td><td>{{ order.actual_quantity }}</td><td>{{ order.remaining_quantity }}</td><td><a class="button" href="{{ url_for('new_purchase_receipt', category=category_slug, order_id=order.id) }}">批量入库</a></td></tr>
+{% else %}<tr><td colspan="9">没有匹配的待入库采购订单。</td></tr>{% endfor %}
+</tbody></table></div>
+<h2>本类最近到货单</h2>
+<ul>{% for record in records %}<li><a href="{{ url_for('purchase_receipt_detail', receipt_id=record.id) }}">{{ record.receipt_no }}</a> · {{ record.order_no }} · {{ record.received_at }} · {{ '已作废' if record.status == 'voided' else '已过账' }}</li>{% else %}<li>暂无到货单。</li>{% endfor %}</ul>
+{% endblock %}
