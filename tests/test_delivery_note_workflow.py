@@ -246,11 +246,13 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         streams = re.findall(rb'stream\r?\n(.*?)endstream', response.data, re.S)
         text = ''.join(zlib.decompress(a85decode(stream.strip()[:-2])).decode('latin-1')
                        for stream in streams if stream.strip().endswith(b'~>'))
-        self.assertIn('ZERO-REMARK', text)
-        self.assertIn('POSITIVE-REMARK', text)
-        self.assertIn('ZERO-PDF', text)
-        self.assertIn('0', text)
-        self.assertNotIn('CNY', text)
+        # The A4 remark column may wrap a word across consecutive text draws.
+        rendered_text = ''.join(re.findall(r'\(((?:\\.|[^\\)])*)\)\s*Tj', text))
+        self.assertIn('ZERO-REMARK', rendered_text)
+        self.assertIn('POSITIVE-REMARK', rendered_text)
+        self.assertIn('ZERO-PDF', rendered_text)
+        self.assertRegex(text, r'\(0\)\s*Tj')
+        self.assertNotIn('CNY', rendered_text)
 
     def test_delivery_note_exports_template_style_excel_without_word(self):
         zero = self.create_product('ZERO-EXPORT')

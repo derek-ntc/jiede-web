@@ -20,8 +20,12 @@
         <input type="text" name="supplier" list="supplier-options" value="{{ manual.supplier }}" placeholder="选择或输入规格型号">
       </label>
       <label>
-        客户
-        <input type="text" name="customer" list="customer-options" value="{{ manual.customer }}" placeholder="选择或输入客户">
+        原客户
+        <input type="text" name="customer" list="customer-options" value="{{ manual.customer }}" {% if manual.customer %}readonly{% endif %}>
+        <span>当前适用客户：{{ linked_customers | join('、') or '未设置' }}</span>
+      </label>
+      <label>新增适用客户
+        <input type="text" name="additional_customer" list="customer-options" placeholder="选择或输入要关联的客户">
       </label>
       <datalist id="customer-options">
         {% for customer in customers %}<option value="{{ customer }}"></option>{% endfor %}

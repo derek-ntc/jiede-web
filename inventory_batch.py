@@ -46,7 +46,9 @@ def load_batch_data(conn, mode, filters):
             o.quantity AS ordered_quantity, COALESCE(o.inventory_received_quantity,0) AS received,
             o.assembly_drawing_no AS assembly,
             COALESCE((SELECT quantity_per_set FROM product_assembly_components pc
-                WHERE pc.manual_id=m.id AND pc.assembly_drawing_no=o.assembly_drawing_no COLLATE NOCASE LIMIT 1),0) AS quantity_per_set
+                WHERE pc.manual_id=m.id AND pc.assembly_drawing_no=o.assembly_drawing_no COLLATE NOCASE
+                AND COALESCE(NULLIF(TRIM(pc.customer),''),TRIM(m.customer))=TRIM(o.customer)
+                LIMIT 1),0) AS quantity_per_set
             FROM product_orders o JOIN manuals m ON m.id=o.manual_id'''
         where.append('o.order_no=?')
         params.append(order_no)
@@ -57,14 +59,26 @@ def load_batch_data(conn, mode, filters):
             where.append('o.assembly_drawing_no=? COLLATE NOCASE')
             params.append(assembly)
     else:
-        sql = f'''SELECT {fields}, TRIM(m.customer) AS customer, 0 AS order_id,
+        sql = f'''WITH batch_manuals AS (
+            SELECT m.*, COALESCE(NULLIF(?,''),
+                (SELECT TRIM(o.customer) FROM product_orders o WHERE o.manual_id=m.id
+                    AND o.order_no=? AND (?='' OR o.assembly_drawing_no=? COLLATE NOCASE)
+                    ORDER BY o.id LIMIT 1),
+                (SELECT COALESCE(NULLIF(TRIM(pc.customer),''),TRIM(m.customer))
+                    FROM product_assembly_components pc WHERE pc.manual_id=m.id
+                    AND pc.assembly_drawing_no=? COLLATE NOCASE ORDER BY pc.id LIMIT 1),
+                TRIM(m.customer)) AS batch_customer
+            FROM manuals m)
+            SELECT {fields}, m.batch_customer AS customer, 0 AS order_id,
             '' AS order_no, 0 AS ordered_quantity, 0 AS received,
             ? AS assembly, COALESCE((SELECT quantity_per_set FROM product_assembly_components pc
-              WHERE pc.manual_id=m.id AND pc.assembly_drawing_no=? COLLATE NOCASE LIMIT 1),0) AS quantity_per_set
-            FROM manuals m'''
-        params.extend([assembly, assembly])
+              WHERE pc.manual_id=m.id AND pc.assembly_drawing_no=? COLLATE NOCASE
+              AND COALESCE(NULLIF(TRIM(pc.customer),''),TRIM(m.customer))=m.batch_customer
+              LIMIT 1),0) AS quantity_per_set
+            FROM batch_manuals m'''
+        params.extend([customer, order_no, assembly, assembly, assembly, assembly, assembly])
         if customer and not order_no:
-            where.append('TRIM(m.customer)=?')
+            where.append('EXISTS (SELECT 1 FROM product_customer_names pcn WHERE pcn.manual_id=m.id AND pcn.customer=?)')
             params.append(customer)
         if order_no:
             where.append("""EXISTS (SELECT 1 FROM product_orders o WHERE o.manual_id=m.id
@@ -72,7 +86,9 @@ def load_batch_data(conn, mode, filters):
                 AND (?='' OR o.assembly_drawing_no=? COLLATE NOCASE))""")
             params.extend([order_no, customer, customer, assembly, assembly])
         elif assembly:
-            where.append('EXISTS (SELECT 1 FROM product_assembly_components pc WHERE pc.manual_id=m.id AND pc.assembly_drawing_no=? COLLATE NOCASE)')
+            where.append('''EXISTS (SELECT 1 FROM product_assembly_components pc
+                WHERE pc.manual_id=m.id AND pc.assembly_drawing_no=? COLLATE NOCASE
+                AND COALESCE(NULLIF(TRIM(pc.customer),''),TRIM(m.customer))=m.batch_customer)''')
             params.append(assembly)
     if query:
         where.append('(m.product_name LIKE ? OR m.drawing_no LIKE ? OR m.sku LIKE ?)')
@@ -106,11 +122,11 @@ def load_batch_data(conn, mode, filters):
         query_error = '产品库位明细超过 500 行，请选择具体库位后查询'
         rows = []
     customers = [r[0] for r in conn.execute("""SELECT customer FROM (
-        SELECT TRIM(customer) AS customer FROM manuals UNION SELECT TRIM(customer) FROM product_orders)
+        SELECT customer FROM product_customer_names UNION SELECT TRIM(customer) FROM product_orders)
         WHERE customer!='' ORDER BY customer COLLATE NOCASE""")]
     assemblies = [r[0] for r in conn.execute("""SELECT DISTINCT pc.assembly_drawing_no
         FROM product_assembly_components pc JOIN manuals m ON m.id=pc.manual_id
-        WHERE (?='' OR TRIM(m.customer)=?) UNION SELECT DISTINCT assembly_drawing_no
+        WHERE (?='' OR COALESCE(NULLIF(TRIM(pc.customer),''),TRIM(m.customer))=?) UNION SELECT DISTINCT assembly_drawing_no
         FROM product_orders WHERE assembly_drawing_no!='' AND (?='' OR TRIM(customer)=?) ORDER BY 1""", (customer,customer,customer,customer))]
     orders = [r[0] for r in conn.execute("SELECT DISTINCT order_no FROM product_orders WHERE (?='' OR TRIM(customer)=?) ORDER BY order_no", (customer,customer))]
     return dict(rows=rows, locations=locations, customers=customers, assemblies=assemblies, orders=orders, order_mode=order_mode, query_error=query_error)
@@ -161,7 +177,9 @@ def apply_batch(conn, snapshot, payload, token_digest, operator, transact):
                 raise ValueError('累计订单入库数量过大')
             if row['received'] + quantity > row['ordered_quantity']:
                 warnings.append(f"{row['drawing_no'] or row['product_name']} 超过订单剩余未入库数量")
-        elif mode == 'inbound' and product['customer'].strip() != row['customer']:
+        elif mode == 'inbound' and product['customer'].strip() != row['customer'] and not conn.execute(
+                'SELECT 1 FROM product_customer_names WHERE manual_id=? AND customer=?',
+                (row['manual_id'], row['customer'])).fetchone():
             raise InventoryConflict('产品客户已变化，请重新查询')
         balance = conn.execute('SELECT quantity FROM inventory_balances WHERE manual_id=? AND location_id=?', (row['manual_id'],loc)).fetchone()
         current = int(balance['quantity']) if balance else 0

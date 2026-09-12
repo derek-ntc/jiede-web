@@ -20,6 +20,9 @@
       <label>电话<input type="text" name="phone"></label>
       <label>邮箱<input type="text" name="email"></label>
       <label class="wide">地址<input type="text" name="address"></label>
+      <label>付款银行名称<input type="text" name="payment_bank_name" maxlength="200"></label>
+      <label>付款银行行号<input type="text" name="payment_bank_branch_no" maxlength="200"></label>
+      <label>付款帐号<input type="text" name="payment_account_no" maxlength="200"></label>
       <label class="wide">备注<textarea name="remark" rows="3"></textarea></label>
       <div class="wide form-actions"><button type="submit">新增供应商</button></div>
     </form>
@@ -29,13 +32,13 @@
     <div class="section-head">
       <h2>供应商列表</h2>
       <form class="search compact-search" method="get">
-        <input type="search" name="q" value="{{ query }}" placeholder="搜索编码、名称、联系人、电话、邮箱、地址或备注">
+        <input type="search" name="q" value="{{ query }}" placeholder="搜索供应商信息、付款银行、行号或帐号">
         <button type="submit">搜索</button>
         {% if query %}<a class="button secondary" href="{{ url_for('admin_suppliers') }}">清除</a>{% endif %}
       </form>
     </div>
     <div class="table-wrap"><table>
-      <thead><tr><th>状态</th><th>编码</th><th>名称</th><th>联系人</th><th>电话</th><th>邮箱</th><th>地址</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>状态</th><th>编码</th><th>名称</th><th>联系人</th><th>电话</th><th>邮箱</th><th>地址</th><th>付款银行名称</th><th>付款银行行号</th><th>付款帐号</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead>
       <tbody>
         {% for supplier in suppliers %}
           <tr>
@@ -46,6 +49,9 @@
             <td data-label="电话"><input form="supplier-form-{{ supplier.id }}" name="phone" value="{{ supplier.phone }}"></td>
             <td data-label="邮箱"><input form="supplier-form-{{ supplier.id }}" name="email" value="{{ supplier.email }}"></td>
             <td data-label="地址"><input form="supplier-form-{{ supplier.id }}" name="address" value="{{ supplier.address }}"></td>
+            <td data-label="付款银行名称"><input type="text" form="supplier-form-{{ supplier.id }}" name="payment_bank_name" value="{{ supplier.payment_bank_name }}" maxlength="200"{% if supplier.system_kind == 'legacy_unknown' %} readonly{% endif %}></td>
+            <td data-label="付款银行行号"><input type="text" form="supplier-form-{{ supplier.id }}" name="payment_bank_branch_no" value="{{ supplier.payment_bank_branch_no }}" maxlength="200"{% if supplier.system_kind == 'legacy_unknown' %} readonly{% endif %}></td>
+            <td data-label="付款帐号"><input type="text" form="supplier-form-{{ supplier.id }}" name="payment_account_no" value="{{ supplier.payment_account_no }}" maxlength="200"{% if supplier.system_kind == 'legacy_unknown' %} readonly{% endif %}></td>
             <td data-label="备注"><input form="supplier-form-{{ supplier.id }}" name="remark" value="{{ supplier.remark }}"></td>
             <td data-label="更新时间">{{ supplier.updated_at | datetime }}</td>
             <td class="actions" data-label="操作"><div class="action-buttons">
@@ -63,7 +69,7 @@
             </div></td>
           </tr>
         {% else %}
-          <tr><td colspan="10" class="empty">暂无供应商信息</td></tr>
+          <tr><td colspan="13" class="empty">暂无供应商信息</td></tr>
         {% endfor %}
       </tbody>
     </table></div>

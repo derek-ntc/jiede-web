@@ -7,6 +7,7 @@
     <table class="assembly-component-editor-table">
       <thead>
         <tr>
+          <th>适用客户</th>
           <th>组装件图号</th>
           <th>每套用量</th>
           <th>操作</th>
@@ -15,17 +16,20 @@
       <tbody data-assembly-component-rows>
         {% for component in assembly_components %}
           <tr class="assembly-component-row">
+            <td data-label="适用客户"><input type="text" name="assembly_customer" list="customer-options" value="{{ component.customer or manual.customer }}" placeholder="选择客户"></td>
             <td data-label="组装件图号"><input type="text" name="assembly_drawing_no" value="{{ component.assembly_drawing_no }}"></td>
             <td data-label="每套用量"><input type="number" name="assembly_quantity_per_set" min="1" step="1" value="{{ component.quantity_per_set }}"></td>
             <td class="actions" data-label="操作"><button type="button" class="secondary compact-button" data-remove-assembly-component-row>删除</button></td>
           </tr>
         {% endfor %}
         <tr class="assembly-component-row">
+          <td data-label="适用客户"><input type="text" name="assembly_customer" list="customer-options" value="{{ manual.customer }}" placeholder="选择客户"></td>
           <td data-label="组装件图号"><input type="text" name="assembly_drawing_no"></td>
           <td data-label="每套用量"><input type="number" name="assembly_quantity_per_set" min="1" step="1"></td>
           <td class="actions" data-label="操作"><button type="button" class="secondary compact-button" data-remove-assembly-component-row>删除</button></td>
         </tr>
         <tr hidden data-empty-assembly-component-row>
+          <td data-label="适用客户"><input type="text" name="assembly_customer" list="customer-options" placeholder="选择客户"></td>
           <td data-label="组装件图号"><input type="text" name="assembly_drawing_no"></td>
           <td data-label="每套用量"><input type="number" name="assembly_quantity_per_set" min="1" step="1"></td>
           <td class="actions" data-label="操作"><button type="button" class="secondary compact-button" data-remove-assembly-component-row>删除</button></td>

@@ -72,6 +72,9 @@
         data-product-assembly-batch
       >
         <span class="product-selection-count" data-product-selection-count aria-live="polite">已选择 0 个产品</span>
+        <label class="inline-date-field">适用客户
+          <select name="assembly_customer"><option value="">选择客户</option>{% for customer in customers %}<option value="{{ customer }}" {% if selected_customer == customer %}selected{% endif %}>{{ customer }}</option>{% endfor %}</select>
+        </label>
         <label class="inline-date-field">
           组装图号
           <input type="text" name="assembly_drawing_no" placeholder="例如 ASM-100" required>
@@ -175,7 +178,7 @@
                     <summary><span>{{ assembly_components[0].assembly_drawing_no }} × {{ assembly_components[0].quantity_per_set }}</span>{% if assembly_components|length > 1 %}<small>+{{ assembly_components|length - 1 }}</small>{% endif %}</summary>
                     <div class="product-assembly-list">
                       {% for component in assembly_components %}
-                        <div>{{ component.assembly_drawing_no }} × {{ component.quantity_per_set }}</div>
+                        <div>{{ component.customer }}：{{ component.assembly_drawing_no }} × {{ component.quantity_per_set }}</div>
                       {% endfor %}
                     </div>
                   </details>

@@ -18,7 +18,7 @@
           产品图号
           <select name="manual_id" data-product-select required>
             {% for product in products %}
-              <option value="{{ product.id }}" data-customer="{{ product.customer or '' }}" {% if product.id == order.manual_id %}selected{% endif %}>
+              <option value="{{ product.id }}" data-customer="{{ order.customer if order.customer in product.customers else product.customer or '' }}" {% if product.id == order.manual_id %}selected{% endif %}>
                 {{ product.drawing_no or "未填图号" }} - {{ product.product_name }}
               </option>
             {% endfor %}
@@ -26,7 +26,7 @@
         </label>
         <label>
           客户名称
-          <input type="text" value="{{ order.product_customer or '-' }}" data-customer-display disabled>
+          <input type="text" value="{{ order.customer or order.product_customer or '-' }}" data-customer-display disabled>
         </label>
         {% if order.assembly_drawing_no %}
           <label>

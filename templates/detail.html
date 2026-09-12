@@ -27,7 +27,7 @@
       <div><dt>产品图号</dt><dd>{{ manual.drawing_no or "-" }}</dd></div>
       <div><dt>产品名称</dt><dd>{{ manual.product_name }}</dd></div>
       <div><dt>规格型号</dt><dd>{{ manual.supplier or "-" }}</dd></div>
-      <div><dt>客户</dt><dd>{{ manual.customer or "-" }}</dd></div>
+      <div><dt>客户</dt><dd>{{ linked_customers|join('、') or manual.customer or "-" }}</dd></div>
       <div><dt>一箱数量</dt><dd>{{ manual.pack_quantity or "-" }}</dd></div>
       <div><dt>箱子尺寸</dt><dd>{{ manual.pack_carton_size or "-" }}</dd></div>
       <div><dt>一箱重量</dt><dd>{{ manual.pack_weight or "-" }}</dd></div>

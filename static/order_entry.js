@@ -4,6 +4,11 @@ function normalizeOrderEntryValue(value) {
   return (value || "").trim().toLowerCase();
 }
 
+function optionMatchesCustomer(option, customer) {
+  const names = option?.dataset.customers ? JSON.parse(option.dataset.customers) : [option?.dataset.customer || ""];
+  return names.some((name) => normalizeOrderEntryValue(name) === customer);
+}
+
 function productSelectsForRow(row) {
   return [
     row.querySelector("[data-product-drawing-select]"),
@@ -18,19 +23,20 @@ function syncProductRow(row, sourceSelect = null) {
   selects.forEach((select) => { select.value = productId; });
   const option = source?.selectedOptions?.[0];
   const customerCell = row.querySelector("[data-customer-name-cell]");
-  if (customerCell) customerCell.textContent = option?.dataset.customer || "-";
+  if (customerCell) customerCell.textContent = productId ? row._selectedCustomer || option?.dataset.customer || "-" : "-";
 }
 
 function filterProductRow(row, customerQuery) {
   const customer = normalizeOrderEntryValue(customerQuery);
   const selects = productSelectsForRow(row);
   const selected = selects.find((select) => select.value)?.selectedOptions?.[0];
-  const selectedStillVisible = !customer || normalizeOrderEntryValue(selected?.dataset.customer) === customer;
+  row._selectedCustomer = customerQuery;
+  const selectedStillVisible = !customer || optionMatchesCustomer(selected, customer);
 
   selects.forEach((select) => {
     Array.from(select.options).forEach((option) => {
       const matches = !option.value || !customer ||
-        normalizeOrderEntryValue(option.dataset.customer) === customer;
+        optionMatchesCustomer(option, customer);
       option.hidden = !matches;
       option.disabled = !matches;
     });

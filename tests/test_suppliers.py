@@ -1,8 +1,64 @@
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 import app
+from procurement import ensure_procurement_tables, normalize_supplier_payload
+
+
+BANK_FIELDS = ("payment_bank_name", "payment_bank_branch_no", "payment_account_no")
+
+
+class SupplierBankValidationTests(unittest.TestCase):
+    def test_bank_fields_are_optional_trimmed_text_and_keep_leading_zeroes(self):
+        payload = normalize_supplier_payload({
+            "name": "供方", "payment_bank_name": "  宁波银行  ",
+            "payment_bank_branch_no": " 001234 ", "payment_account_no": " 000123-456 ",
+        })
+        self.assertEqual([payload.get(field) for field in BANK_FIELDS],
+                         ["宁波银行", "001234", "000123-456"])
+        empty = normalize_supplier_payload({"name": "供方"})
+        self.assertEqual([empty.get(field) for field in BANK_FIELDS], ["", "", ""])
+
+    def test_bank_fields_accept_200_characters_after_trimming(self):
+        for field in BANK_FIELDS:
+            with self.subTest(field=field):
+                payload = normalize_supplier_payload({"name": "供方", field: " " + "银" * 200 + " "})
+                self.assertEqual(payload.get(field), "银" * 200)
+
+    def test_bank_fields_reject_more_than_200_characters(self):
+        for field in BANK_FIELDS:
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    normalize_supplier_payload({"name": "供方", field: "银" * 201})
+
+    def test_existing_supplier_schema_upgrade_is_idempotent_and_preserves_data(self):
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("""
+                CREATE TABLE suppliers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL UNIQUE, contact TEXT NOT NULL DEFAULT '',
+                    phone TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
+                    address TEXT NOT NULL DEFAULT '', remark TEXT NOT NULL DEFAULT '',
+                    active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO suppliers (code, name, created_at, updated_at)
+                VALUES ('SUP-OLD', '旧供方', '2026-09-09', '2026-09-09')
+            """)
+            ensure_procurement_tables(conn)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(suppliers)")}
+            self.assertTrue(set(BANK_FIELDS).issubset(columns))
+            row = conn.execute("SELECT name, payment_bank_name, payment_bank_branch_no, payment_account_no FROM suppliers").fetchone()
+            self.assertEqual(row, ("旧供方", "", "", ""))
+            conn.execute("UPDATE suppliers SET payment_bank_branch_no='0012', payment_account_no='000123'")
+            ensure_procurement_tables(conn)
+            row = conn.execute("SELECT name, payment_bank_branch_no, payment_account_no FROM suppliers").fetchone()
+            self.assertEqual(row, ("旧供方", "0012", "000123"))
 
 
 class SupplierManagementTests(unittest.TestCase):
@@ -184,6 +240,7 @@ class SupplierManagementTests(unittest.TestCase):
         self.assertEqual(supplier["name"], "供方甲")
         self.assertEqual(supplier["phone"], "0574-1234")
         self.assertEqual(supplier["email"], "sales@example.com")
+        self.assertEqual([supplier[field] for field in BANK_FIELDS], ["", "", ""])
         self.assertEqual(
             app.supplier_snapshot(supplier),
             {
@@ -213,6 +270,64 @@ class SupplierManagementTests(unittest.TestCase):
         self.assertIn("供应商名称已存在", duplicate_name.get_data(as_text=True))
         with app.get_db() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM suppliers").fetchone()[0], 1)
+
+    def test_supplier_bank_fields_create_display_edit_and_clear(self):
+        supplier_id = self.create_supplier(
+            "银行供方", code="SUP-BANK", payment_bank_name=" 宁波银行 ",
+            payment_bank_branch_no=" 001234 ", payment_account_no=" 000987654 ",
+        )
+        with app.get_db() as conn:
+            row = conn.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+        self.assertTrue(set(BANK_FIELDS).issubset(row.keys()))
+        self.assertEqual([row[field] for field in BANK_FIELDS], ["宁波银行", "001234", "000987654"])
+        page = self.client.get("/admin/business-partners/suppliers").get_data(as_text=True)
+        for field, value in zip(BANK_FIELDS, ("宁波银行", "001234", "000987654")):
+            self.assertIn(f'name="{field}" value="{value}"', page)
+        response = self.client.post(
+            f"/admin/business-partners/suppliers/{supplier_id}/edit",
+            data=self.supplier_data("银行供方", code="SUP-BANK", payment_bank_name=" 新银行 ",
+                                    payment_bank_branch_no=" 0001 ", payment_account_no=" 0002 "),
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            row = conn.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+            self.assertEqual([row[field] for field in BANK_FIELDS], ["新银行", "0001", "0002"])
+        self.client.post(
+            f"/admin/business-partners/suppliers/{supplier_id}/edit",
+            data=self.supplier_data("银行供方", code="SUP-BANK", **dict.fromkeys(BANK_FIELDS, "  ")),
+        )
+        with app.get_db() as conn:
+            row = conn.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+            self.assertEqual([row[field] for field in BANK_FIELDS], ["", "", ""])
+
+    def test_supplier_search_matches_each_bank_field(self):
+        self.create_supplier("有银行资料供方", payment_bank_name="独特银行", payment_bank_branch_no="00123999",
+                             payment_account_no="00098766")
+        self.create_supplier("其他供方")
+        for query in ("独特银行", "00123999", "00098766"):
+            with self.subTest(query=query):
+                response = self.client.get("/admin/business-partners/suppliers", query_string={"q": query})
+                page = response.get_data(as_text=True)
+                self.assertIn('value="有银行资料供方"', page)
+                self.assertNotIn('value="其他供方"', page)
+
+    def test_oversized_bank_fields_reject_create_and_edit_without_partial_writes(self):
+        supplier_id = self.create_supplier("原供方", code="SUP-ORIGINAL", payment_account_no="000123")
+        for field in BANK_FIELDS:
+            for action in ("create", "edit"):
+                with self.subTest(field=field, action=action):
+                    url = "/admin/business-partners/suppliers"
+                    if action == "edit":
+                        url += f"/{supplier_id}/edit"
+                    response = self.client.post(url, data=self.supplier_data(
+                        "不应保存", code="SUP-REJECTED", **{field: "x" * 201}), follow_redirects=True)
+                    self.assertIn("不能超过 200 个字符", response.get_data(as_text=True))
+                    with app.get_db() as conn:
+                        rows = conn.execute("SELECT * FROM suppliers").fetchall()
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]["name"], "原供方")
+                    self.assertTrue("payment_account_no" in rows[0].keys())
+                    self.assertEqual(rows[0]["payment_account_no"], "000123")
 
     def test_supplier_edit_rejects_blank_code_without_changing_existing_supplier(self):
         supplier_id = self.create_supplier("供方甲", code="SUP-001")

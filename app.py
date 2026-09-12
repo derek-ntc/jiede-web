@@ -138,6 +138,7 @@ from reconciliation import (
     format_unit_price_ex_tax_scaled,
 )
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
+from shared_products import ensure_shared_products, identity as product_identity, has_customer, link_customer, customer_names, customer_matches_sql
 from production_processes import (
     add_followup_process_step,
     complete_followup_process_step,
@@ -624,6 +625,7 @@ def init_db():
         ensure_production_followup_tables(conn)
         ensure_production_process_tables(conn)
         ensure_shipping_workflow_tables(conn)
+        ensure_shared_products(conn)
         ensure_indexes(conn)
         # All legacy sources must exist before the atomic, idempotent backfill.
         migrate_legacy_procurement(conn, datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -2304,7 +2306,7 @@ def get_customers_with_conn(conn):
     return conn.execute(
         """
         SELECT DISTINCT customer
-        FROM manuals
+        FROM product_customer_names
         WHERE customer IS NOT NULL AND customer != ''
         ORDER BY customer
         """
@@ -3373,6 +3375,7 @@ def save_product_materials(conn, manual_id, materials):
 
 
 def save_product_assembly_components(conn, manual_id, components, now):
+    primary = conn.execute('SELECT customer FROM manuals WHERE id=?', (manual_id,)).fetchone()[0]
     conn.execute(
         "DELETE FROM product_assembly_components WHERE manual_id = ?",
         (manual_id,),
@@ -3383,9 +3386,9 @@ def save_product_assembly_components(conn, manual_id, components, now):
         """
         INSERT INTO product_assembly_components (
             manual_id, assembly_drawing_no, quantity_per_set, sort_order,
-            created_at, updated_at
+            created_at, updated_at, customer
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -3395,6 +3398,7 @@ def save_product_assembly_components(conn, manual_id, components, now):
                 component["sort_order"],
                 now,
                 now,
+                component.get('customer', primary),
             )
             for component in components
         ],
@@ -3534,13 +3538,8 @@ def get_manual_files(conn, manual_id):
 
 
 def get_product_options(conn):
-    return conn.execute(
-        """
-        SELECT id, drawing_no, product_name, customer
-        FROM manuals
-        ORDER BY drawing_no COLLATE NOCASE ASC, product_name COLLATE NOCASE ASC
-        """
-    ).fetchall()
+    rows = conn.execute("SELECT id,drawing_no,product_name,customer FROM manuals ORDER BY drawing_no COLLATE NOCASE,product_name COLLATE NOCASE").fetchall()
+    return [dict(row, customers=customer_names(conn,row['id'])) for row in rows]
 
 
 def get_active_user_options(conn):
@@ -3920,24 +3919,30 @@ def build_product_bom_import_plan(conn, customer, rows):
             }
 
     existing_manuals_by_key = {}
+    customer_manuals_by_drawing = {}
     if customer and not any(error.startswith("客户 ") for error in errors):
         existing_manuals = conn.execute(
             """
-            SELECT id, drawing_no
+            SELECT id, drawing_no, product_name, supplier
             FROM manuals
-            WHERE customer = ? COLLATE NOCASE
-              AND TRIM(drawing_no) != ''
+            WHERE TRIM(drawing_no) != ''
             ORDER BY id ASC
             """,
-            (customer,),
+            (),
         ).fetchall()
         for manual in existing_manuals:
-            key = str(manual["drawing_no"] or "").strip().casefold()
+            key = product_identity(manual['drawing_no'], manual['product_name'], manual['supplier'])
             existing_manuals_by_key.setdefault(key, []).append(manual)
+            if has_customer(conn, manual['id'], customer):
+                customer_manuals_by_drawing.setdefault(key[0], []).append(manual)
 
     matched_manual_ids = []
     for product_key, product in products_by_key.items():
-        matches = existing_manuals_by_key.get(product_key, [])
+        matches = existing_manuals_by_key.get(product_identity(product['drawing_no'], product['product_name'], product['specification']), [])
+        own_matches = customer_manuals_by_drawing.get(product_key, [])
+        if len(own_matches) > 1 or (not matches and len(own_matches) == 1 and len(customer_names(conn, own_matches[0]['id'])) <= 1):
+            # Existing single-customer re-imports can still correct basic data.
+            matches = own_matches
         if len(matches) > 1:
             errors.append(
                 f"产品图号 {product['drawing_no']} 在客户 {customer} 下存在多条产品记录，请先处理重复产品"
@@ -3946,6 +3951,10 @@ def build_product_bom_import_plan(conn, customer, rows):
         elif matches:
             product["manual_id"] = matches[0]["id"]
             matched_manual_ids.append(matches[0]["id"])
+            if len(customer_names(conn, product['manual_id'])) > 1 or not has_customer(conn, product['manual_id'], customer):
+                current_unit = conn.execute('SELECT unit FROM manuals WHERE id=?', (product['manual_id'],)).fetchone()[0]
+                if current_unit and product['unit'] and current_unit != product['unit']:
+                    errors.append(f"共用产品 {product['drawing_no']} 的单位不一致，请核对后导入")
         else:
             product["manual_id"] = None
 
@@ -3956,9 +3965,9 @@ def build_product_bom_import_plan(conn, customer, rows):
             f"""
             SELECT manual_id, assembly_drawing_no
             FROM product_assembly_components
-            WHERE manual_id IN ({placeholders})
+            WHERE manual_id IN ({placeholders}) AND customer=? COLLATE NOCASE
             """,
-            matched_manual_ids,
+            [*matched_manual_ids, customer],
         ).fetchall()
         existing_relationships = {
             (
@@ -4043,6 +4052,13 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
             ).lastrowid
             ensure_product_inventory_code(conn, manual_id)
         else:
+            shared = len(customer_names(conn, manual_id)) > 1 or not has_customer(conn, manual_id, plan['customer'])
+            if shared:
+                current = conn.execute('SELECT sku,unit FROM manuals WHERE id=?', (manual_id,)).fetchone()
+                if product['sku'] and product['sku'] != current['sku']:
+                    conn.execute('INSERT OR IGNORE INTO product_code_aliases(code,manual_id) VALUES (?,?)', (product['sku'],manual_id))
+                product['sku'] = current['sku'] or product['sku']
+                product['unit'] = current['unit'] or product['unit']
             conn.execute(
                 """
                 UPDATE manuals
@@ -4060,6 +4076,7 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
                     manual_id,
                 ),
             )
+        link_customer(conn, manual_id, plan['customer'], now)
         manual_ids_by_key[product["product_key"]] = manual_id
 
     next_sort_order_by_manual = {}
@@ -4071,10 +4088,11 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
             FROM product_assembly_components
             WHERE manual_id = ?
               AND assembly_drawing_no = ? COLLATE NOCASE
+              AND customer = ? COLLATE NOCASE
             ORDER BY id ASC
             LIMIT 1
             """,
-            (manual_id, relationship["assembly_drawing_no"]),
+            (manual_id, relationship["assembly_drawing_no"], plan['customer']),
         ).fetchone()
         if existing:
             conn.execute(
@@ -4107,9 +4125,9 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
             """
             INSERT INTO product_assembly_components (
                 manual_id, assembly_drawing_no, quantity_per_set,
-                sort_order, created_at, updated_at
+                sort_order, created_at, updated_at, customer
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 manual_id,
@@ -4118,6 +4136,7 @@ def apply_product_bom_import(conn, customer, rows, current_user, now):
                 sort_order,
                 now,
                 now,
+                plan['customer'],
             ),
         )
 
@@ -4204,7 +4223,7 @@ def parse_order_import_workbook(upload):
     return rows, errors
 
 
-def match_order_import_items(conn, import_rows):
+def match_order_import_items(conn, import_rows, selected_customer=''):
     manual_rows = conn.execute(
         """
         SELECT id, drawing_no, product_name, customer, supplier
@@ -4222,13 +4241,20 @@ def match_order_import_items(conn, import_rows):
     for item in import_rows:
         key = item["drawing_no"].strip().lower()
         matches = manuals_by_drawing.get(key, [])
+        if selected_customer:
+            matches = [m for m in matches if has_customer(conn,m['id'],selected_customer)]
         if not matches:
             errors.append(f"第 {item['row_number']} 行图号 {item['drawing_no']} 未在产品资料中找到")
             continue
         if len(matches) > 1:
             errors.append(f"第 {item['row_number']} 行图号 {item['drawing_no']} 匹配到多个产品，请先在产品资料中确认图号唯一")
             continue
-        manual = matches[0]
+        manual = dict(matches[0])
+        names = customer_names(conn, manual['id'])
+        if not selected_customer and len(names) > 1:
+            errors.append(f"第 {item['row_number']} 行是多客户共用产品，请选择本次订单客户")
+            continue
+        manual['customer'] = selected_customer or (names[0] if names else manual['customer'])
         existing = items_by_manual_id.setdefault(
             manual["id"],
             {"manual": manual, "quantity": 0, "rows": []},
@@ -4391,7 +4417,7 @@ def get_shipment_customer_options(conn):
         SELECT customer
         FROM (
             SELECT TRIM(customer) AS customer
-            FROM manuals
+            FROM product_customer_names
             WHERE TRIM(customer) != ''
             UNION ALL
             SELECT COALESCE(NULLIF(TRIM(product_orders.customer), ''), TRIM(manuals.customer))
@@ -4458,7 +4484,7 @@ def get_assembly_options_for_customer(conn, customer):
         SELECT product_assembly_components.assembly_drawing_no
         FROM product_assembly_components
         JOIN manuals ON manuals.id = product_assembly_components.manual_id
-        WHERE manuals.customer = ?
+        WHERE product_assembly_components.customer = ?
           AND TRIM(product_assembly_components.assembly_drawing_no) != ''
         ORDER BY product_assembly_components.assembly_drawing_no COLLATE NOCASE ASC,
                  product_assembly_components.assembly_drawing_no ASC,
@@ -4495,7 +4521,7 @@ def get_assembly_definition(conn, customer, assembly_drawing_no):
                product_assembly_components.sort_order
         FROM product_assembly_components
         JOIN manuals ON manuals.id = product_assembly_components.manual_id
-        WHERE manuals.customer = ?
+        WHERE product_assembly_components.customer = ?
           AND product_assembly_components.assembly_drawing_no = ? COLLATE NOCASE
         ORDER BY product_assembly_components.sort_order ASC,
                  manuals.drawing_no COLLATE NOCASE ASC,
@@ -4569,7 +4595,6 @@ def get_component_open_orders(conn, manual_id, customer, exclude_batch_id=None):
             ) AS excluded_allocations
               ON excluded_allocations.order_id = product_orders.id
             WHERE product_orders.manual_id = ?
-              AND manuals.customer = ?
               AND COALESCE(NULLIF(TRIM(product_orders.customer), ''), manuals.customer) = ?
         ) AS ordered
         WHERE ordered.unshipped_quantity > 0
@@ -4584,7 +4609,6 @@ def get_component_open_orders(conn, manual_id, customer, exclude_batch_id=None):
             customer,
             manual_id,
             manual_id,
-            customer,
             customer,
         ),
     ).fetchall()
@@ -4762,9 +4786,9 @@ def build_assembly_shipment_preview(
     for manual_id in selected_ids:
         manual = conn.execute(
             "SELECT id AS manual_id, drawing_no, product_name, supplier AS specification "
-            "FROM manuals WHERE id = ? AND customer = ?", (manual_id, customer),
+            "FROM manuals WHERE id = ?", (manual_id,),
         ).fetchone()
-        if manual is None:
+        if manual is None or not has_customer(conn, manual_id, customer):
             raise ValueError("实际发货配件不存在或不属于所选客户")
         component = historical.get(manual_id) or components.get(manual_id)
         if component is None:
@@ -6139,12 +6163,11 @@ def fetch_shipped_orders(
         conditions.append(
             """
             (
-                product_orders.customer = ?
-                OR manuals.customer = ?
+                COALESCE(NULLIF(TRIM(product_orders.customer), ''), manuals.customer) = ?
             )
             """
         )
-        params.extend([selected_customer, selected_customer])
+        params.append(selected_customer)
 
     if shipped_at:
         conditions.append("product_order_shipments.shipped_at LIKE ?")
@@ -8686,82 +8709,13 @@ def _delivery_note_metadata_rows(payload):
 
 
 def build_delivery_note_xlsx(payload):
-    workbook = Workbook(); sheet = workbook.active; sheet.title = "送货单"; sheet.sheet_view.showGridLines = False
-    border = Border(*(Side(style="thin", color="000000") for _ in range(4)))
-    label_fill = PatternFill("solid", fgColor="FFFFFF")
-    green_fill = PatternFill("solid", fgColor="92D050")
-    header_fill = PatternFill("solid", fgColor="5C7280")
-    sheet.merge_cells("A2:H2"); sheet["A2"] = "宁波市杰德机械科技有限公司"
-    sheet["A2"].font = Font(name="宋体", size=18); sheet["A2"].fill = green_fill; sheet["A2"].alignment = Alignment(horizontal="center", vertical="center")
-    sheet.merge_cells("A3:H3"); sheet["A3"] = "送货单"
-    sheet["A3"].font = Font(name="宋体", size=18, bold=True); sheet["A3"].alignment = Alignment(horizontal="center", vertical="center")
-    metadata_rows = _delivery_note_metadata_rows(payload)
-    for row_no, values in enumerate(metadata_rows, 4):
-        for column, value in ((1, values[0]), (2, values[1]), (5, values[2]), (6, values[3])):
-            cell = sheet.cell(row_no, column, value)
-            cell.font = Font(name="宋体", size=11)
-            cell.alignment = Alignment(horizontal="center" if column in (1, 5) else "left", vertical="center", wrap_text=True)
-            cell.border = border
-            if column in (1, 5): cell.fill = green_fill if row_no == 7 and payload["is_assembly"] else label_fill
-        sheet.merge_cells(start_row=row_no, start_column=2, end_row=row_no, end_column=4)
-        sheet.merge_cells(start_row=row_no, start_column=6, end_row=row_no, end_column=8)
-        for column in range(2, 5): sheet.cell(row_no, column).border = border
-        for column in range(6, 9): sheet.cell(row_no, column).border = border
-    header_row = 4 + len(metadata_rows)
-    for column, (label, _) in enumerate(delivery_note_export_columns(payload), 1):
-        cell = sheet.cell(header_row, column, label)
-        cell.font = Font(name="宋体", size=11, bold=True, color="FFFFFF")
-        cell.fill = green_fill if column in (6, 7) else header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = border
-    for row in _delivery_note_rows(payload): sheet.append(row)
-    for row in sheet.iter_rows(min_row=header_row + 1, max_row=sheet.max_row, max_col=8):
-        for cell in row:
-            cell.font = Font(name="宋体", size=11)
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center" if cell.column in (1, 5, 6, 7) else "left", vertical="center", wrap_text=True)
-    footer_row = sheet.max_row + 2
-    sheet.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=2)
-    sheet.merge_cells(start_row=footer_row, start_column=3, end_row=footer_row, end_column=5)
-    sheet.merge_cells(start_row=footer_row, start_column=6, end_row=footer_row, end_column=8)
-    for column, value in ((1, f"发货日期：{payload['items'][0]['shipped_at'] if payload['items'] else '-'}"), (3, "发货签名："), (6, "收货签名：")):
-        cell = sheet.cell(footer_row, column, value)
-        cell.font = Font(name="宋体", size=11); cell.fill = green_fill
-        cell.alignment = Alignment(vertical="center")
-    for column, width in enumerate((8, 18, 18, 20, 9, 11, 11, 18), 1): sheet.column_dimensions[get_column_letter(column)].width = width
-    for row_no in range(2, sheet.max_row + 1): sheet.row_dimensions[row_no].height = 20
-    sheet.page_setup.orientation = sheet.ORIENTATION_PORTRAIT; sheet.page_setup.paperSize = sheet.PAPERSIZE_A4; sheet.page_setup.fitToWidth = 1; sheet.page_setup.fitToHeight = 0
-    sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.print_area = f"A2:H{footer_row}"
-    sheet.page_margins.left = 0.25; sheet.page_margins.right = 0.25; sheet.page_margins.top = 0.3; sheet.page_margins.bottom = 0.3
-    output = BytesIO(); workbook.save(output); output.seek(0); return output
+    from delivery_exports import build_delivery_note_xlsx as build
+    return build(payload)
 
 
 def build_delivery_note_pdf(payload):
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=8 * mm, rightMargin=8 * mm, topMargin=8 * mm, bottomMargin=8 * mm)
-    font_name = get_pdf_font_name(); styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("DeliveryNoteTemplateTitle", parent=styles["Title"], fontName=font_name, fontSize=18, leading=22, alignment=1, spaceAfter=2 * mm)
-    cell_style = ParagraphStyle("DeliveryNoteTemplateCell", parent=styles["BodyText"], fontName=font_name, fontSize=8.5, leading=10)
-    story = [Table([[Paragraph("宁波市杰德机械科技有限公司", ParagraphStyle("DeliveryCompany", parent=cell_style, fontSize=16, leading=20, alignment=1))]], colWidths=[194 * mm], style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#92D050")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")])), Paragraph("送货单", title_style)]
-    metadata = []
-    for values in _delivery_note_metadata_rows(payload):
-        metadata.append([Paragraph(xml_escape(str(value or "-")), cell_style) for value in values])
-    meta_table = Table(metadata, colWidths=[22 * mm, 75 * mm, 22 * mm, 75 * mm])
-    meta_style = [("GRID", (0, 0), (-1, -1), 0.6, colors.black), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("BACKGROUND", (0, 0), (0, -1), colors.white), ("BACKGROUND", (2, 0), (2, -1), colors.white), ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4), ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]
-    if payload["is_assembly"]:
-        meta_style.extend([("BACKGROUND", (0, -1), (0, -1), colors.HexColor("#92D050")), ("BACKGROUND", (2, -1), (2, -1), colors.HexColor("#92D050"))])
-    meta_table.setStyle(TableStyle(meta_style)); story.extend([meta_table, Spacer(1, 2 * mm)])
-    columns = delivery_note_export_columns(payload)
-    data = [[Paragraph(label, cell_style) for label, _ in columns]]
-    for row in _delivery_note_rows(payload): data.append([Paragraph(xml_escape(str(value or "")).replace("\n", "<br/>"), cell_style) for value in row])
-    if len(data) == 1: data.append([Paragraph("暂无发货记录", cell_style)] + [""] * 7)
-    item_table = Table(data, colWidths=[8 * mm, 26 * mm, 25 * mm, 28 * mm, 10 * mm, 13 * mm, 13 * mm, 71 * mm], repeatRows=1)
-    item_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.6, colors.black), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#5C7280")), ("BACKGROUND", (5, 0), (6, 0), colors.HexColor("#92D050")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("ALIGN", (0, 0), (-1, 0), "CENTER"), ("ALIGN", (0, 1), (0, -1), "CENTER"), ("ALIGN", (4, 1), (6, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
-    story.extend([item_table, Spacer(1, 3 * mm)])
-    footer = Table([[Paragraph(f"发货日期：{payload['items'][0]['shipped_at'] if payload['items'] else '-'}", cell_style), Paragraph("发货签名：", cell_style), Paragraph("收货签名：", cell_style)]], colWidths=[64 * mm, 64 * mm, 66 * mm])
-    footer.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#92D050")), ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)])); story.append(footer)
-    doc.build(story); buffer.seek(0); return buffer
+    from delivery_exports import build_delivery_note_pdf as build
+    return build(payload, get_pdf_font_name())
 
 
 def finance_invoice_source_label(item):
@@ -9164,7 +9118,10 @@ def products_index():
                 manuals.drawing_no LIKE ?
                 OR manuals.product_name LIKE ?
                 OR manuals.supplier LIKE ?
-                OR manuals.customer LIKE ?
+                OR EXISTS (
+                    SELECT 1 FROM product_customer_names pcn
+                    WHERE pcn.manual_id=manuals.id AND pcn.customer LIKE ?
+                )
                 OR manuals.sku LIKE ?
                 OR manuals.barcode LIKE ?
                 OR manuals.qr_code LIKE ?
@@ -9195,7 +9152,7 @@ def products_index():
         conditions.append("manuals.supplier = ?")
         params.append(selected_supplier)
     if selected_customer:
-        conditions.append("manuals.customer = ?")
+        conditions.append(customer_matches_sql())
         params.append(selected_customer)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -9203,7 +9160,10 @@ def products_index():
 
     with get_db() as conn:
         ensure_all_product_inventory_codes(conn)
-        manuals = conn.execute(sql, params).fetchall()
+        manuals = [dict(row, customer='、'.join(customer_names(conn, row['id']))) for row in conn.execute(sql, params)]
+        conflicts = conn.execute('SELECT reason,COUNT(*) AS count FROM product_merge_conflicts GROUP BY reason').fetchall()
+        for conflict in conflicts:
+            flash(f"有 {conflict['count']} 组同名产品因{conflict['reason']}保留独立档案，请核对后再合并", 'error')
         materials_by_manual = get_product_materials_map(conn, [manual["id"] for manual in manuals])
         assembly_components_by_manual = get_product_assembly_components_map(
             conn, [manual["id"] for manual in manuals]
@@ -9479,7 +9439,14 @@ def batch_set_product_assembly_components():
         if len(manuals) != len(manual_ids):
             flash("请选择有效的产品", "error")
             return redirect(url_for("products_index", **redirect_args))
-        customers = {str(row["customer"] or "").strip() for row in manuals}
+        requested_customer = request.form.get('assembly_customer', '').strip()
+        if requested_customer:
+            if any(not has_customer(conn, row['id'], requested_customer) for row in manuals):
+                flash('所选产品必须都适用于该客户', 'error')
+                return redirect(url_for('products_index', **redirect_args))
+            customers = {requested_customer}
+        else:
+            customers = {str(row["customer"] or "").strip() for row in manuals}
         if "" in customers:
             flash("未设置客户的产品不能批量设置组装图号", "error")
             return redirect(url_for("products_index", **redirect_args))
@@ -9491,10 +9458,10 @@ def batch_set_product_assembly_components():
             f"""
             SELECT id, manual_id, assembly_drawing_no
             FROM product_assembly_components
-            WHERE manual_id IN ({placeholders})
+            WHERE manual_id IN ({placeholders}) AND customer=? COLLATE NOCASE
             ORDER BY id ASC
             """,
-            manual_ids,
+            [*manual_ids, next(iter(customers))],
         ).fetchall()
         existing_component_ids = {}
         for row in component_rows:
@@ -9533,9 +9500,9 @@ def batch_set_product_assembly_components():
                     """
                     INSERT INTO product_assembly_components (
                         manual_id, assembly_drawing_no, quantity_per_set,
-                        sort_order, created_at, updated_at
+                        sort_order, created_at, updated_at, customer
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         manual_id,
@@ -9544,6 +9511,7 @@ def batch_set_product_assembly_components():
                         next_sort_order,
                         now,
                         now,
+                        next(iter(customers)),
                     ),
                 )
         conn.execute(
@@ -9714,7 +9682,7 @@ def validated_production_followup_product(
     ).fetchone()
     if product is None:
         raise ValueError("所选产品不存在")
-    if str(product["customer"] or "").strip() != customer:
+    if not has_customer(conn, selected_id, customer):
         raise ValueError("所选产品不属于当前客户")
     if (
         str(product["drawing_no"] or "").strip() != drawing_no
@@ -9731,7 +9699,7 @@ def production_followup_products():
     query = request.args.get("q", "").strip()
     if not customer or customer == "__unassigned__":
         return jsonify(products=[])
-    conditions = ["TRIM(manuals.customer) = ?"]
+    conditions = [customer_matches_sql()]
     params = [customer]
     if query:
         like = f"%{query}%"
@@ -9871,7 +9839,7 @@ def update_production_followup_customer(followup_id):
                 "SELECT customer FROM manuals WHERE id = ?",
                 (followup["manual_id"],),
             ).fetchone()
-            if product is None or str(product["customer"] or "").strip() != customer:
+            if product is None or not has_customer(conn, followup['manual_id'], customer):
                 flash("已关联产品不属于所选客户", "error")
                 return production_followup_redirect()
         conn.execute(
@@ -10238,6 +10206,7 @@ def manual_detail(manual_id):
     with get_db() as conn:
         ensure_product_inventory_code(conn, manual_id)
         manual = fetch_manual_by_id(conn, manual_id, include_price=include_price)
+        linked_customers = customer_names(conn, manual_id) if manual else []
         inventory_total = inventory_total_for_manual(conn, manual_id)
         inventory_locations = location_stock_map(conn, [manual_id]).get(manual_id, [])
         default_location = None
@@ -10248,6 +10217,7 @@ def manual_detail(manual_id):
     return render_template(
         "detail.html",
         manual=manual,
+        linked_customers=linked_customers,
         inventory_code=product_inventory_code(manual),
         inventory_total=inventory_total,
         inventory_locations=inventory_locations,
@@ -10768,13 +10738,13 @@ def admin_suppliers():
                     """
                     INSERT INTO suppliers (
                         code, name, contact, phone, email, address, remark,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        payment_bank_name, payment_bank_branch_no, payment_account_no, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload["code"], payload["name"], payload["contact"],
                         payload["phone"], payload["email"], payload["address"],
-                        payload["remark"], now, now,
+                        payload["remark"], payload['payment_bank_name'], payload['payment_bank_branch_no'], payload['payment_account_no'], now, now,
                     ),
                 )
         except ValueError as error:
@@ -10791,8 +10761,8 @@ def admin_suppliers():
     params = []
     if query:
         like = f"%{query}%"
-        sql += " WHERE code LIKE ? OR name LIKE ? OR contact LIKE ? OR phone LIKE ? OR email LIKE ? OR address LIKE ? OR remark LIKE ?"
-        params = [like] * 7
+        sql += " WHERE code LIKE ? OR name LIKE ? OR contact LIKE ? OR phone LIKE ? OR email LIKE ? OR address LIKE ? OR remark LIKE ? OR payment_bank_name LIKE ? OR payment_bank_branch_no LIKE ? OR payment_account_no LIKE ?"
+        params = [like] * 10
     sql += " ORDER BY active DESC, name COLLATE NOCASE ASC, id DESC"
     with get_db() as conn:
         suppliers = conn.execute(sql, params).fetchall()
@@ -10820,13 +10790,13 @@ def edit_supplier(supplier_id):
                 """
                 UPDATE suppliers
                 SET code = ?, name = ?, contact = ?, phone = ?, email = ?, address = ?,
-                    remark = ?, updated_at = ?
+                    remark = ?, payment_bank_name = ?, payment_bank_branch_no = ?, payment_account_no = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     payload["code"], payload["name"], payload["contact"],
                     payload["phone"], payload["email"], payload["address"],
-                    payload["remark"], now, supplier_id,
+                    payload["remark"], payload['payment_bank_name'], payload['payment_bank_branch_no'], payload['payment_account_no'], now, supplier_id,
                 ),
             )
     except ValueError as error:
@@ -11144,6 +11114,7 @@ def edit_customer(customer_id):
                     "UPDATE manuals SET customer = ? WHERE customer = ?",
                     (name, previous_name),
                 )
+                conn.execute('UPDATE product_assembly_components SET customer=? WHERE customer=?', (name, previous_name))
                 conn.execute(
                     "UPDATE product_orders SET customer = ? WHERE customer = ?",
                     (name, previous_name),
@@ -11236,6 +11207,9 @@ def delete_customer(customer_id):
         ).fetchone()
         if customer is None:
             abort(404)
+        if conn.execute('SELECT 1 FROM product_customer_names WHERE customer_id=? LIMIT 1', (customer_id,)).fetchone():
+            flash('该客户仍有关联产品，不能删除', 'error')
+            return redirect(url_for('admin_customers'))
         finance_record = conn.execute(
             "SELECT 1 FROM finance_invoices WHERE customer_id = ? LIMIT 1",
             (customer_id,),
@@ -15173,7 +15147,7 @@ def inventory_product_rows(conn, query="", status="", selected_customer=""):
             OR manuals.qr_code LIKE ?
             OR manuals.remark LIKE ?
         )
-          AND (? = '' OR TRIM(COALESCE(manuals.customer, '')) = ?)
+          AND (? = '' OR {customer_matches_sql()})
         GROUP BY manuals.id
         ORDER BY manuals.product_name COLLATE NOCASE ASC, manuals.id ASC
         """,
@@ -15191,7 +15165,7 @@ def inventory_product_rows(conn, query="", status="", selected_customer=""):
         if status == "positive" and total <= 0:
             continue
         filtered.append(row)
-    return filtered
+    return [dict(row, customer='、'.join(customer_names(conn, row['id']))) for row in filtered]
 
 
 def location_stock_map(conn, manual_ids):
@@ -15237,9 +15211,10 @@ def fetch_inventory_product_by_code(conn, code):
         SELECT {projection}
         FROM manuals
         WHERE sku = ? OR barcode = ? OR qr_code = ?
+           OR id IN (SELECT manual_id FROM product_code_aliases WHERE code=?)
         LIMIT 1
         """,
-        (code, code, code),
+        (code, code, code, code),
     ).fetchone()
 
 
@@ -15268,7 +15243,7 @@ def admin_inventory_overview():
         products = inventory_product_rows(conn, query, status, selected_customer)
         locations_by_manual = location_stock_map(conn, [row["id"] for row in products])
         customers = [row["customer"] for row in conn.execute(
-            """SELECT DISTINCT TRIM(customer) AS customer FROM manuals
+            """SELECT DISTINCT TRIM(customer) AS customer FROM product_customer_names
                WHERE TRIM(COALESCE(customer, '')) != ''
                ORDER BY customer COLLATE NOCASE"""
         ).fetchall()]
@@ -15865,12 +15840,11 @@ def admin_orders():
         conditions.append(
             """
             (
-                product_orders.customer = ?
-                OR manuals.customer = ?
+                COALESCE(NULLIF(TRIM(product_orders.customer), ''), manuals.customer) = ?
             )
             """
         )
-        params.extend([selected_customer, selected_customer])
+        params.append(selected_customer)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
     sql += (
@@ -16484,11 +16458,11 @@ def assembly_component_options():
         return jsonify({"error": "请选择客户"}), 400
     with get_db() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT id AS manual_id, drawing_no, product_name,
                    COALESCE(supplier, '') AS specification
             FROM manuals
-            WHERE customer = ? AND (INSTR(LOWER(drawing_no), LOWER(?)) > 0
+            WHERE {customer_matches_sql()} AND (INSTR(LOWER(drawing_no), LOWER(?)) > 0
                 OR INSTR(LOWER(product_name), LOWER(?)) > 0)
             ORDER BY drawing_no COLLATE NOCASE, id LIMIT 50
             """, (customer, query, query),
@@ -16907,7 +16881,7 @@ def build_order_shipment_preview(conn, rows):
         if manual is None:
             raise ValueError('关联产品不存在')
         customer = (order['customer'] or manual['customer'] or '').strip() if row['legacy'] else row['customer']
-        if not row['legacy'] and (not customer or manual['customer'] != customer):
+        if not row['legacy'] and (not customer or not has_customer(conn, manual_id, customer)):
             raise ValueError('追加产品前请选择具体客户，产品必须属于当前客户')
         if order and (order['manual_id'] != manual_id or (order['customer'] or manual['customer'] or '').strip() != customer):
             raise ValueError('订单、产品和客户不匹配')
@@ -17848,7 +17822,7 @@ def edit_supplemental_shipment(shipment_id):
                 deducted = shipment['inventory_deducted_quantity']
                 if quantity != shipment['shipped_quantity']:
                     product = conn.execute('SELECT customer FROM manuals WHERE id=?', (shipment['manual_id'],)).fetchone()
-                    if product is None or product['customer'] != shipment['customer']:
+                    if product is None or not has_customer(conn, shipment['manual_id'], shipment['customer']):
                         raise ValueError('产品不存在或客户归属已变化，不能修改数量')
                     reverse_supplemental_inventory(conn, shipment_id)
                     deducted = deduct_inventory_allow_shortage(conn, shipment_id, shipment['manual_id'], quantity, shipment['customer'], f'BC-{shipment_id}', supplemental=True)
@@ -18473,7 +18447,7 @@ def new_order():
                 flash("请选择有效的产品", "error")
                 return redirect(url_for("new_order"))
             if selected_customer and any(
-                (manuals_by_id[item[0]]["customer"] or "") != selected_customer
+                not has_customer(conn, item[0], selected_customer)
                 for item in items
             ):
                 flash("订单产品必须属于所选客户", "error")
@@ -18506,10 +18480,10 @@ def new_order():
                         order_no,
                         ordered_at,
                         quantity,
-                        manuals_by_id[manual_id]["customer"] or "",
+                        selected_customer,
                         assembly_drawing_no,
                         assembly_set_quantity,
-                        customer_emails_by_name.get(manuals_by_id[manual_id]["customer"] or "", ""),
+                        customer_emails_by_name.get(selected_customer, ""),
                         planned_ship_at,
                         material_stock_status,
                         "",
@@ -18529,9 +18503,9 @@ def new_order():
     with get_db() as conn:
         products = get_product_options(conn)
         product_customers = sorted({
-            product["customer"]
+            customer
             for product in products
-            if product["customer"]
+            for customer in product["customers"]
         }, key=str.lower)
     return render_template(
         "order_new.html",
@@ -18599,6 +18573,7 @@ def order_assembly_definition():
 @permission_required("orders_manage")
 def import_orders():
     if request.method == "POST":
+        selected_customer = request.form.get('customer','').strip()
         order_no = request.form.get("order_no", "").strip()
         ordered_at = request.form.get("ordered_at", "").strip()
         planned_ship_at = request.form.get("planned_ship_at", "").strip()
@@ -18620,7 +18595,7 @@ def import_orders():
             return redirect(url_for("import_orders"))
 
         with get_db() as conn:
-            items, errors = match_order_import_items(conn, import_rows)
+            items, errors = match_order_import_items(conn, import_rows, selected_customer)
             if errors:
                 for error in errors[:20]:
                     flash(error, "error")
@@ -18639,7 +18614,7 @@ def import_orders():
             for row in import_rows:
                 if not row.get("planned_ship_at"):
                     continue
-                matched_items, matched_errors = match_order_import_items(conn, [row])
+                matched_items, matched_errors = match_order_import_items(conn, [row], selected_customer)
                 if matched_items and not matched_errors:
                     planned_by_manual_id[matched_items[0]["manual"]["id"]] = row["planned_ship_at"]
             customer_emails_by_name = {
@@ -18682,7 +18657,9 @@ def import_orders():
         flash(f"订单导入成功：{len(items)} 个产品，共 {total_quantity} 件", "success")
         return redirect(url_for("admin_orders"))
 
-    return render_template("order_import.html")
+    with get_db() as conn:
+        customers = get_customer_name_options(conn)
+    return render_template("order_import.html", customers=customers)
 
 
 @app.route("/admin/orders/import-template")
@@ -18798,13 +18775,13 @@ def edit_order(order_id):
                 return redirect(url_for("edit_order", order_id=order_id))
             if (
                 current_order["assembly_drawing_no"]
-                and (manual["customer"] or "") != (current_order["customer"] or "")
+                and not has_customer(conn, manual_id_value, current_order['customer'])
             ):
                 flash("组装订单不能更换为其他客户的产品", "error")
                 return redirect(url_for("edit_order", order_id=order_id))
             if current_order["has_shipment_reference"] and (
                 manual_id_value != current_order["manual_id"]
-                or (manual["customer"] or "") != (current_order["customer"] or "")
+                or not has_customer(conn, manual_id_value, current_order['customer'])
             ):
                 flash("已有发货记录的订单不能更换产品或客户", "error")
                 return redirect(url_for("edit_order", order_id=order_id))
@@ -18827,7 +18804,7 @@ def edit_order(order_id):
                     order_no,
                     ordered_at,
                     quantity_value,
-                    manual["customer"] or "",
+                    current_order['customer'] if has_customer(conn, manual_id_value, current_order['customer']) else manual['customer'],
                     customer_email,
                     planned_ship_at,
                     material_stock_status,
@@ -19224,6 +19201,7 @@ def edit_manual(manual_id):
         drawing_no = request.form.get("drawing_no", "").strip()
         supplier = request.form.get("supplier", "").strip()
         customer = request.form.get("customer", "").strip()
+        added_customer = request.form.get("additional_customer", "").strip()
         pack_quantity = request.form.get("pack_quantity", "").strip()
         pack_carton_size = request.form.get("pack_carton_size", "").strip()
         pack_weight = request.form.get("pack_weight", "").strip()
@@ -19239,9 +19217,10 @@ def edit_manual(manual_id):
             {
                 "assembly_drawing_no": drawing,
                 "quantity_per_set": quantity,
+                "customer": scope or customer,
             }
-            for drawing, quantity in zip_longest(
-                assembly_drawing_numbers, assembly_quantities, fillvalue=""
+            for drawing, quantity, scope in zip_longest(
+                assembly_drawing_numbers, assembly_quantities, request.form.getlist('assembly_customer'), fillvalue=""
             )
         ]
         current_user = current_admin_username()
@@ -19266,33 +19245,34 @@ def edit_manual(manual_id):
                 flash(str(error), "error")
                 return render_edit_manual_page(manual, submitted_assembly_components)
         try:
-            assembly_components = normalize_component_rows(
-                assembly_drawing_numbers, assembly_quantities
-            )
+            grouped = {}
+            scope_values = request.form.getlist('assembly_customer')
+            for index, (drawing, quantity) in enumerate(zip_longest(assembly_drawing_numbers, assembly_quantities, fillvalue='')):
+                scope = (scope_values[index] if index < len(scope_values) else customer).strip() or customer or added_customer
+                if not drawing.strip() and not str(quantity).strip():
+                    continue
+                grouped.setdefault(scope, ([], []))[0].append(drawing)
+                grouped[scope][1].append(quantity)
+            assembly_components = []
+            with get_db() as conn:
+                for scope, (drawings, quantities) in grouped.items():
+                    if not scope:
+                        raise ValueError('请先选择客户，再配置所属组装件')
+                    if scope not in (added_customer, customer) and not has_customer(conn, manual_id, scope):
+                        raise ValueError('组装件客户必须属于该产品的适用客户')
+                    for component in normalize_component_rows(drawings, quantities):
+                        assembly_components.append(dict(component, customer=scope, sort_order=len(assembly_components)))
         except ValueError as error:
             flash(str(error), "error")
             return render_edit_manual_page(manual, submitted_assembly_components)
-        if assembly_components and not customer:
+        if assembly_components and not (customer or added_customer):
             flash("请先选择客户，再配置所属组装件", "error")
             return render_edit_manual_page(manual, submitted_assembly_components)
-        if customer != (manual["customer"] or ""):
+        if customer != (manual['customer'] or ''):
             with get_db() as conn:
-                has_assembly_order = conn.execute(
-                    """
-                    SELECT 1
-                    FROM product_orders
-                    WHERE manual_id = ?
-                      AND TRIM(assembly_drawing_no) != ''
-                    LIMIT 1
-                    """,
-                    (manual_id,),
-                ).fetchone()
-            if has_assembly_order:
-                flash("已有组装订单的产品不能直接更换客户", "error")
-                return render_edit_manual_page(
-                    manual, submitted_assembly_components
-                )
-
+                if conn.execute("SELECT 1 FROM product_orders WHERE manual_id=? LIMIT 1", (manual_id,)).fetchone():
+                    flash('已有组装订单的产品不能直接更换客户；请使用新增适用客户', 'error')
+                    return render_edit_manual_page(manual, submitted_assembly_components)
         now = datetime.utcnow().isoformat(timespec="seconds")
         version = now
         with get_db() as conn:
@@ -19362,22 +19342,16 @@ def edit_manual(manual_id):
             ensure_product_inventory_code(conn, manual_id)
             ensure_customer_exists(conn, customer, now)
             save_product_assembly_components(conn, manual_id, assembly_components, now)
-            conn.execute(
-                """
-                UPDATE product_orders
-                SET customer = ?, updated_at = ?
-                WHERE manual_id = ?
-                """,
-                (
-                    customer,
-                    now,
-                    manual_id,
-                ),
-            )
+            link_customer(conn, manual_id, added_customer, now)
         flash("产品资料已更新", "success")
         return redirect(url_for("admin_index"))
 
     return render_edit_manual_page(manual)
+
+
+def customer_names_for_display(manual_id):
+    with get_db() as conn:
+        return customer_names(conn, manual_id)
 
 
 def render_edit_manual_page(manual, assembly_components=None):
@@ -19399,6 +19373,7 @@ def render_edit_manual_page(manual, assembly_components=None):
         suppliers=get_suppliers(),
         customers=customers,
         assembly_components=assembly_components,
+        linked_customers=customer_names_for_display(manual["id"]),
         inventory_locations=inventory_locations,
         supported_currencies=SUPPORTED_CURRENCIES,
     )
@@ -19856,6 +19831,14 @@ def delete_manuals(raw_manual_ids):
                 conn.execute(
                     f"DELETE FROM manual_process_configs WHERE manual_id IN ({placeholders})",
                     manual_ids,
+                )
+                # Connections retain the legacy foreign-key mode, so explicitly
+                # clean the new shared-product relationships as well.
+                for table in ('product_customers', 'product_code_aliases'):
+                    conn.execute(f"DELETE FROM {table} WHERE manual_id IN ({placeholders})", manual_ids)
+                conn.execute(
+                    f"DELETE FROM product_merge_conflicts WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                    [*manual_ids, *manual_ids],
                 )
                 conn.execute(
                     f"DELETE FROM manuals WHERE id IN ({placeholders})",

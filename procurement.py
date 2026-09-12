@@ -25,10 +25,18 @@ def normalize_supplier_payload(form) -> dict[str, object]:
     """Return trimmed supplier fields while preserving display phone and email text."""
     payload = {
         field: str(form.get(field, "") or "").strip()
-        for field in ("code", "name", "contact", "phone", "email", "address", "remark")
+        for field in ("code", "name", "contact", "phone", "email", "address", "remark",
+                      "payment_bank_name", "payment_bank_branch_no", "payment_account_no")
     }
     if not payload["name"]:
         raise ValueError("供应商名称为必填项")
+    for field, label in (
+        ("payment_bank_name", "付款银行名称"),
+        ("payment_bank_branch_no", "付款银行行号"),
+        ("payment_account_no", "付款帐号"),
+    ):
+        if len(payload[field]) > 200:
+            raise ValueError(f"{label}不能超过 200 个字符")
     return payload
 
 
@@ -469,6 +477,9 @@ def ensure_procurement_tables(conn) -> None:
             email TEXT NOT NULL DEFAULT '',
             address TEXT NOT NULL DEFAULT '',
             remark TEXT NOT NULL DEFAULT '',
+            payment_bank_name TEXT NOT NULL DEFAULT '',
+            payment_bank_branch_no TEXT NOT NULL DEFAULT '',
+            payment_account_no TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -538,6 +549,9 @@ def ensure_procurement_tables(conn) -> None:
     # proof that an existing business supplier may be repurposed by migration.
     for table, column, definition in (
         ("suppliers", "system_kind", "TEXT NOT NULL DEFAULT ''"),
+        ("suppliers", "payment_bank_name", "TEXT NOT NULL DEFAULT ''"),
+        ("suppliers", "payment_bank_branch_no", "TEXT NOT NULL DEFAULT ''"),
+        ("suppliers", "payment_account_no", "TEXT NOT NULL DEFAULT ''"),
         ("purchase_orders", "legacy_metadata", "TEXT NOT NULL DEFAULT '{}'"),
     ):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}

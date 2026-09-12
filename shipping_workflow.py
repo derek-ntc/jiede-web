@@ -491,7 +491,8 @@ def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides
             # Zero-only customer documents have no accounting source. Accept
             # only a real, currently customer-owned product; never arbitrary text.
             manual = conn.execute('SELECT customer FROM manuals WHERE id=?', (line.get('manual_id'),)).fetchone()
-            if line.get('quantity') != 0 or not customer or manual is None or manual['customer'] != customer:
+            from shared_products import has_customer
+            if line.get('quantity') != 0 or not customer or manual is None or not has_customer(conn, line.get('manual_id'), customer):
                 raise ValueError('送货单明细客户与发货来源不一致')
             if line.get('order_id') is not None:
                 order = conn.execute('SELECT manual_id,customer FROM product_orders WHERE id=?', (line['order_id'],)).fetchone()

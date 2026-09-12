@@ -82,7 +82,7 @@
                 <select name="manual_id" data-product-select data-product-drawing-select required>
                   <option value="" data-product-name="" data-customer="">请选择产品图号</option>
                   {% for product in products %}
-                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}" data-drawing-no="{{ product.drawing_no or '' }}">
+                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}" data-customers='{{ product.customers | tojson }}' data-drawing-no="{{ product.drawing_no or '' }}">
                       {{ product.drawing_no or "未填图号" }}
                     </option>
                   {% endfor %}
@@ -92,7 +92,7 @@
                 <select data-product-name-select required>
                   <option value="" data-product-name="" data-customer="">请选择产品名称</option>
                   {% for product in products %}
-                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}" data-drawing-no="{{ product.drawing_no or '' }}">
+                    <option value="{{ product.id }}" data-product-name="{{ product.product_name }}" data-customer="{{ product.customer or '' }}" data-customers='{{ product.customers | tojson }}' data-drawing-no="{{ product.drawing_no or '' }}">
                       {{ product.product_name }} / {{ product.drawing_no or "未填图号" }}
                     </option>
                   {% endfor %}
