@@ -139,7 +139,10 @@ from reconciliation import (
 )
 from inventory_batch import ensure_batch_table, load_batch_data, apply_batch, InventoryConflict
 from shared_products import ensure_shared_products, identity as product_identity, has_customer, link_customer, customer_names, customer_matches_sql
+import order_production
+import production_order_views
 from production_processes import (
+    load_followup_process_card,
     add_followup_process_step,
     complete_followup_process_step,
     create_followup_process_snapshot,
@@ -627,6 +630,7 @@ def init_db():
         ensure_feedback_table(conn)
         ensure_production_followup_tables(conn)
         ensure_production_process_tables(conn)
+        order_production.ensure_order_production_schema(conn)
         ensure_shipping_workflow_tables(conn)
         ensure_shared_products(conn)
         ensure_indexes(conn)
@@ -4308,35 +4312,7 @@ def _assembly_shipment_summary_tables_exist(conn):
 
 
 def order_shipment_summary_subquery(include_assembly=False, conn=None):
-    if include_assembly and conn is not None:
-        include_assembly = _assembly_shipment_summary_tables_exist(conn)
-    source = "product_order_shipments"
-    if include_assembly:
-        source = """
-        (
-            SELECT order_id, shipped_quantity, shipped_at
-            FROM product_order_shipments
-
-            UNION ALL
-
-            SELECT assembly_shipment_allocations.order_id,
-                   assembly_shipment_allocations.quantity AS shipped_quantity,
-                   assembly_shipment_batches.shipped_at
-            FROM assembly_shipment_allocations
-            JOIN assembly_shipment_items
-              ON assembly_shipment_items.id = assembly_shipment_allocations.item_id
-            JOIN assembly_shipment_batches
-              ON assembly_shipment_batches.id = assembly_shipment_items.batch_id
-            WHERE assembly_shipment_allocations.order_id IS NOT NULL
-        ) AS all_shipments
-        """
-    return f"""
-        SELECT order_id,
-               SUM(shipped_quantity) AS shipped_total,
-               MAX(shipped_at) AS last_shipped_at
-        FROM {source}
-        GROUP BY order_id
-    """
+    return production_order_views.order_shipment_summary_subquery(include_assembly, conn)
 
 
 def get_shipped_orders_query(include_prices=False):
@@ -9639,7 +9615,20 @@ def production_followup_redirect():
         filters["q"] = query
     if customer:
         filters["customer"] = customer
-    return redirect(url_for("production_followups", **filters))
+    # Resolve mutations from the actual card, never a client-supplied group key.
+    for key in ('sort', 'direction'):
+        if request.form.get('filter_' + key, request.args.get(key, '')).strip():
+            filters[key] = request.form.get('filter_' + key, request.args.get(key, '')).strip()
+    followup_id = (request.view_args or {}).get('followup_id')
+    if followup_id:
+        with get_db() as conn:
+            linked = order_production.linked_order(conn, followup_id)
+        if linked:
+            return redirect(url_for('order_production_detail', anchor_id=linked['id'], **filters))
+    if request.form.get('return_order_id', '').isdigit():
+        # Navigation only; this ID is never used to decide the rows to mutate.
+        return redirect(url_for('order_production_detail', anchor_id=int(request.form['return_order_id']), **filters))
+    return redirect(url_for("production_followups", view='legacy', **filters))
 
 
 def production_followup_customer_options(conn):
@@ -9747,9 +9736,14 @@ def production_followup_products():
 @app.route("/admin/production-followups", methods=["GET", "POST"])
 @login_required
 def production_followups():
+    if request.method == 'GET' and request.args.get('view') != 'legacy':
+        return order_production_pages.summary(production=True)
     query = request.args.get("q", "").strip()
     selected_customer = request.args.get("customer", "").strip()
     if request.method == "POST":
+        if not user_has_permission('production_followups_manage'):
+            abort(403)
+        require_production_followup_csrf()
         ordered_at = request.form.get("ordered_at", "").strip()
         customer = request.form.get("customer", "").strip()
         manual_id = request.form.get("manual_id", "").strip()
@@ -9810,6 +9804,7 @@ def production_followups():
 
     with get_db() as conn:
         followups = fetch_production_followups(conn, query, selected_customer)
+        followups = [item for item in followups if item['row']['order_id'] is None]
         customers = production_followup_customer_options(conn)
     return render_template(
         "production_followups.html",
@@ -9831,6 +9826,10 @@ def update_production_followup_customer(followup_id):
         flash("未归类仅用于筛选，不能保存为客户", "error")
         return production_followup_redirect()
     with get_db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if order_production.linked_order(conn, followup_id) is not None:
+            flash('订单工艺卡客户由订单决定，不能单独更换', 'error')
+            return production_followup_redirect()
         followup = conn.execute(
             "SELECT id, manual_id FROM production_followups WHERE id = ?",
             (followup_id,),
@@ -9901,7 +9900,8 @@ def add_production_followup_process(followup_id):
 def delete_production_followup_process(followup_id, step_id):
     return production_process_action_result(
         followup_id,
-        lambda conn: delete_followup_process_step(conn, followup_id, step_id),
+        lambda conn: delete_followup_process_step(conn, followup_id, step_id,
+            confirmed=request.form.get('confirm_quantity_delete') == '1', operator=current_admin_username()),
         "生产工艺已删除",
     )
 
@@ -9950,6 +9950,7 @@ def complete_production_followup_process(followup_id, step_id):
             followup_id,
             step_id,
             current_admin_username(),
+            expected_version=request.form.get('version'),
         ),
         "生产工艺已完成",
     )
@@ -9963,7 +9964,9 @@ def complete_production_followup_process(followup_id, step_id):
 def revert_production_followup_process(followup_id, step_id):
     return production_process_action_result(
         followup_id,
-        lambda conn: revert_followup_process_step(conn, followup_id, step_id),
+        lambda conn: revert_followup_process_step(conn, followup_id, step_id,
+            expected_version=request.form.get('version'), operator=current_admin_username(),
+            confirmed=request.form.get('confirm_reset') == '1'),
         "生产工艺已撤回",
     )
 
@@ -10005,6 +10008,8 @@ def complete_production_stage(followup_id, stage):
                         conn,
                         followup_id,
                         process_step["id"],
+                        expected_version=request.form.get('version'),
+                        operator=current_admin_username(), confirmed=request.form.get('confirm_reset') == '1',
                     )
                     flash(
                         f"{PRODUCTION_STAGE_LABELS[stage]}已改回未完成",
@@ -10016,6 +10021,7 @@ def complete_production_stage(followup_id, stage):
                         followup_id,
                         process_step["id"],
                         current_admin_username(),
+                        expected_version=request.form.get('version'),
                     )
                     flash(f"{PRODUCTION_STAGE_LABELS[stage]}已完成", "success")
             except ValueError as error:
@@ -10028,13 +10034,20 @@ def complete_production_stage(followup_id, stage):
 @app.route("/admin/production-followups/<int:followup_id>/delete", methods=["POST"])
 @permission_required("production_followups_manage")
 def delete_production_followup(followup_id):
+    require_production_followup_csrf()
     with get_db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
         followup = conn.execute(
             "SELECT id FROM production_followups WHERE id = ?",
             (followup_id,),
         ).fetchone()
         if followup is None:
             abort(404)
+        try:
+            order_production.validate_followup_delete(conn, followup_id, request.form.get('confirm_unlink') == '1')
+        except ValueError as error:
+            flash(str(error), 'error')
+            return production_followup_redirect()
         files = conn.execute(
             """
             SELECT filename
@@ -10062,7 +10075,8 @@ def preview_production_process_card(followup_id):
     with get_db() as conn:
         followup = fetch_production_followup_detail(conn, followup_id)
         if followup is not None:
-            followup["processes"] = create_followup_process_snapshot(
+            followup['order'] = order_production.linked_order(conn, followup_id)
+            followup["processes"] = load_followup_process_card(conn, followup_id) if followup['order'] else create_followup_process_snapshot(
                 conn,
                 followup_id,
                 followup["row"]["manual_id"],
@@ -15863,6 +15877,10 @@ def admin_orders():
             order_shipment_summary_subquery(include_assembly=True, conn=conn),
         )
         orders = conn.execute(sql, params).fetchall()
+        matched_keys = list(dict.fromkeys(production_order_views.order_group_key(row) for row in orders))
+        all_groups = {production_order_views.order_group_key(group['rows'][0]): group
+                      for group in production_order_views.group_order_rows(production_order_views.fetch_order_rows(conn))}
+        groups = [all_groups[key] for key in matched_keys]
         customers = get_order_customer_options(conn)
         user_options = get_active_user_options(conn)
 
@@ -15870,7 +15888,9 @@ def admin_orders():
     warning_until = today + timedelta(days=10)
 
     return render_template(
-        "orders.html",
+        "order_groups.html",
+        groups=groups,
+        production=False,
         orders=orders,
         query=query,
         customers=customers,
@@ -18724,21 +18744,21 @@ def edit_order(order_id):
 
         if not all([manual_id, order_no, ordered_at, quantity, planned_ship_at]):
             flash("产品图号、订单号、下单时间、订单数量、计划发货时间为必填项", "error")
-            return redirect(url_for("edit_order", order_id=order_id))
+            return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
 
         try:
             manual_id_value = int(manual_id)
             quantity_value = int(quantity)
         except ValueError:
             flash("订单数量必须为整数", "error")
-            return redirect(url_for("edit_order", order_id=order_id))
+            return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
 
         if quantity_value <= 0:
             flash("订单数量必须大于 0", "error")
-            return redirect(url_for("edit_order", order_id=order_id))
+            return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
         if quantity_value > MAX_ORDER_QUANTITY:
             flash(f"订单数量不能超过 {MAX_ORDER_QUANTITY}", "error")
-            return redirect(url_for("edit_order", order_id=order_id))
+            return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
 
         now = datetime.utcnow().isoformat(timespec="seconds")
         with get_db() as conn:
@@ -18746,6 +18766,7 @@ def edit_order(order_id):
             current_order = conn.execute(
                 f"""
                 SELECT product_orders.manual_id,
+                       product_orders.quantity,
                        product_orders.customer,
                        product_orders.assembly_drawing_no,
                        product_orders.assembly_set_quantity,
@@ -18776,29 +18797,34 @@ def edit_order(order_id):
             ).fetchone()
             if current_order is None:
                 abort(404)
+            try:
+                order_production.validate_order_production_change(conn, order_id, manual_id_value, quantity_value)
+            except ValueError as error:
+                flash(str(error), 'error')
+                return redirect(url_for('edit_order', order_id=order_id, **order_production_pages.return_filters()))
             manual = conn.execute(
                 "SELECT id, customer FROM manuals WHERE id = ?",
                 (manual_id_value,),
             ).fetchone()
             if manual is None:
                 flash("请选择有效的产品图号", "error")
-                return redirect(url_for("edit_order", order_id=order_id))
+                return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
             if (
                 current_order["assembly_drawing_no"]
                 and not has_customer(conn, manual_id_value, current_order['customer'])
             ):
                 flash("组装订单不能更换为其他客户的产品", "error")
-                return redirect(url_for("edit_order", order_id=order_id))
+                return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
             if current_order["has_shipment_reference"] and (
                 manual_id_value != current_order["manual_id"]
                 or not has_customer(conn, manual_id_value, current_order['customer'])
             ):
                 flash("已有发货记录的订单不能更换产品或客户", "error")
-                return redirect(url_for("edit_order", order_id=order_id))
+                return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
             shipped_total = int(current_order["shipped_total"] or 0)
             if quantity_value < shipped_total:
                 flash(f"订单数量不能小于累计已发数量 {shipped_total}", "error")
-                return redirect(url_for("edit_order", order_id=order_id))
+                return redirect(url_for("edit_order", order_id=order_id, **order_production_pages.return_filters()))
 
             conn.execute(
                 """
@@ -18827,8 +18853,10 @@ def edit_order(order_id):
                     order_id,
                 ),
             )
+            order_production.refresh_order_production_demand(conn, order_id, current_order['quantity'], now, current_admin_username())
         flash("产品订单已更新", "success")
-        return redirect(url_for("admin_orders"))
+        return redirect(url_for("order_group_detail", anchor_id=order_id,
+            **{key: request.args[key] for key in ('q', 'customer', 'sort', 'direction') if key in request.args}))
 
     with get_db() as conn:
         products = get_product_options(conn)
@@ -19020,6 +19048,11 @@ def delete_order(order_id):
         if order is None:
             abort(404)
         try:
+            order_production.validate_order_production_delete(conn, order_id)
+        except ValueError as error:
+            flash(str(error), 'error')
+            return order_production_pages.order_redirect(order_id)
+        try:
             assert_finance_sources_mutable(
                 conn,
                 finance_source_refs_for_order(conn, order_id),
@@ -19033,19 +19066,24 @@ def delete_order(order_id):
                 "该产品或订单包含已进入财务的发货记录，不能删除",
                 "error",
             )
-            return redirect(url_for("admin_orders"))
+            return order_production_pages.order_redirect(order_id)
         if order["has_shipment_plan_reference"]:
             flash("已有计划发货记录的订单不能删除", "error")
-            return redirect(url_for("admin_orders"))
+            return order_production_pages.order_redirect(order_id)
         if order["has_shipment_reference"]:
             flash("已有发货记录的订单不能删除", "error")
-            return redirect(url_for("admin_orders"))
+            return order_production_pages.order_redirect(order_id)
         if order["has_inventory_reference"]:
             flash("已有库存流水的订单不能删除", "error")
-            return redirect(url_for("admin_orders"))
+            return order_production_pages.order_redirect(order_id)
+        try:
+            group = production_order_views.fetch_order_group(conn, order_id)
+            remaining_anchor = next((row['id'] for row in group['rows'] if row['id'] != order_id), None)
+        except LookupError:
+            remaining_anchor = None
         conn.execute("DELETE FROM product_orders WHERE id = ?", (order_id,))
     flash("产品订单已删除", "success")
-    return redirect(url_for("admin_orders"))
+    return order_production_pages.order_redirect(remaining_anchor)
 
 
 @app.route("/admin/upload", methods=["POST"])
@@ -19645,6 +19683,11 @@ def load_deletable_manuals(conn, manual_ids):
     rows_by_id = {int(row["id"]): row for row in rows}
     if len(rows_by_id) != len(manual_ids):
         raise ValueError("选择中包含不存在的产品")
+    if conn.execute(f'''SELECT 1 FROM production_followups f
+        JOIN product_orders o ON o.id=f.order_id
+        WHERE f.manual_id IN ({placeholders}) OR o.manual_id IN ({placeholders}) LIMIT 1''',
+        [*manual_ids, *manual_ids]).fetchone():
+        raise ValueError('产品已有订单工艺卡，不能删除')
     try:
         for manual_id in manual_ids:
             refs = finance_source_refs_for_manual(conn, manual_id)
@@ -19903,6 +19946,10 @@ def delete_manual(manual_id):
     else:
         flash("产品资料已删除", "success")
     return redirect(url_for("products_index", **redirect_args))
+
+
+from order_production_routes import OrderProductionPages
+order_production_pages = OrderProductionPages(app, globals())
 
 
 if __name__ == "__main__":

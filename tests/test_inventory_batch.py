@@ -206,7 +206,7 @@ class InventoryBatchTests(unittest.TestCase):
         inventory = self.client.get('/admin/inventory', query_string={'customer':'客户甲'}).get_data(as_text=True)
         batch_links = [urlsplit(href) for href in Links(inventory).hrefs if '/inventory/batch/inbound' in href]
         self.assertTrue(any(parse_qs(link.query).get('customer') == ['客户甲'] for link in batch_links))
-        orders = self.client.get('/admin/orders').get_data(as_text=True)
+        orders = self.client.get(f'/admin/orders/groups/{self.orders[0]}').get_data(as_text=True)
         batch_links = [urlsplit(href) for href in Links(orders).hrefs if '/inventory/batch/inbound' in href]
         self.assertTrue(any(parse_qs(link.query).get('order_no') == ['SO-100'] and parse_qs(link.query).get('customer') == ['客户甲'] for link in batch_links))
 

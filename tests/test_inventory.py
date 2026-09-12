@@ -211,7 +211,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(adjust_transaction["quantity"], 3)
         self.assertIn("盘点调整", adjust_transaction["remark"])
 
-        orders_html = self.client.get("/admin/orders").get_data(as_text=True)
+        orders_html = self.client.get(f"/admin/orders/groups/{order_id}").get_data(as_text=True)
         self.assertIn("材料库存情况", orders_html)
         self.assertIn("库存数量", orders_html)
         self.assertIn(">7<", orders_html)

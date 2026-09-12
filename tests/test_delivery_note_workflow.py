@@ -88,7 +88,7 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
                 return conn.execute('SELECT MAX(id) FROM production_followups').fetchone()[0]
 
         historical = create_card()
-        self.client.get('/admin/production-followups')
+        self.client.get('/admin/production-followups?view=legacy')
         with self.client.session_transaction() as session:
             csrf = session['production_followup_csrf_token']
         with app.get_db() as conn:

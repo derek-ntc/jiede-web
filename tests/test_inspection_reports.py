@@ -219,7 +219,7 @@ class InspectionReportTests(unittest.TestCase):
                 session["admin_username"] = "admin"
                 session["admin_role"] = "admin"
 
-            orders_html = client.get("/admin/orders").get_data(as_text=True)
+            orders_html = client.get(f"/admin/orders/groups/{order_id}").get_data(as_text=True)
             self.assertNotIn("生成纸箱采购清单", orders_html)
             self.assertIn("/admin/purchases/carton", orders_html)
 
@@ -581,7 +581,7 @@ class InspectionReportTests(unittest.TestCase):
                 session["admin_username"] = "viewer"
                 session["admin_role"] = "operator"
 
-            response = client.get("/admin/production-followups")
+            response = client.get("/admin/production-followups?view=legacy")
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
@@ -761,7 +761,10 @@ class InspectionReportTests(unittest.TestCase):
                 session["admin_username"] = "worker"
                 session["admin_role"] = "operator"
 
-            response = client.post(f"/admin/production-followups/{followup_id}/delete")
+            with client.session_transaction() as session:
+                session['production_followup_csrf_token'] = 'test-delete-token'
+            response = client.post(f"/admin/production-followups/{followup_id}/delete",
+                data={'production_followup_csrf_token': 'test-delete-token'})
 
             self.assertEqual(response.status_code, 302)
             with app.get_db() as conn:

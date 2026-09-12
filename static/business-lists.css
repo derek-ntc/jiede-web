@@ -447,3 +447,15 @@ body:is(.page-admin_orders, .page-shipped_orders, .page-shipment_operations) {
   outline-offset: 2px;
 }
 .shipped-page.erp-page :is(input, select, textarea):focus { border-color: var(--shipping-focus) !important; }
+/* Order summaries and order-linked cumulative process progress. */
+.order-group-table, .order-progress-table { width: 100%; border-collapse: collapse; }
+.order-group-table th, .order-group-table td, .order-progress-table th, .order-progress-table td { padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+.order-group-table { min-width: 980px; }
+.order-progress-table { min-width: 900px; }
+.order-progress-table input[type="number"] { width: 110px; min-width: 0; }
+.order-progress-table textarea { width: 100%; min-width: 170px; min-height: 74px; }
+.order-progress-table progress { display: block; width: 130px; max-width: 100%; accent-color: #146b55; }
+.order-progress-table small { display: block; }
+.order-progress-item { margin-top: 18px; }
+.order-process-actions { display: flex; flex-wrap: wrap; gap: 6px; max-width: 230px; }
+.order-progress-item .section-actions { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 18px; }

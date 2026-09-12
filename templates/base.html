@@ -16,9 +16,9 @@
       <nav>
         {% if session.get("admin_logged_in") %}
           <a class="{% if request.endpoint == 'dashboard' %}active-nav-link{% endif %}" href="{{ url_for('dashboard') }}">首页</a>
-          <a class="{% if request.endpoint in ['production_followups', 'complete_production_stage', 'production_followup_file', 'preview_production_process_card'] %}active-nav-link{% endif %}" href="{{ url_for('production_followups') }}">生产跟进</a>
+          <a class="{% if request.endpoint in ['production_followups', 'order_production_detail', 'complete_production_stage', 'production_followup_file', 'preview_production_process_card'] %}active-nav-link{% endif %}" href="{{ url_for('production_followups') }}">生产跟进</a>
           {% if can_view_orders %}
-            <a class="primary-nav-link{% if request.endpoint in ['admin_orders', 'new_order', 'edit_order', 'edit_order_material', 'edit_order_carton'] %} active-nav-link{% endif %}" href="{{ url_for('admin_orders') }}">生产订单</a>
+            <a class="primary-nav-link{% if request.endpoint in ['admin_orders', 'order_group_detail', 'new_order', 'edit_order', 'edit_order_material', 'edit_order_carton'] %} active-nav-link{% endif %}" href="{{ url_for('admin_orders') }}">生产订单</a>
           {% endif %}
           {% if can_view_shipped %}
             <a class="primary-nav-link{% if request.endpoint in ['shipment_operations', 'shipped_orders', 'edit_shipment', 'edit_assembly_shipment', 'preview_shipment_plan', 'preview_inspection_report'] %} active-nav-link{% endif %}" href="{{ url_for('shipment_operations') if can_manage_shipped else url_for('shipped_orders') }}">发货</a>

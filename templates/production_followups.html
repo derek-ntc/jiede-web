@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}生产跟进{% endblock %}
 {% block content %}
+<nav class="section-actions"><a class="button secondary" href="{{ url_for('production_followups') }}">按订单跟进</a><a class="button" href="{{ url_for('production_followups', view='legacy') }}">历史／独立工艺卡</a></nav>
 <div class="production-followup-page">
   <section class="page-head">
     <div>
@@ -16,6 +17,7 @@
   <section class="panel">
     <h2>新增跟进</h2>
     <form method="post" enctype="multipart/form-data" class="grid-form production-followup-form" data-products-url="{{ url_for('production_followup_products') }}">
+      <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
       <input type="hidden" name="filter_q" value="{{ query }}">
       <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
       <div class="production-followup-inputs">
@@ -67,6 +69,7 @@
     <div class="section-head">
       <h2>生产跟进表</h2>
       <form class="search compact-search production-followup-search" method="get">
+        <input type="hidden" name="view" value="legacy">
         <input type="search" name="q" value="{{ query }}" placeholder="搜索批次号、下单时间、图号、产品名称、图纸文件" data-auto-submit-search>
         <select name="customer" aria-label="客户筛选" data-auto-submit-filter>
           <option value="">全部客户</option>
@@ -77,7 +80,7 @@
         </select>
         <button type="submit">搜索</button>
         {% if query or selected_customer %}
-          <a class="button secondary" href="{{ url_for('production_followups') }}">清除</a>
+          <a class="button secondary" href="{{ url_for('production_followups', view='legacy') }}">清除</a>
         {% endif %}
       </form>
     </div>
@@ -248,6 +251,7 @@
               <td data-label="操作">
                 {% if can_manage_production_followups %}
                   <form method="post" action="{{ url_for('delete_production_followup', followup_id=row.id) }}" onsubmit="return confirm('确定删除这条生产跟进记录吗？');">
+                    <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
                     <input type="hidden" name="filter_q" value="{{ query }}">
                     <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
                     <button class="danger compact-button" type="submit">删除</button>

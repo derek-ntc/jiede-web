@@ -104,6 +104,7 @@ class BusinessListLayoutTests(unittest.TestCase):
                 query = parse_qs(urlsplit(link['href']).query)
                 self.assertEqual(query['q'], ['SO-100'])
                 self.assertEqual(query['customer'], ['客户A'])
+        page = self.page(f'/admin/orders/groups/{self.order}', q='SO-100', customer='客户A')
         checkbox = page.find('input', name='order_id', value=str(self.order))[0]
         self.assertEqual(checkbox['form'], 'shipment-plan-form')
         self.assertTrue(page.find('form', id='shipment-plan-form', method='post'))
@@ -213,7 +214,7 @@ class BusinessListLayoutTests(unittest.TestCase):
     def test_inline_list_scripts_parse_for_admin_and_readonly_users(self):
         for username, role in [('admin', 'admin'), ('reader', 'operator')]:
             self.login(username, role)
-            routes = ['/admin/orders', '/admin/shipped-orders']
+            routes = [f'/admin/orders/groups/{self.order}', '/admin/shipped-orders']
             if username == 'admin':
                 routes.append('/admin/shipped-orders/create')
             for path in routes:
@@ -229,7 +230,7 @@ class BusinessListLayoutTests(unittest.TestCase):
         remark = '按客户图纸加工，检验后独立包装。<script>unsafe()</script>'
         with app.get_db() as conn:
             conn.execute('UPDATE product_orders SET remark = ? WHERE id = ?', (remark, self.order))
-        html = self.client.get('/admin/orders').get_data(as_text=True)
+        html = self.client.get(f'/admin/orders/groups/{self.order}').get_data(as_text=True)
         page = Elements(html)
         self.assertTrue(page.find('details', **{'class': 'erp-text-details'}))
         self.assertIn('&lt;script&gt;unsafe()&lt;/script&gt;', html)

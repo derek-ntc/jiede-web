@@ -6,19 +6,20 @@
 {% block content %}
   {% macro sort_link(label, key) -%}
     {% set next_direction = "desc" if sort == key and direction == "asc" else "asc" %}
-    <a class="sort-link{% if sort == key %} active{% endif %}" href="{{ url_for('admin_orders', q=query, customer=selected_customer, sort=key, direction=next_direction) }}">
+    <a class="sort-link{% if sort == key %} active{% endif %}" href="{{ url_for('order_group_detail', anchor_id=group.anchor_id, q=query, customer=selected_customer, sort=key, direction=next_direction) if group is defined else url_for('admin_orders', q=query, customer=selected_customer, sort=key, direction=next_direction) }}">
       {{ label }}{% if sort == key %}<span>{{ "↑" if direction == "asc" else "↓" }}</span>{% endif %}
     </a>
   {%- endmacro %}
   <div class="order-page erp-page">
   <section class="page-head">
     <div>
-      <h1>生产订单</h1>
+      <h1>{{ '订单明细 · ' + group.order_no if group is defined else '生产订单' }}</h1>
+      {% if group is defined %}<p>{{ group.customer }} · {{ group.line_count }} 项产品</p><a class="button secondary" href="{{ url_for('admin_orders', q=query, customer=selected_customer, sort=sort, direction=direction) }}">返回订单汇总</a>{% endif %}
       <p>查看订单产品明细、发货数量和发货时间。</p>
     </div>
     <div class="head-stat">
       <strong>{{ orders|length }}</strong>
-      <span>{% if query or selected_customer %}条搜索结果{% else %}条订单明细{% endif %}</span>
+      <span>条订单明细</span>
     </div>
   </section>
 
@@ -43,7 +44,7 @@
       <div class="erp-query-actions">
         <button type="submit">搜索</button>
         <a class="button secondary" href="{{ url_for('admin_orders') }}">清空</a>
-        <span>支持产品名称、供应商、库存及备注搜索</span>
+        <span>支持产品名称、规格、库存及备注搜索</span>
       </div>
     </form>
   </section>
@@ -97,6 +98,7 @@
           <col style="width: 84px;">
           <col style="width: 96px;">
           <col style="width: 128px;">
+          <col style="width: 112px;">
           <col style="width: 92px;">
           <col style="width: 62px;">
           <col style="width: 64px;">
@@ -126,6 +128,7 @@
             <th>{{ sort_link("下单", "ordered_at") }}</th>
             <th>{{ sort_link("图号", "drawing_no") }}</th>
             <th>{{ sort_link("产品", "product_name") }}</th>
+            <th>{{ sort_link("规格型号", "supplier") }}</th>
             <th>{{ sort_link("客户", "customer") }}</th>
             <th>{{ sort_link("订单", "quantity") }}</th>
             <th>{{ sort_link("已发", "shipped_quantity") }}</th>
@@ -160,6 +163,7 @@
                 <a href="{{ url_for('manual_detail', manual_id=order.manual_id) }}">{{ order.drawing_no or "-" }}</a>
               </td>
               <td data-label="产品名称">{{ order.product_name }}</td>
+              <td data-label="规格型号">{{ order.supplier or '-' }}</td>
               <td data-label="客户名称">{{ order.customer or order.product_customer or "-" }}</td>
               <td data-label="订单数量">{{ order.quantity }}</td>
               <td data-label="已发货数量">{{ order.shipped_quantity_total or 0 }}</td>
@@ -213,12 +217,12 @@
               <td class="actions" data-label="操作">
                 {% if can_manage_orders %}
                   <div class="action-buttons">
-                    <a class="button" href="{{ url_for('edit_order', order_id=order.id) }}">修改</a>
+                    <a class="button" href="{{ url_for('edit_order', order_id=order.id, q=query, customer=selected_customer, sort=sort, direction=direction) }}">修改</a>
                     {% if can_manage_warehouse_inventory %}
                       <a class="button secondary" href="{{ url_for('inventory_inbound', order_id=order.id, manual_id=order.manual_id, order_no=order.order_no) }}">成品入库</a>
                       <a class="button secondary" href="{{ url_for('inventory_batch', mode='inbound', customer=order.customer, order_no=order.order_no) }}">整单入库</a>
                     {% endif %}
-                    <form method="post" action="{{ url_for('delete_order', order_id=order.id) }}" onsubmit="return confirm('确定删除这条产品订单明细吗？');">
+                    <form method="post" action="{{ url_for('delete_order', order_id=order.id, q=query, customer=selected_customer, sort=sort, direction=direction) }}" onsubmit="return confirm('确定删除这条产品订单明细吗？');">
                       <button class="danger" type="submit">删除</button>
                     </form>
                   </div>
@@ -229,7 +233,7 @@
             </tr>
           {% else %}
             <tr>
-              <td colspan="{% if can_manage_orders %}19{% else %}18{% endif %}" class="empty">暂无产品订单</td>
+              <td colspan="{% if can_manage_orders %}20{% else %}19{% endif %}" class="empty">暂无产品订单</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -271,7 +275,7 @@
       if (!wrap || !table || window.matchMedia("(max-width: 760px)").matches) return;
 
       const mainHeaders = Array.from(table.querySelectorAll("thead th"));
-      const storageKey = "factory-web.order-column-widths.v3";
+      const storageKey = "factory-web.order-column-widths.v4";
       const savedWidths = JSON.parse(localStorage.getItem(storageKey) || "[]");
       const mainCols = Array.from(table.querySelectorAll("col"));
       const sampleRows = Array.from(table.querySelectorAll("tbody tr")).slice(0, 50);

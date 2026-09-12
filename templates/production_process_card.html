@@ -3,7 +3,7 @@
 {% block content %}
 {% set row = followup.row %}
 <section class="preview-toolbar">
-  <a class="button secondary" href="{{ url_for('production_followups') }}">返回生产跟进</a>
+  <a class="button secondary" href="{{ url_for('order_production_detail', anchor_id=followup.order.id) if followup.order else url_for('production_followups', view='legacy') }}">返回生产跟进</a>
   <button type="button" onclick="window.print()">打印</button>
 </section>
 
@@ -23,6 +23,7 @@
         </header>
 
         <dl class="process-card-info">
+          {% if followup.order %}<div><dt>订单号 / 明细</dt><dd>{{ followup.order.order_no }} / #{{ followup.order.id }}</dd></div><div><dt>客户 / 需求数量</dt><dd>{{ row.customer }} / {{ followup.order.quantity }}</dd></div>{% endif %}
           <div>
             <dt>下单时间</dt>
             <dd>{{ row.ordered_at or "-" }}</dd>
@@ -56,9 +57,11 @@
               <tr>
                 <td>{{ step.name }}</td>
                 <td>
+                  {% if followup.order %}{{ step.completed_quantity }} / {{ followup.order.quantity }}<br>{{ ((step.completed_quantity * 100 / followup.order.quantity) if followup.order.quantity else 0)|round(1) }}%{% else %}
                   <span class="process-stage-check{% if step.completed_at %} is-checked{% endif %}" aria-label="{{ '完成' if step.completed_at else '待完成' }}">
                     {% if step.completed_at %}✓{% endif %}
                   </span>
+                  {% endif %}
                 </td>
                 <td>{{ step.completed_at.replace("T", " ")[:16] if step.completed_at else "" }}</td>
                 <td>{{ step.completed_by }}</td>

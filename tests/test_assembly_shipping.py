@@ -2261,7 +2261,7 @@ class AssemblySaveTests(AssemblyAppTestCase):
             manual_id, order_id, 30, shipped_at="2026-08-31"
         )
 
-        orders_html = self.client.get("/admin/orders").get_data(as_text=True)
+        orders_html = self.client.get(f"/admin/orders/groups/{order_id}").get_data(as_text=True)
         dashboard_html = self.client.get("/dashboard").get_data(as_text=True)
         captured = {}
 

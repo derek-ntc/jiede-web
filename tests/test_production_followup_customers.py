@@ -124,7 +124,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         ).lastrowid
 
     def _csrf_token(self):
-        html = self.client.get("/admin/production-followups").get_data(as_text=True)
+        html = self.client.get("/admin/production-followups?view=legacy").get_data(as_text=True)
         match = re.search(
             r'name="production_followup_csrf_token" value="([^"]+)"', html
         )
@@ -165,7 +165,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
 
         response = self.client.get(
             "/admin/production-followups",
-            query_string={"customer": "客户A", "q": "P1"},
+            query_string={"view": "legacy", "customer": "客户A", "q": "P1"},
         )
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
@@ -174,7 +174,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
 
         product_name_response = self.client.get(
             "/admin/production-followups",
-            query_string={"customer": "客户A", "q": "另一产品"},
+            query_string={"view": "legacy", "customer": "客户A", "q": "另一产品"},
         )
         product_name_html = product_name_response.get_data(as_text=True)
         self.assertIn("客户A另一产品", product_name_html)
@@ -197,7 +197,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
 
         response = self.client.get(
             "/admin/production-followups",
-            query_string={"customer": "客户A", "q": "P1"},
+            query_string={"view": "legacy", "customer": "客户A", "q": "P1"},
         )
         html = response.get_data(as_text=True)
 
@@ -249,7 +249,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
 
         html = self.client.get(
             "/admin/production-followups",
-            query_string={"customer": "客户A", "q": "P1"},
+            query_string={"view": "legacy", "customer": "客户A", "q": "P1"},
         ).get_data(as_text=True)
         parser = _ProcessConfirmationParser()
         parser.feed(html)
@@ -331,7 +331,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         app.DATABASE_READY = True
         response = self.client.get(
             "/admin/production-followups",
-            query_string={"customer": "__unassigned__", "q": "OLD"},
+            query_string={"view": "legacy", "customer": "__unassigned__", "q": "OLD"},
         )
         html = response.get_data(as_text=True)
 
@@ -373,7 +373,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         self.assertEqual(location.path, "/admin/production-followups")
         self.assertEqual(
             parse_qs(location.query),
-            {"q": ["P1"], "customer": ["客户A"]},
+            {"view": ["legacy"], "q": ["P1"], "customer": ["客户A"]},
         )
         with app.get_db() as conn:
             after_add = production_processes.load_followup_process_card(conn, 1)
@@ -453,7 +453,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
             )
             before = production_processes.load_followup_process_card(conn, 1)
 
-        page = self.client.get("/admin/production-followups")
+        page = self.client.get("/admin/production-followups?view=legacy")
         self.assertIn(
             'name="production_followup_csrf_token" value="test-followup-csrf"',
             page.get_data(as_text=True),
@@ -555,7 +555,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
 
         list_response = self.client.get(
             "/admin/production-followups",
-            query_string={"customer": "客户A", "q": "P1"},
+            query_string={"view": "legacy", "customer": "客户A", "q": "P1"},
         )
         list_html = list_response.get_data(as_text=True)
         print_response = self.client.get("/admin/production-followups/1/process-card")
@@ -792,11 +792,11 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         )
         location = urlsplit(response.headers["Location"])
         self.assertEqual(location.path, "/admin/production-followups")
-        self.assertEqual(parse_qs(location.query), {"q": ["P1"], "customer": ["客户A"]})
+        self.assertEqual(parse_qs(location.query), {"view": ["legacy"], "q": ["P1"], "customer": ["客户A"]})
 
         html = self.client.get(
             "/admin/production-followups",
-            query_string={"q": "P1", "customer": "客户A"},
+            query_string={"view": "legacy", "q": "P1", "customer": "客户A"},
         ).get_data(as_text=True)
         self.assertIn('name="filter_q" value="P1"', html)
         self.assertIn('name="filter_customer" value="客户A"', html)

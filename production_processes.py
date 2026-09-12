@@ -437,13 +437,18 @@ def _project_legacy_completion(
 
 
 def complete_followup_process_step(
-    conn, followup_id, step_id, completed_by, *, completed_at=None
+    conn, followup_id, step_id, completed_by, *, completed_at=None, expected_version=None
 ):
     timestamp = completed_at or _beijing_now()
     operator = str(completed_by or "").strip()
     if not operator:
         raise ValueError("生产工艺操作人不能为空")
     with _savepoint(conn, "complete_followup_process_step"):
+        from order_production import linked_order, set_process_quantity
+        order = linked_order(conn, followup_id)
+        if order is not None:
+            return set_process_quantity(conn, followup_id, step_id, order['quantity'],
+                expected_version, operator, timestamp)
         card = load_followup_process_card(conn, followup_id)
         step = _card_action(card, step_id)
         if step["completed_at"]:
@@ -464,9 +469,16 @@ def complete_followup_process_step(
     return load_followup_process_card(conn, followup_id)
 
 
-def revert_followup_process_step(conn, followup_id, step_id, *, now=None):
+def revert_followup_process_step(conn, followup_id, step_id, *, now=None,
+                                expected_version=None, operator='', confirmed=False):
     timestamp = now or _beijing_now()
     with _savepoint(conn, "revert_followup_process_step"):
+        from order_production import linked_order, set_process_quantity
+        if linked_order(conn, followup_id) is not None:
+            if not confirmed:
+                raise ValueError('请明确确认将累计完成数量归零')
+            return set_process_quantity(conn, followup_id, step_id, 0,
+                expected_version, operator, timestamp)
         card = load_followup_process_card(conn, followup_id)
         step = _card_action(card, step_id)
         if not step["completed_at"]:
@@ -554,12 +566,20 @@ def _renumber_followup_process_steps(conn, followup_id, timestamp):
             )
 
 
-def delete_followup_process_step(conn, followup_id, step_id, *, now=None):
+def delete_followup_process_step(conn, followup_id, step_id, *, now=None,
+                                confirmed=False, operator=''):
     timestamp = now or _beijing_now()
     with _savepoint(conn, "delete_followup_process_step"):
         card = load_followup_process_card(conn, followup_id)
         step = _card_action(card, step_id)
-        if not step["can_delete"]:
+        from order_production import linked_order, record_quantity_event
+        order = linked_order(conn, followup_id)
+        if order is not None and step['completed_quantity']:
+            if not confirmed or not operator:
+                raise ValueError('该工艺已有完成数量，请额外确认删除；历史记录保留')
+            record_quantity_event(conn, followup_id, order['id'], step,
+                step['completed_quantity'], operator, timestamp, 'delete')
+        if order is None and not step["can_delete"]:
             raise ValueError("已完成工艺必须先撤回再删除")
         conn.execute(
             """
@@ -580,9 +600,11 @@ def move_followup_process_step(
         raise ValueError("生产工艺移动方向无效")
     timestamp = now or _beijing_now()
     with _savepoint(conn, "move_followup_process_step"):
+        from order_production import linked_order
+        is_linked = linked_order(conn, followup_id) is not None
         card = load_followup_process_card(conn, followup_id)
         step = _card_action(card, step_id)
-        if step["completed_at"]:
+        if step["completed_at"] and not is_linked:
             raise ValueError("已完成工艺顺序不能调整")
         position = next(
             index for index, candidate in enumerate(card) if candidate["id"] == step["id"]
@@ -590,7 +612,7 @@ def move_followup_process_step(
         target_position = position - 1 if direction == "up" else position + 1
         if not 0 <= target_position < len(card):
             raise ValueError("生产工艺已经位于可移动边界")
-        if not step[f"can_move_{direction}"]:
+        if not step[f"can_move_{direction}"] and not is_linked:
             raise ValueError("未完成工艺不能跨越已完成工艺")
         target = card[target_position]
         conn.execute(
