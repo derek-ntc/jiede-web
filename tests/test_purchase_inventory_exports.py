@@ -117,6 +117,10 @@ class PurchaseInventoryPdfRouteTests(unittest.TestCase):
                             self.assertIn("原到货备注", pdf_text)
             page = self.client.get(root, query_string={"q": lot_no})
             self.assertIn("export.pdf?q=" + lot_no, page.text)
+            self.assertIn(f'data-pdf-preview-url="{root}/export.pdf?q={lot_no}"', page.text)
+            self.assertIn('data-pdf-preview-name="采购库存清单"', page.text)
+            self.assertIn('data-pdf-preview-dialog', page.text)
+            self.assertIn('data-pdf-preview-print', page.text)
 
     def test_pdf_permission_errors_and_zero_stock_filter_are_private(self):
         url = self.inventory_url + "/export.pdf"
