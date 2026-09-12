@@ -247,12 +247,27 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
         text = ''.join(zlib.decompress(a85decode(stream.strip()[:-2])).decode('latin-1')
                        for stream in streams if stream.strip().endswith(b'~>'))
         # The A4 remark column may wrap a word across consecutive text draws.
-        rendered_text = ''.join(re.findall(r'\(((?:\\.|[^\\)])*)\)\s*Tj', text))
+        fragments = re.findall(r'\(((?:\\.|[^\\)])*)\)\s*Tj', text)
+        # PDF string literals use octal escapes. The server's CID fallback
+        # encodes text in UTF-16BE, whereas an embedded TrueType font emits
+        # single-byte strings for these ASCII document-contract markers.
+        decoded = []
+        escapes = {'n': '\n', 'r': '\r', 't': '\t', 'b': '\b', 'f': '\f'}
+        for fragment in fragments:
+            literal = re.sub(r'\\([0-7]{1,3}|.)', lambda match:
+                chr(int(match[1], 8)) if re.fullmatch('[0-7]{1,3}', match[1])
+                else escapes.get(match[1], match[1]), fragment).encode('latin-1')
+            decoded.append(literal.decode('utf-16-be') if b'\x00' in literal else literal.decode('latin-1'))
+        rendered_text = ''.join(decoded)
         self.assertIn('ZERO-REMARK', rendered_text)
         self.assertIn('POSITIVE-REMARK', rendered_text)
         self.assertIn('ZERO-PDF', rendered_text)
-        self.assertRegex(text, r'\(0\)\s*Tj')
+        self.assertIn('0', decoded)
         self.assertNotIn('CNY', rendered_text)
+
+    def test_delivery_pdf_contract_with_cid_fallback_font(self):
+        with patch.object(app, 'PDF_FONT_CANDIDATES', []), patch.object(app, 'PDF_FONT_NAME', None):
+            self.test_delivery_html_and_real_pdf_show_zero_and_final_remark_column_without_prices()
 
     def test_delivery_note_exports_template_style_excel_without_word(self):
         zero = self.create_product('ZERO-EXPORT')
