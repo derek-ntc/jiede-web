@@ -138,18 +138,18 @@ class PurchaseInventoryTests(unittest.TestCase):
     def test_invoice_updates_audit_only_and_retries_remain_stable(self):
         before = self.lot()
         args = (self.conn, self.lot_id, "invoiced", "已收到发票", "receiver", self.now, "invoice-1")
-        result = self.call("update_purchase_invoice_status", *args)
+        result = self.call("update_purchase_invoice_status", *args, expected_version=1)
         self.assertEqual(self.lot()["invoice_status"], "invoiced")
         self.assertEqual(self.lot()["available_quantity"], before["available_quantity"])
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_transactions"), 1)
         event = self.conn.execute("SELECT * FROM purchase_inventory_invoice_events").fetchone()
         self.assertEqual((event["old_status"], event["new_status"], event["operator"]), ("pending", "invoiced", "receiver"))
-        self.call("update_purchase_invoice_status", self.conn, self.lot_id, "not_required", "更正", "receiver", self.now, "invoice-2")
-        self.assertEqual(self.call("update_purchase_invoice_status", *args), result)
+        self.call("update_purchase_invoice_status", self.conn, self.lot_id, "not_required", "更正", "receiver", self.now, "invoice-2", expected_version=2)
+        self.assertEqual(self.call("update_purchase_invoice_status", *args, expected_version=1), result)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_invoice_events"), 2)
         for status, key in (("invalid", "invalid"), ("pending", "invoice-1"), ("not_required", "noop")):
             with self.assertRaises(pi.PurchaseInventoryConflict):
-                self.call("update_purchase_invoice_status", self.conn, self.lot_id, status, "", "receiver", self.now, key)
+                self.call("update_purchase_invoice_status", self.conn, self.lot_id, status, "", "receiver", self.now, key, expected_version=3)
 
     def test_failure_mid_transfer_rolls_back_all_stock_and_audit_changes(self):
         self.conn.execute("CREATE TRIGGER fail_transfer BEFORE INSERT ON purchase_inventory_transactions WHEN NEW.transaction_type='transfer_in' BEGIN SELECT RAISE(ABORT, 'test failure'); END")

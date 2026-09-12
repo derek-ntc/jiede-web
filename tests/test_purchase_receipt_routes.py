@@ -1,8 +1,10 @@
 import json
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import app
 import procurement as p
@@ -150,12 +152,69 @@ class PurchaseReceiptRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post(self.url, json=payload).status_code, 409)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_transactions"), 1)
 
+    def test_committed_receipt_changed_conflict_then_original_duplicate_recovers_without_second_write(self):
+        self.login("blind")
+        payload = self.payload()
+        first = self.client.post(self.url, json=payload)
+        self.assertEqual(first.status_code, 201)
+        for changes in ({"remark": "edited after lost response"},
+                        {"rows": [dict(payload["rows"][0], actual_quantity="invalid")]}):
+            conflict = self.client.post(self.url, json=dict(payload, **changes))
+            self.assertEqual(conflict.status_code, 409)
+            self.assertEqual(conflict.json.get("conflict_code"), "idempotency_key_used")
+            self.assertFalse(conflict.json["needs_confirmation"])
+            self.assertEqual(conflict.json["existing_receipt"], dict(
+                id=first.json["id"], receipt_no=first.json["receipt_no"], redirect_url=first.json["redirect_url"]))
+            self.assertEqual(self.client.get(conflict.json["existing_receipt"]["redirect_url"]).status_code, 200)
+            for secret in ("unit_price", "line_total", "987654", "9876.54"):
+                self.assertNotIn(secret, conflict.text)
+        recovered = self.client.post(self.url, json=payload)
+        self.assertEqual(recovered.status_code, 200)
+        self.assertTrue(recovered.json["duplicate"])
+        self.assertEqual(recovered.json["id"], first.json["id"])
+        self.assertEqual(recovered.json["redirect_url"], first.json["redirect_url"])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_receipts"), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_transactions"), 1)
+        self.assertEqual(self.scalar("SELECT available_quantity FROM purchase_inventory_lots"), 30)
+
+    def test_expired_preview_recovers_only_persisted_receipt_for_the_same_order_and_category(self):
+        payload = self.payload(key="  expired-recovery  ")
+        first = self.client.post(self.url, json=payload)
+        self.assertEqual(first.status_code, 201)
+        other_order, _ = self.create_order(order_no="OTHER-ORDER")
+        with patch("itsdangerous.timed.TimestampSigner.get_timestamp", return_value=int(time.time()) + 7201):
+            for retry in (payload, dict(payload, remark="changed", rows=[])):
+                response = self.client.post(self.url, json=retry)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json.get("conflict_code"), "idempotency_key_used")
+                self.assertFalse(response.json["needs_confirmation"])
+                self.assertEqual(response.json["existing_receipt"]["redirect_url"], first.json["redirect_url"])
+                self.assertNotIn("current", response.json)
+            for url, retry in (
+                (self.url, dict(payload, idempotency_key="unused")),
+                (f"/admin/purchase-receipts/raw-material/{other_order}/new", payload),
+                (f"/admin/purchase-receipts/carton/{self.order_id}/new", payload),
+            ):
+                rejected = self.client.post(url, json=retry)
+                self.assertEqual(rejected.status_code, 409)
+                self.assertNotIn("existing_receipt", rejected.json)
+                self.assertNotEqual(rejected.json.get("conflict_code"), "revision_safe")
+            self.assertEqual(self.client.post(self.url, json=dict(payload, csrf_token="bad")).status_code, 403)
+            self.login("reader")
+            self.assertEqual(self.client.post(self.url, json=payload).status_code, 302)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_receipts"), 1)
+        self.assertEqual(self.scalar("SELECT remark FROM purchase_receipts"), "首批")
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_transactions"), 1)
+        self.assertEqual(self.scalar("SELECT available_quantity FROM purchase_inventory_lots"), 30)
+
     def test_over_receipt_and_stale_conflicts_return_current_and_redact_prices(self):
         self.login("blind")
         payload = self.payload(actual="101")
         response = self.client.post(self.url, json=payload)
         self.assertEqual(response.status_code, 409)
         self.assertTrue(response.json["needs_confirmation"])
+        self.assertEqual(response.json.get("conflict_code"), "revision_safe")
+        self.assertNotIn("existing_receipt", response.json)
         self.assertEqual(response.json["current"]["rows"][0]["remaining_quantity"], 100)
         for secret in ("unit_price", "line_total", "987654", "9876.54"):
             self.assertNotIn(secret, response.text)
@@ -165,6 +224,7 @@ class PurchaseReceiptRouteTests(unittest.TestCase):
         stale = self.client.post(self.url, json=old)
         self.assertEqual(stale.status_code, 409)
         self.assertFalse(stale.json["needs_confirmation"])
+        self.assertEqual(stale.json.get("conflict_code"), "revision_safe")
         self.assertEqual(stale.json["current"]["rows"][0]["actual_quantity"], 101)
         self.assertTrue(stale.json["preview_token"])
         self.assertNotIn("unit_price", stale.text)

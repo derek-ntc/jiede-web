@@ -10,7 +10,8 @@
   }
   async function submitReceipt(payload, send, confirm) {
     const result = await send(payload);
-    if (result.status === 409 && result.data.needs_confirmation && await confirm(result.data)) {
+    if (result.status === 409 && result.data.conflict_code === 'revision_safe' &&
+        result.data.needs_confirmation && await confirm(result.data)) {
       return send({...payload, confirm_over_receipt: true});
     }
     return result;
@@ -27,14 +28,17 @@
     const summary = form.querySelector('[data-conflict-summary]');
     const refresh = form.querySelector('[data-refresh-preview]');
     const submit = form.querySelector('[type="submit"]');
+    const existingLink = form.querySelector('[data-existing-receipt]');
     let currentConflict = null;
     let busy = false;
+    let pendingBody = null;
+    let recoveryRequired = false;
     function showCurrent(data) {
       if (!data.current) return;
       summary.textContent = data.current.rows.map(row => `${row.item_name || row.drawing_no || row.material}：订购 ${row.ordered_quantity}，累计到货 ${row.actual_quantity}，累计合格 ${row.qualified_quantity}，剩余 ${row.remaining_quantity}`).join('\n');
     }
     refresh.addEventListener('click', () => {
-      if (!currentConflict) return;
+      if (busy || recoveryRequired || !currentConflict) return;
       state.preview_token = currentConflict.preview_token;
       const rows = new Map(currentConflict.current.rows.map(row => [String(row.id), row]));
       form.querySelectorAll('[data-receipt-row]').forEach(element => {
@@ -61,21 +65,29 @@
     });
     form.addEventListener('submit', async event => {
       event.preventDefault();
-      if (busy) return;
-      const rows = Array.from(form.querySelectorAll('[data-receipt-row]')).map(element => ({
-        checked: element.querySelector('[data-row-selected]').checked,
-        fields: {purchase_order_item_id: element.dataset.itemId, ...Object.fromEntries(
-          Array.from(element.querySelectorAll('[data-field]')).map(input => [input.dataset.field, input.value]))}
-      }));
-      const payload = buildReceiptPayload({...state, received_at: form.elements.received_at.value, remark: form.elements.remark.value}, rows);
-      if (!payload.rows.length) { message.textContent = '请至少勾选一条到货明细。'; return; }
+      if (busy || recoveryRequired) return;
+      if (pendingBody === null) {
+        const rows = Array.from(form.querySelectorAll('[data-receipt-row]')).map(element => ({
+          checked: element.querySelector('[data-row-selected]').checked,
+          fields: {purchase_order_item_id: element.dataset.itemId, ...Object.fromEntries(
+            Array.from(element.querySelectorAll('[data-field]')).map(input => [input.dataset.field, input.value]))}
+        }));
+        const draft = buildReceiptPayload({...state, received_at: form.elements.received_at.value, remark: form.elements.remark.value}, rows);
+        if (!draft.rows.length) { message.textContent = '请至少勾选一条到货明细。'; return; }
+        pendingBody = JSON.stringify(draft);
+      }
+      const payload = JSON.parse(pendingBody);
       busy = true;
       submit.disabled = true;
       refresh.hidden = true;
+      currentConflict = null;
       message.textContent = '正在保存…';
       try {
         const send = async body => {
-          const response = await fetch(form.action, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+          // Capture the confirmed command too, before a possibly lost committed response.
+          pendingBody = JSON.stringify(body);
+          const response = await fetch(form.action, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: pendingBody});
+          if (response.redirected) throw new Error('登录状态或权限已变化，请在新窗口确认登录状态');
           if (!response.headers.get('content-type')?.includes('application/json')) throw new Error('会话或请求已失效，请在新页面确认登录状态；本页填写值已保留。');
           return {status: response.status, data: await response.json()};
         };
@@ -86,15 +98,33 @@
             .map(row => `${row.item_name || row.material}：本次 ${row.actual_quantity}，剩余 ${remaining.get(String(row.purchase_order_item_id))}`).join('\n');
           return window.confirm(`${data.error}\n${excess}\n确认超收并入库？`);
         });
-        if (result.status === 200 || result.status === 201) { window.location.assign(result.data.redirect_url); return; }
-        message.textContent = result.data.error || '保存失败，填写值已保留。';
-        showCurrent(result.data);
-        if (result.data.current && result.data.preview_token && !result.data.needs_confirmation) {
-          currentConflict = result.data;
-          refresh.hidden = false;
+        if ((result.status === 200 || result.status === 201) &&
+            typeof result.data.redirect_url === 'string' && result.data.redirect_url) {
+          recoveryRequired = true;
+          window.location.assign(result.data.redirect_url);
+          return;
         }
-      } catch (error) { message.textContent = error.message || '网络异常，可使用原填写值重试。'; }
-      finally { busy = false; submit.disabled = false; }
+        if (result.status === 409 && result.data.conflict_code === 'idempotency_key_used') {
+          recoveryRequired = true;
+          message.textContent = '该提交标识已有到货单，不能把修改内容另存为第二张。填写内容已保留，请先查看原到货单核对。';
+          if (result.data.existing_receipt && existingLink) {
+            existingLink.href = result.data.existing_receipt.redirect_url;
+            existingLink.hidden = false;
+          }
+        } else if (result.status === 409 && result.data.conflict_code === 'revision_safe') {
+          // Only a server-confirmed unused key permits edits or preview adoption.
+          pendingBody = null;
+          message.textContent = result.data.error || '保存失败，填写值已保留。';
+          showCurrent(result.data);
+          if (result.data.current && result.data.preview_token && !result.data.needs_confirmation) {
+            currentConflict = result.data;
+            refresh.hidden = false;
+          }
+        } else message.textContent = (result.data.error || '提交结果尚未确认') + '。再次提交只核对上次原始内容，不提交后续编辑。';
+      } catch (error) {
+        message.textContent = (error.message || '网络异常') + '。原始提交内容与标识已保留；再次提交只核对原始内容，不提交后续编辑。请勿重复新建单据。';
+      }
+      finally { busy = false; submit.disabled = recoveryRequired; }
     });
   }
   const api = {visibleDimensionFields, buildReceiptPayload, submitReceipt, init};

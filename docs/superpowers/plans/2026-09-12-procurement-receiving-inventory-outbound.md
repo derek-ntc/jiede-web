@@ -361,7 +361,7 @@ git commit -m "feat: add category purchase receiving"
 - Produces: `fetch_purchase_inventory(conn, filters: dict, include_prices: bool) -> list[dict]`
 - Produces: `transfer_purchase_inventory(conn, lot_id: int, quantity: int, target_location_id: int, reason: str, actor: str, now: str, expected_version: int, idempotency_key: str) -> dict`
 - Produces: `adjust_purchase_inventory(conn, lot_id: int, counted_quantity: int, reason: str, actor: str, now: str, expected_version: int, idempotency_key: str) -> dict`
-- Produces: `update_purchase_invoice_status(conn, lot_id: int, new_status: str, remark: str, actor: str, now: str, idempotency_key: str) -> dict`
+- Produces: `update_purchase_invoice_status(conn, lot_id: int, new_status: str, remark: str, actor: str, now: str, idempotency_key: str, *, expected_version: int) -> dict`
 - Produces route: `GET /admin/purchase-inventory/<category>`
 - Produces route: `POST /admin/purchase-inventory/lots/<int:lot_id>/transfer`
 - Produces route: `POST /admin/purchase-inventory/lots/<int:lot_id>/adjust`
@@ -442,6 +442,7 @@ git commit -m "feat: manage independent purchase inventory"
 - Produces: `build_purchase_receipt_workbook(receipt, items, *, include_prices: bool) -> BytesIO`
 - Produces: `build_purchase_receipt_pdf(receipt, items, *, include_prices: bool) -> BytesIO`
 - Produces: `build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) -> BytesIO`
+- Produces: `build_purchase_inventory_pdf(filters, rows, *, include_prices: bool) -> BytesIO`
 
 - [ ] **Step 1: Write failing raw-material format and fixed-term tests**
 
@@ -646,7 +647,7 @@ git commit -m "feat: add category purchase goods outbound"
 
 ### Task 8: Full verification and local acceptance
 
-Local integration checkpoint: automated suites, database-copy checks, representative document QA, and isolated interactive browser acceptance are complete. See `docs/2026-09-12-procurement-inventory-verification.md`; no deployment is authorized.
+Local integration checkpoint: final-review fixes passed fresh automated and document verification; controller browser re-acceptance remains pending. Earlier browser evidence is retained but does not complete acceptance of the revised candidate. See `docs/2026-09-12-procurement-inventory-verification.md`; no deployment is authorized.
 
 **Files:**
 - Create: `tests/test_purchase_inventory_isolation.py`
@@ -686,7 +687,7 @@ Expected: all tests PASS.
 
 Run the application initialization on a copy in `/private/tmp`, then verify `PRAGMA integrity_check` returns `ok`, `PRAGMA foreign_key_check` is empty, `purchase_inventory_invariant_errors()` is empty, and product/sales table counts do not change during purchase-flow fixtures.
 
-- [x] **Step 4: Perform local browser acceptance for all four categories**
+- [ ] **Step 4: Perform local browser acceptance for all four categories**
 
 Verify supplier/order search, category fields, actual-value edits, split receipts, zero-qualified rows, over-receipt confirmation, batch rollback, history/detail, stock filters, transfer, quantity adjustment, invoice state, multi-lot outbound, insufficient-stock conflict, void, and permission visibility. Confirm existing product inventory and customer shipping pages still work.
 
@@ -698,7 +699,7 @@ Generate raw-material order Excel/PDF, carton order Excel/PDF, receipt Excel/PDF
 
 The usage guide must describe the four entry points, actual-versus-order behavior, batch receipt, transfer, adjustment, outbound, void, and permissions in user-facing Chinese. The verification report must record exact test counts, browser cases, document samples, database integrity, invariant results, and known limitations.
 
-- [x] **Step 7: Commit the verified local release candidate**
+- [ ] **Step 7: Commit the verified local release candidate**
 
 ```bash
 git add tests/test_purchase_inventory_isolation.py docs/2026-09-12-procurement-inventory-usage.md docs/2026-09-12-procurement-inventory-verification.md docs/superpowers/plans/2026-09-12-procurement-receiving-inventory-outbound.md

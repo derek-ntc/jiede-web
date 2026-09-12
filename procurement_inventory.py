@@ -333,8 +333,9 @@ def fetch_purchase_inventory(conn, filters: dict, include_prices: bool) -> list[
         where.append("l.invoice_status=?")
         params.append(status)
     rows = conn.execute("SELECT " + ",".join(f"l.{field}" for field in columns) +
-                        ",r.order_no,r.receipt_no,r.received_at "
+                        ",r.order_no,r.receipt_no,r.received_at,ri.remark "
                         "FROM purchase_inventory_lots l JOIN purchase_receipts r ON r.id=l.receipt_id "
+                        "JOIN purchase_receipt_items ri ON ri.id=l.origin_receipt_item_id "
                         "WHERE " + " AND ".join(where) + " ORDER BY l.id DESC", params).fetchall()
     result = [dict(row) for row in rows]
     if include_prices:
@@ -478,16 +479,20 @@ def adjust_purchase_inventory(conn, lot_id: int, counted_quantity: int, reason: 
 
 
 def update_purchase_invoice_status(conn, lot_id: int, new_status: str, remark: str, actor: str, now: str,
-                                   idempotency_key: str) -> dict:
+                                   idempotency_key: str, *, expected_version) -> dict:
+    try:
+        expected_version = parse_purchase_inventory_quantity(expected_version)
+    except ValueError as error:
+        raise PurchaseInventoryConflict(str(error)) from error
     payload = _stock_operation_payload(lot_id, remark, actor, idempotency_key, operation_type="invoice_status",
-                                       new_status=normalize_purchase_text(new_status))
+                                       new_status=normalize_purchase_text(new_status), expected_version=expected_version)
     if payload["new_status"] not in INVOICE_STATUSES:
         raise PurchaseInventoryConflict("发票状态无效")
     with _inventory_transaction(conn):
         existing = _existing_stock_operation(conn, payload)
         if existing is not None:
             return existing
-        lot = _stock_lot(conn, payload["lot_id"])
+        lot = _stock_lot(conn, payload["lot_id"], payload["expected_version"])
         if lot["invoice_status"] == payload["new_status"]:
             raise PurchaseInventoryConflict("开票状态未变化")
         operation_id = _new_stock_operation(conn, payload, now)

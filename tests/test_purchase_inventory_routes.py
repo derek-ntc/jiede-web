@@ -116,6 +116,38 @@ class PurchaseInventoryRouteTests(unittest.TestCase):
         self.assertEqual(self.scalar("SELECT available_quantity FROM purchase_inventory_lots WHERE id=?", self.lot_id), 100)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_invoice_events"), 1)
 
+    def test_invoice_stale_version_cannot_overwrite_newer_status_and_retry_is_stable(self):
+        url = self.action_url + "/invoice-status"
+        first_payload = self.change_payload(new_status="invoiced", remark="收票", idempotency_key="invoice-first")
+        first = self.client.post(url, json=first_payload)
+        self.assertEqual(first.status_code, 201)
+        stale_payload = self.change_payload(new_status="not_required", remark="旧页面", idempotency_key="invoice-second")
+        stale = self.client.post(url, json=stale_payload)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual((stale.json["current"]["version"], stale.json["current"]["invoice_status"]), (2, "invoiced"))
+        for secret in ("unit_price", "amount_minor", "987654", "9876.54"):
+            self.assertNotIn(secret, stale.text)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_invoice_events"), 1)
+        retry = self.client.post(url, json=first_payload)
+        self.assertEqual(retry.status_code, 200)
+        self.assertTrue(retry.json["duplicate"])
+        self.assertEqual(self.scalar("SELECT version FROM purchase_inventory_lots"), 2)
+        page = self.client.post(url, data=stale_payload)
+        self.assertEqual(page.status_code, 409)
+        self.assertIn("当前开票状态：已开票", page.text)
+        self.assertIn('name="expected_version" value="2"', page.text)
+        self.assertIn('value="not_required" selected', page.text)
+        corrected = self.client.post(url, json=dict(stale_payload, expected_version=2))
+        self.assertEqual(corrected.status_code, 201)
+        self.assertEqual(self.scalar("SELECT invoice_status FROM purchase_inventory_lots"), "not_required")
+
+    def test_invoice_missing_or_invalid_version_writes_nothing(self):
+        for value in (None, "", 0, True, "1.5"):
+            payload = self.change_payload(new_status="invoiced", expected_version=value)
+            response = self.client.post(self.action_url + "/invoice-status", json=payload)
+            self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM purchase_inventory_invoice_events"), 0)
+
     def test_stock_changes_leave_every_other_domain_table_unchanged(self):
         def snapshot():
             with app.get_db() as conn:
@@ -128,7 +160,7 @@ class PurchaseInventoryRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post(self.action_url + "/adjust", json=self.change_payload(
             counted_quantity=78, expected_version=2, idempotency_key="count")).status_code, 201)
         self.assertEqual(self.client.post(self.action_url + "/invoice-status", json=self.change_payload(
-            new_status="invoiced", idempotency_key="invoice")).status_code, 201)
+            new_status="invoiced", idempotency_key="invoice", expected_version=3)).status_code, 201)
         self.assertEqual(snapshot(), before)
 
     def test_all_category_pages_render_only_their_actual_snapshot_dimensions(self):

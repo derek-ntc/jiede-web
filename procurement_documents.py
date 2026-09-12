@@ -556,9 +556,27 @@ def _build_stock_pdf(model):
 
     story = [paragraph(model["title"], title), Spacer(1, 8)]
     story.extend(paragraph(value) for value in model["metadata"])
-    story.extend([paragraph(f"{model['date_label']}：{model['date']}"), Spacer(1, 8)])
+    if model.get("date"):
+        story.append(paragraph(f"{model['date_label']}：{model['date']}"))
+    story.append(Spacer(1, 8))
     columns = model["columns"]
     widths = [document.width * c.width / sum(c.width for c in columns) for c in columns]
+    fixed_widths = {}
+    for index, column in enumerate(columns):
+        if column.key not in model.get("unbroken_pdf_columns", ()):
+            continue
+        values = []
+        for source in model["rows"]:
+            value = source[column.key]
+            if column.kind == "money":
+                value = "未录价" if value is None else f"¥{value:,.2f}"
+            values.append(pdfmetrics.stringWidth(_text(value), font, body.fontSize) + 10)
+        fixed_widths[index] = max([widths[index]] + values)
+    if fixed_widths:
+        flexible = sum(width for index, width in enumerate(widths) if index not in fixed_widths)
+        remaining = document.width - sum(fixed_widths.values())
+        widths = [fixed_widths[index] if index in fixed_widths else width * remaining / flexible
+                  for index, width in enumerate(widths)]
     rows = [[paragraph(c.label) for c in columns]]
     for source in model["rows"]:
         parts = []
@@ -578,7 +596,9 @@ def _build_stock_pdf(model):
         ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
     story.extend([table, Spacer(1, 8)])
-    story.extend(paragraph(value) for value in model["notes"])
+    if not model["rows"]:
+        story.append(paragraph("没有匹配的采购库存。"))
+    story.extend(paragraph(value) for value in model.get("notes", ()))
 
     def footer(canvas, doc):
         canvas.saveState()
@@ -591,7 +611,7 @@ def _build_stock_pdf(model):
     return stream
 
 
-def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) -> BytesIO:
+def _inventory_document_view(filters, rows, include_prices, *, include_remarks=False):
     columns = [Column("lot_no", "库存批次", 26), Column("supplier_name", "供应商", 20),
                Column("order_no", "采购订单", 24), Column("receipt_no", "到货单", 26),
                Column("received_at", "入库日期", 15, "date"), Column("actual", "实际资料", 30),
@@ -600,6 +620,8 @@ def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) ->
                Column("location", "当前库位", 18), Column("invoice_status", "开票状态", 11)]
     if include_prices:
         columns += [Column("unit_price", "单价", 18, "money"), Column("amount", "当前金额", 20, "money")]
+    if include_remarks:
+        columns.append(Column("remark", "到货行备注", 28))
     projected = []
     for source in rows:
         item = dict(source)
@@ -608,6 +630,8 @@ def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) ->
                    location=_join(item.get("location_code"), item.get("location_name")), invoice_status=_INVOICE_LABELS[item["invoice_status"]])
         if include_prices:
             row.update(unit_price=_money(item.get("unit_price_minor")), amount=_money(item.get("amount_minor")))
+        if include_remarks:
+            row["remark"] = _text(item.get("remark"))
         projected.append(row)
     metadata = ["类别：" + PURCHASE_CATEGORY_LABELS[filters["category"]]]
     for key, label in (("supplier_id", "供应商编号"), ("order_no", "采购订单号"), ("receipt_no", "到货单号"),
@@ -617,7 +641,17 @@ def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) ->
     if filters.get("invoice_status"):
         metadata.append("开票状态：" + _INVOICE_LABELS[filters["invoice_status"]])
     metadata.append("包含零库存：" + ("是" if str(filters.get("include_zero")) == "1" else "否"))
-    return _build_stock_workbook(dict(title="采购库存清单", metadata=metadata, columns=columns, rows=projected))
+    return dict(title="采购库存清单", metadata=metadata, columns=columns, rows=projected)
+
+
+def build_purchase_inventory_workbook(filters, rows, *, include_prices: bool) -> BytesIO:
+    return _build_stock_workbook(_inventory_document_view(filters, rows, include_prices))
+
+
+def build_purchase_inventory_pdf(filters, rows, *, include_prices: bool) -> BytesIO:
+    model = _inventory_document_view(filters, rows, include_prices, include_remarks=True)
+    model["unbroken_pdf_columns"] = ("received_at", "unit_price", "amount")
+    return _build_stock_pdf(model)
 
 
 def _outbound_document_view(outbound, items):

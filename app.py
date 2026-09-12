@@ -12084,6 +12084,7 @@ def purchase_inventory(category):
     export_filters = {key: value for key, value in filters.items() if key != "category" and value}
     return render_template("purchase_inventory.html", rows=rows, filters=filters, suppliers=suppliers,
                            locations=locations, export_url=url_for("export_purchase_inventory", category=category.replace("_", "-"), **export_filters),
+                           export_pdf_url=url_for("export_purchase_inventory", category=category.replace("_", "-"), export_format="pdf", **export_filters),
                            **purchase_receipt_context(category))
 
 
@@ -12095,10 +12096,13 @@ def purchase_inventory_filters(category):
     return filters
 
 
-@app.route("/admin/purchase-inventory/<category>/export.xlsx")
+@app.route("/admin/purchase-inventory/<category>/export.xlsx", defaults={"export_format": "xlsx"})
+@app.route("/admin/purchase-inventory/<category>/export.<export_format>")
 @permission_required("purchase_inventory_view")
-def export_purchase_inventory(category):
-    from procurement_documents import build_purchase_inventory_workbook
+def export_purchase_inventory(category, export_format):
+    from procurement_documents import build_purchase_inventory_workbook, build_purchase_inventory_pdf
+    if export_format not in ("xlsx", "pdf"):
+        abort(404)
     category = purchase_category_from_slug(category)
     filters = purchase_inventory_filters(category)
     with get_db() as conn:
@@ -12106,9 +12110,11 @@ def export_purchase_inventory(category):
             rows = fetch_purchase_inventory(conn, filters, user_can_view_purchase_prices())
         except ValueError as error:
             abort(400, description=str(error))
-    return send_file(build_purchase_inventory_workbook(filters, rows, include_prices=user_can_view_purchase_prices()),
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True,
-                     download_name=f"purchase-inventory-{category}.xlsx")
+    builder = build_purchase_inventory_pdf if export_format == "pdf" else build_purchase_inventory_workbook
+    mimetype = "application/pdf" if export_format == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return send_file(builder(filters, rows, include_prices=user_can_view_purchase_prices()),
+                     mimetype=mimetype, as_attachment=True,
+                     download_name=f"purchase-inventory-{category}.{export_format}")
 
 
 def purchase_inventory_change(lot_id, action):
@@ -12146,7 +12152,7 @@ def purchase_inventory_change(lot_id, action):
                               current_admin_username(), now, payload.get("expected_version"), key)
                 else:
                     result = update_purchase_invoice_status(conn, lot_id, payload.get("new_status"), payload.get("remark"),
-                              current_admin_username(), now, key)
+                              current_admin_username(), now, key, expected_version=payload.get("expected_version"))
         except ValueError as error:
             error_message = str(error)
             current = getattr(error, "current", None)
@@ -12373,8 +12379,13 @@ def signed_purchase_receipt_preview(preview):
         category=preview["order"]["category"], operator=current_admin_username()))
 
 
-def purchase_receipt_conflict_response(error):
-    data = dict(error=str(error), needs_confirmation=error.needs_confirmation)
+def purchase_receipt_conflict_response(error, existing=None, *, revision_safe=False):
+    data = dict(error=str(error), needs_confirmation=error.needs_confirmation if not existing else False)
+    if existing or revision_safe:
+        data["conflict_code"] = "idempotency_key_used" if existing else "revision_safe"
+    if existing:
+        data["existing_receipt"] = dict(id=existing["id"], receipt_no=existing["receipt_no"],
+            redirect_url=url_for("purchase_receipt_detail", receipt_id=existing["id"]))
     if error.current is not None:
         data.update(current=purchase_receipt_projection(error.current),
                     preview_token=signed_purchase_receipt_preview(error.current))
@@ -12419,14 +12430,28 @@ def new_purchase_receipt(category, order_id):
                 raise BadSignature("invalid token")
             snapshot = URLSafeTimedSerializer(app.secret_key, salt="purchase-receipt-preview-v1").loads(token, max_age=7200)
         except BadSignature:
+            # An expired preview cannot authorize a new write, but must not hide
+            # a committed receipt after its success response was lost.
+            try:
+                recovery_key = normalize_purchase_text(payload.get("idempotency_key"))
+            except ValueError:
+                recovery_key = None
+            with get_db() as conn:
+                existing = conn.execute("SELECT id,receipt_no FROM purchase_receipts "
+                                        "WHERE idempotency_key=? AND purchase_order_id=? AND category=?",
+                                        (recovery_key, order_id, category)).fetchone()
+            if existing:
+                return purchase_receipt_conflict_response(
+                    PurchaseInventoryConflict("该提交已保存，请查看原到货单核对"), existing)
             return jsonify(error="预览凭证已失效，请重新打开入库页面", needs_confirmation=False), 409
         if (not isinstance(snapshot, dict) or snapshot.get("order_id") != order_id
                 or snapshot.get("category") != category or snapshot.get("operator") != current_admin_username()):
             abort(403)
         payload = dict(payload, purchase_order_id=order_id, category=category, preview_token=snapshot.get("digest"))
+        key = None
         try:
             try:
-                payload["idempotency_key"] = normalize_purchase_text(payload.get("idempotency_key"))
+                key = payload["idempotency_key"] = normalize_purchase_text(payload.get("idempotency_key"))
             except ValueError as error:
                 raise PurchaseInventoryConflict(str(error)) from error
             with get_db() as conn:
@@ -12437,7 +12462,11 @@ def new_purchase_receipt(category, order_id):
                                          (payload["idempotency_key"],)).fetchone() is not None
                 result = post_purchase_receipt(conn, payload, current_admin_username(), datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"))
         except PurchaseInventoryConflict as error:
-            return purchase_receipt_conflict_response(error)
+            with get_db() as conn:
+                # Persisted identity, not the error wording, determines whether revision is safe.
+                existing = conn.execute("SELECT id,receipt_no FROM purchase_receipts WHERE idempotency_key=?",
+                                        (key,)).fetchone()
+            return purchase_receipt_conflict_response(error, existing, revision_safe=existing is None)
         return jsonify(id=result["id"], receipt_no=result["receipt_no"], status=result["status"], duplicate=duplicate,
                        redirect_url=url_for("purchase_receipt_detail", receipt_id=result["id"])), 200 if duplicate else 201
     with get_db() as conn:

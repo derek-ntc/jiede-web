@@ -7,6 +7,7 @@ from werkzeug.datastructures import MultiDict
 
 import app
 import procurement as p
+import procurement_inventory as pi
 
 
 NOW = "2026-09-09T10:00:00"
@@ -157,7 +158,7 @@ class PurchaseOrderDomainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.update(self.create(), payload("carton"))
 
-    def test_voided_receipts_do_not_lock_quantity_or_line_removal(self):
+    def test_voided_receipts_allow_quantity_edits_but_preserve_line_history(self):
         oid = self.create()
         item_id = p.load_purchase_order(self.conn, oid)[1][0]["id"]
         self.conn.execute("CREATE TABLE purchase_receipts (id INTEGER PRIMARY KEY, status TEXT)")
@@ -170,8 +171,65 @@ class PurchaseOrderDomainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.update(oid, payload())
         self.conn.execute("UPDATE purchase_receipts SET status='voided' WHERE id=1")
-        self.update(oid, payload())
-        self.assertNotEqual(p.load_purchase_order(self.conn, oid)[1][0]["id"], item_id)
+        row["quantity"] = "1"
+        self.update(oid, payload(rows=[row]))
+        before = tuple(self.conn.iterdump())
+        with self.assertRaisesRegex(ValueError, "历史.*不能删除"):
+            self.update(oid, payload())
+        self.assertEqual(tuple(self.conn.iterdump()), before)
+
+    def test_voided_receipt_line_removal_is_validation_error_without_partial_writes(self):
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("CREATE TABLE warehouse_locations (id INTEGER PRIMARY KEY, code TEXT, name TEXT, enabled INTEGER)")
+        self.conn.execute("INSERT INTO warehouse_locations VALUES (1,'RAW-A','原料区',1)")
+        pi.ensure_purchase_inventory_tables(self.conn)
+        for qualified in (3, 0):
+            with self.subTest(qualified=qualified):
+                rows = [dict(item_name=name, quantity="12", expected_at="2026-09-20")
+                        for name in ("A", "B")]
+                oid = self.create(payload(rows=rows))
+                _, items = p.load_purchase_order(self.conn, oid)
+                receipt = pi.post_purchase_receipt(self.conn, dict(
+                    preview_token=pi.receipt_preview_token(pi.load_receipt_preview(self.conn, oid)),
+                    idempotency_key=f"void-history-{qualified}", received_at="2026-09-12",
+                    rows=[dict(purchase_order_item_id=items[0]["id"], item_name="实际A",
+                               actual_quantity="6", qualified_quantity=str(qualified),
+                               location_id="1", invoice_status="pending")]), "receiver", NOW)
+                posted = pi.load_receipt_preview(self.conn, oid)
+                self.assertEqual(posted["order"]["status"], "partially_received")
+                self.assertEqual((posted["rows"][0]["actual_quantity"],
+                                  posted["rows"][0]["qualified_quantity"]), (6, qualified))
+                pi.void_purchase_receipt(self.conn, receipt["id"], "receiver", NOW)
+                voided = pi.load_receipt_preview(self.conn, oid)
+                self.assertEqual(voided["order"]["status"], "ordered")
+                self.assertEqual([(r["actual_quantity"], r["qualified_quantity"], r["remaining_quantity"])
+                                  for r in voided["rows"]], [(0, 0, 12), (0, 0, 12)])
+                self.assertEqual(self.conn.execute(
+                    "SELECT COUNT(*) FROM purchase_inventory_lots WHERE receipt_id=?",
+                    (receipt["id"],)).fetchone()[0], 1 if qualified else 0)
+                for row, item in zip(rows, items):
+                    row["id"] = item["id"]
+                rows[0]["quantity"] = "2"
+                self.update(oid, payload(rows=rows))
+                edited = pi.load_receipt_preview(self.conn, oid)
+                self.assertEqual(edited["order"]["status"], "ordered")
+                self.assertEqual(edited["rows"][0]["remaining_quantity"], 2)
+                self.conn.commit()
+                before = tuple(self.conn.iterdump())
+                with self.assertRaisesRegex(ValueError, "历史.*不能删除"):
+                    self.update(oid, payload(rows=[dict(rows[1], quantity="7")], remark="must rollback"))
+                self.assertEqual(tuple(self.conn.iterdump()), before)
+                self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_inventory_lot_dependency_also_protects_order_line_removal(self):
+        oid = self.create()
+        item_id = p.load_purchase_order(self.conn, oid)[1][0]["id"]
+        self.conn.execute("CREATE TABLE purchase_inventory_lots (id INTEGER PRIMARY KEY, purchase_order_item_id INTEGER)")
+        self.conn.execute("INSERT INTO purchase_inventory_lots VALUES (1,?)", (item_id,))
+        before = tuple(self.conn.iterdump())
+        with self.assertRaisesRegex(ValueError, "历史.*不能删除"):
+            self.update(oid, payload(remark="must rollback"))
+        self.assertEqual(tuple(self.conn.iterdump()), before)
 
     def test_transaction_rolls_back_header_and_earlier_lines_on_sql_failure(self):
         self.conn.execute("CREATE TRIGGER fail_second BEFORE INSERT ON purchase_order_items WHEN NEW.item_name='FAIL' BEGIN SELECT RAISE(ABORT,'injected'); END")

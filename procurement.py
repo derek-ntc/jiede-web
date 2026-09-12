@@ -309,6 +309,19 @@ def _purchase_receipt_history(conn, order_id):
         "WHERE i.purchase_order_id=? AND r.status <> 'voided' GROUP BY ri.purchase_order_item_id", (order_id,))}
 
 
+def _purchase_item_history_ids(conn, order_id):
+    """Keep all receipt and stock references, even after their receipt is voided."""
+    item_ids = set()
+    for table in ("purchase_receipt_items", "purchase_inventory_lots"):
+        # Order-only installations do not yet have downstream inventory tables.
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            item_ids.update(row[0] for row in conn.execute(
+                f"SELECT DISTINCT h.purchase_order_item_id FROM {table} h "
+                "JOIN purchase_order_items i ON i.id=h.purchase_order_item_id "
+                "WHERE i.purchase_order_id=?", (order_id,)))
+    return item_ids
+
+
 def recalculate_purchase_order_receipt_status(conn, order_id, actor, now):
     """Derive fulfillment from posted actual quantities, preserving cancellation."""
     order, rows = load_purchase_order(conn, order_id)
@@ -343,8 +356,8 @@ def update_purchase_order(conn, order_id, payload, actor, now) -> None:
                for row in existing):
             raise ValueError("历史来源明细不能删除；可以编辑业务字段或新增明细")
         history = _purchase_receipt_history(conn, order_id)
-        if any(item_id not in ids for item_id in history):
-            raise ValueError("有到货历史的明细不能删除")
+        if any(item_id not in ids for item_id in _purchase_item_history_ids(conn, order_id)):
+            raise ValueError("有到货或库存历史的明细不能删除")
         for row in payload["rows"]:
             if row["ordered_quantity"] < history.get(row.get("id"), 0):
                 raise ValueError("订购数量不能低于累计实际到货数量")

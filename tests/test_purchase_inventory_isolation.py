@@ -118,7 +118,7 @@ class PurchaseInventoryIsolationTests(unittest.TestCase):
         self.assert_consistent(before)
         self.change(target, "adjust", category, "adjust-" + category, counted_quantity=38, expected_version=1)
         self.assert_consistent(before)
-        self.change(target, "invoice-status", category, "invoice-" + category, new_status="invoiced", remark="票据核对")
+        self.change(target, "invoice-status", category, "invoice-" + category, new_status="invoiced", remark="票据核对", expected_version=2)
         self.assert_consistent(before)
         version = self.scalar("SELECT version FROM purchase_inventory_lots WHERE id=?", target)
         url = f"/admin/shipping/purchase-goods/{category.replace('_', '-')}/new"
@@ -202,7 +202,7 @@ class PurchaseInventoryIsolationTests(unittest.TestCase):
                     page = self.client.get(root)
                     self.assertEqual(page.status_code, 200)
                     texts = [page.text]
-                    for fmt in (("xlsx",) if root == roots[-1] else ("xlsx", "pdf")):
+                    for fmt in ("xlsx", "pdf"):
                         response = self.client.get(root + "/export." + fmt)
                         self.assertEqual(response.status_code, 200)
                         self.assertIn("no-store", response.headers["Cache-Control"])

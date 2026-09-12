@@ -21,6 +21,7 @@
     <td><input data-field="remark" aria-label="行备注" value="{{ item.remark }}"></td>
   </tr>{% endfor %}</tbody></table></div>
   <p role="alert" data-receipt-message></p><div data-conflict-summary aria-live="polite"></div>
+  <a data-existing-receipt hidden>查看原到货单</a>
   <button type="button" data-refresh-preview hidden>采用最新预览（保留填写值）</button>
   <div class="form-actions"><button type="submit" {% if not preview.locations %}disabled{% endif %}>确认批量入库</button><a href="{{ url_for('purchase_receipts', category=category_slug) }}">返回列表</a></div>
   {% if not preview.locations %}<p role="alert">没有启用的仓位，请先联系仓库管理员配置仓位。</p>{% endif %}
