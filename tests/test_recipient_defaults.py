@@ -155,6 +155,16 @@ class RecipientDefaultsIntegrationTests(AssemblyTask7TestCase):
         self.assertEqual(payload["客户B"]["recipient_source"], "recipient")
         self.assertEqual(payload["无档案客户"]["recipient_source"], "missing")
 
+    def test_rendered_page_cache_key_tracks_both_recipient_scripts(self):
+        html = self.client.get("/admin/shipped-orders/create").get_data(as_text=True)
+
+        for filename in ("assembly_shipping.js", "order_shipping.js"):
+            with self.subTest(filename=filename):
+                match = re.search(rf"/static/{re.escape(filename)}\?v=(\d+)", html)
+                self.assertIsNotNone(match)
+                script_mtime = int((Path(app.BASE_DIR) / "static" / filename).stat().st_mtime)
+                self.assertGreaterEqual(int(match.group(1)), script_mtime)
+
     def test_notes_use_per_customer_defaults_and_keep_customer_ids(self):
         response = self._post_orders([self.order_a, self.order_b], token="multi-defaults")
         self.assertEqual(response.status_code, 302)
@@ -268,6 +278,66 @@ class RecipientDefaultsIntegrationTests(AssemblyTask7TestCase):
         '''
         result = subprocess.run(
             ["node", "-e", harness],
+            cwd=app.BASE_DIR,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rendered_assembly_customer_change_and_preview_keep_all_recipient_fields(self):
+        html = self.client.get("/admin/shipped-orders/create").get_data(as_text=True)
+        defaults = re.search(
+            r"data-assembly-recipient-defaults>(.*?)</script>", html, re.S
+        )[1]
+        harness = r'''
+        const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+        const defaults=JSON.parse(fs.readFileSync(0,'utf8'));
+        class Element {
+          constructor(){this.value='';this.textContent='';this.children=[];this.listeners={};this.dataset={};this.hidden=false;this.disabled=false;this.classList={toggle(){},add(){}};}
+          addEventListener(type,fn){(this.listeners[type] ||= []).push(fn);}
+          async emit(type){for(const fn of this.listeners[type] || [])await fn({target:this,preventDefault(){}});}
+          append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
+          appendChild(item){this.append(item);return item;}
+          replaceChildren(...items){this.children=[];this.append(...items);}
+          querySelector(selector){return this.map?.[selector] || null;}
+          querySelectorAll(){return [];}
+          contains(){return false;}
+          matches(){return false;}
+          setAttribute(name,value){this[name]=value;}
+          set innerHTML(_){throw Error('unsafe HTML');}
+        }
+        global.document={activeElement:null,querySelectorAll:()=>[],createElement:()=>new Element()};
+        global.window={setTimeout,clearTimeout,confirm:()=>true,location:{origin:'https://test.local',assign(){}}};
+        global.fetch=async url=>{
+          assert.match(url,/assembly-options/);
+          return {ok:true,json:async()=>({assembly_drawing_numbers:['ASM-100']})};
+        };
+        vm.runInThisContext(fs.readFileSync('static/assembly_shipping.js','utf8'));
+        const defaultsNode=new Element(),recipientFields=new Element(),hint=new Element();
+        defaultsNode.textContent=JSON.stringify(defaults);
+        const name=new Element(),phone=new Element(),address=new Element();
+        recipientFields.map={'[name="recipient_name"]':name,'[name="recipient_phone"]':phone,
+          '[name="address"]':address,'[data-assembly-recipient-hint]':hint};
+        const selectors=['customer','drawing','set-quantity','submit','status','preview','warning-summary',
+          'component-search','component-results','recalculate'];
+        const nodes=Object.fromEntries(selectors.map(key=>[key,new Element()]));
+        const form=new Element();form.action='/admin/shipped-orders/assembly/new';
+        form.map={
+          '[data-assembly-recipient-defaults]':defaultsNode,'[data-assembly-recipient-fields]':recipientFields,
+          ...Object.fromEntries(selectors.map(key=>[`[data-assembly-${key}]`,nodes[key]]))
+        };
+        globalThis.__assemblyShippingTestApi.initializeAssemblyShipmentForm(form);
+        nodes.customer.value='客户A';await nodes.customer.emit('change');
+        assert.deepEqual([name.value,phone.value,address.value],['王工','0012345','A仓']);
+        name.value='手工收货人';phone.value='00999';address.value='手工地址';
+        renderAssemblyPreview(form,{items:[],warnings:[],preview_token:'fresh'});
+        assert.deepEqual([name.value,phone.value,address.value],['手工收货人','00999','手工地址']);
+        nodes.customer.value='客户B';await nodes.customer.emit('change');
+        assert.deepEqual([name.value,phone.value,address.value],['李师傅','','B仓']);
+        '''
+        result = subprocess.run(
+            ["node", "-e", f"(async()=>{{{harness}}})().catch(error=>{{console.error(error);process.exitCode=1}})"],
+            input=defaults,
             cwd=app.BASE_DIR,
             capture_output=True,
             text=True,
