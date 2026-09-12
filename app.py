@@ -155,6 +155,7 @@ from production_processes import (
 from shipping_workflow import (
     DeliveryOperationConflict,
     bind_legacy_delivery_customer_identity,
+    customer_recipient_defaults,
     create_delivery_notes,
     delivery_request_identity,
     delivery_source_items,
@@ -16057,8 +16058,15 @@ def shipment_operations():
     with get_db() as conn:
         customers = get_shipment_customer_options(conn)
         unshipped_orders = get_unshipped_order_options(conn)
-        recipient_defaults = {row['name']: dict(row) for row in conn.execute(
-            'SELECT name, recipient_name, recipient_phone, address FROM customers')}
+        customer_rows = {
+            row['name']: dict(row)
+            for row in conn.execute('''SELECT name, contact, phone, recipient_name,
+                recipient_phone, address FROM customers''')
+        }
+        recipient_defaults = {
+            customer: customer_recipient_defaults(customer_rows.get(customer))
+            for customer in customers
+        }
     return render_template(
         "shipment_operations.html",
         customers=customers,

@@ -883,6 +883,9 @@ class DeliveryNoteWorkflowTests(AssemblyTask7TestCase):
           return nodes[name];
         }};
         global.document={querySelector:()=>form,createElement:()=>new Element()};
+        const recipientController=require('fs').readFileSync('static/order_shipping.js','utf8')
+          .split('function initializeOrderShipmentLines',1)[0];
+        vm.runInThisContext(recipientController);
         vm.runInThisContext(payload.script);
         rows[0].select.value='1'; rows[0].select.emit('change');
         assert.equal(nodes['recipient-groups'].children.length,1);

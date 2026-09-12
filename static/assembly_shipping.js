@@ -234,6 +234,38 @@ function populateAssemblyDrawings(form, drawings) {
   drawing.disabled = drawings.length === 0;
 }
 
+function assemblyRecipientHintText(values) {
+  const labels = {recipient_name: '收货人', recipient_phone: '收货电话', address: '收货地址'};
+  const missing = Object.keys(labels).filter(key => !String(values[key] || '').trim());
+  if (missing.length) return `${missing.map(key => labels[key]).join('、')}未填写，请补充并核对。`;
+  if (values.recipient_source === 'contact') return '姓名和电话来自客户联系人，请核对。';
+  return '仅保存到本次送货单，不修改客户资料。';
+}
+
+function updateAssemblyRecipientHint(form) {
+  const fields = form.querySelector('[data-assembly-recipient-fields]');
+  if (!fields) return;
+  const values = {recipient_source: fields.dataset.recipientSource || 'missing'};
+  ['recipient_name', 'recipient_phone', 'address'].forEach(key => {
+    values[key] = fields.querySelector(`[name="${key}"]`).value;
+  });
+  const hint = fields.querySelector('[data-assembly-recipient-hint]');
+  if (hint) hint.textContent = assemblyRecipientHintText(values);
+}
+
+function applyAssemblyRecipientDefaults(form, customerName) {
+  const fields = form.querySelector('[data-assembly-recipient-fields]');
+  if (!fields) return;
+  const defaults = JSON.parse(form.querySelector('[data-assembly-recipient-defaults]').textContent);
+  const recipient = defaults[customerName] || {recipient_source: 'missing'};
+  fields.hidden = !customerName;
+  fields.dataset.recipientSource = recipient.recipient_source || 'missing';
+  ['recipient_name', 'recipient_phone', 'address'].forEach(key => {
+    fields.querySelector(`[name="${key}"]`).value = recipient[key] || '';
+  });
+  updateAssemblyRecipientHint(form);
+}
+
 function sameOriginShippedOrdersRedirect(value) {
   if (typeof value !== "string" || !value) throw new Error("保存响应缺少跳转地址");
   const redirect = new URL(value, window.location.origin);
@@ -265,6 +297,9 @@ function initializeAssemblyShipmentForm(form) {
   const candidates = form.querySelector("[data-assembly-component-results]");
   const locked = form.dataset.assemblyFinanceClaimed === "1";
   form._assemblySelectedIds = null;
+  form.querySelector('[data-assembly-recipient-fields]')?.addEventListener(
+    'input', () => updateAssemblyRecipientHint(form)
+  );
 
   const cancelCandidates = () => {
     candidateGeneration += 1;
@@ -418,15 +453,7 @@ function initializeAssemblyShipmentForm(form) {
   });
 
   customer.addEventListener("change", async () => {
-    const recipientFields = form.querySelector('[data-assembly-recipient-fields]');
-    if (recipientFields) {
-      const defaults = JSON.parse(form.querySelector('[data-assembly-recipient-defaults]').textContent);
-      const recipient = defaults[customer.value.trim()] || {};
-      recipientFields.hidden = !customer.value.trim();
-      ['recipient_name', 'recipient_phone', 'address'].forEach(key => {
-        recipientFields.querySelector(`[name="${key}"]`).value = recipient[key] || '';
-      });
-    }
+    applyAssemblyRecipientDefaults(form, customer.value.trim());
     const generation = ++optionsGeneration;
     optionsController?.abort();
     optionsController = new AbortController();

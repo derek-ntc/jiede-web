@@ -1,4 +1,58 @@
 /* Product-level ordinary shipment rows. Preview never replaces editable DOM. */
+function orderRecipientHintText(values) {
+  const labels = {recipient_name: '收货人', recipient_phone: '收货电话', address: '收货地址'};
+  const missing = Object.keys(labels).filter(key => !String(values[key] || '').trim());
+  if (missing.length) return `${missing.map(key => labels[key]).join('、')}未填写，请补充并核对。`;
+  if (values.recipient_source === 'contact') return '姓名和电话来自客户联系人，请核对。';
+  return '仅保存到本次送货单，不修改客户资料。';
+}
+
+function createOrderRecipientController(form, shipmentLines) {
+  const defaults = JSON.parse(form.querySelector('[data-recipient-defaults]').textContent);
+  const groups = form.querySelector('[data-recipient-groups]');
+  const overrides = form.querySelector('[data-recipient-overrides]');
+  const edits = new Map();
+  return function syncRecipients() {
+    const customers = [...new Set(shipmentLines().map(line => {
+      const select = line.querySelector('[data-shipment-order-select]');
+      return select.value ? select.selectedOptions[0]?.dataset.customer || '' : null;
+    }).filter(value => value !== null))];
+    groups.replaceChildren();
+    const active = {};
+    customers.forEach(customer => {
+      if (!edits.has(customer)) edits.set(customer, {...(defaults[customer] || {})});
+      const values = edits.get(customer);
+      active[customer] = Object.fromEntries(
+        ['recipient_name', 'recipient_phone', 'address'].map(key => [key, values[key] || ''])
+      );
+      const group = document.createElement('fieldset');
+      const legend = document.createElement('legend');
+      legend.textContent = `${customer || '未填写客户'} · 本次收货资料`;
+      group.append(legend);
+      [['recipient_name', '收货人'], ['recipient_phone', '收货电话'], ['address', '收货地址']].forEach(([key, title]) => {
+        const label = document.createElement('label');
+        label.textContent = title;
+        const input = document.createElement('input');
+        input.dataset.recipientField = key;
+        input.value = values[key] || '';
+        input.maxLength = key === 'address' ? 1000 : 100;
+        input.addEventListener('input', () => {
+          values[key] = input.value;
+          active[customer][key] = input.value;
+          overrides.value = JSON.stringify(active);
+          hint.textContent = orderRecipientHintText(values);
+        });
+        label.append(input); group.append(label);
+      });
+      const hint = document.createElement('p');
+      hint.dataset.recipientHint = '';
+      hint.textContent = orderRecipientHintText(values);
+      group.append(hint); groups.append(group);
+    });
+    overrides.value = JSON.stringify(active);
+  };
+}
+
 function initializeOrderShipmentLines(form, {shipmentLines, bindLine, syncRecipients}) {
   const get = name => form.querySelector(`[data-${name}]`);
   const customer = get('shipment-customer-search');

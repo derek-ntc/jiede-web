@@ -343,6 +343,24 @@ def parse_recipient_overrides(form):
     return normalized
 
 
+def customer_recipient_defaults(row):
+    """Resolve one customer's shipment defaults without mixing field pairs."""
+    values = dict(row) if row is not None else {}
+    name = str(values.get('recipient_name') or '').strip()
+    phone = str(values.get('recipient_phone') or '').strip()
+    source = 'recipient' if name or phone else 'missing'
+    if not name and not phone:
+        name = str(values.get('contact') or '').strip()
+        phone = str(values.get('phone') or '').strip()
+        source = 'contact' if name or phone else 'missing'
+    return {
+        'recipient_name': name,
+        'recipient_phone': phone,
+        'address': str(values.get('address') or '').strip(),
+        'recipient_source': source,
+    }
+
+
 def delivery_source_items(conn, source_type, source_id):
     if source_type == 'ordinary':
         rows = conn.execute("""SELECT s.id AS source_id, s.shipped_at,
@@ -516,8 +534,9 @@ def create_delivery_notes(conn, operation_id, source_groups, recipient_overrides
     now = datetime.now(timezone.utc).isoformat()
     note_ids = []
     for customer, refs in sorted(groups.items()):
-        defaults = conn.execute('SELECT id, recipient_name, recipient_phone, address FROM customers WHERE name=?', (customer,)).fetchone()
-        recipient = dict(defaults) if defaults else dict(recipient_name='', recipient_phone='', address='')
+        defaults = conn.execute('''SELECT id, contact, phone, recipient_name,
+            recipient_phone, address FROM customers WHERE name=?''', (customer,)).fetchone()
+        recipient = customer_recipient_defaults(dict(defaults) if defaults else None)
         recipient.update(recipient_overrides.get(customer, {}))
         document_no = f'DN-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:12].upper()}'
         note_id = conn.execute("""INSERT INTO delivery_notes (document_no, operation_id,
