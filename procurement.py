@@ -171,6 +171,16 @@ def _purchase_dimension(value):
         raise ValueError("尺寸格式无效") from error
 
 
+def normalize_purchase_text(value):
+    """Normalize text shared by ordered fields and actual receipt snapshots."""
+    return _purchase_text(value)
+
+
+def parse_optional_positive_decimal(value):
+    """Parse an optional positive, finite dimension for procurement records."""
+    return _purchase_dimension(value)
+
+
 def normalize_purchase_order_payload(payload, *, can_view_prices: bool) -> dict:
     """Validate raw dictionaries or indexed HTML form rows; ignore all posted totals."""
     category = parse_purchase_category(payload.get("category"))
@@ -297,6 +307,23 @@ def _purchase_receipt_history(conn, order_id):
         "JOIN purchase_receipts r ON r.id=ri.receipt_id "
         "JOIN purchase_order_items i ON i.id=ri.purchase_order_item_id "
         "WHERE i.purchase_order_id=? AND r.status <> 'voided' GROUP BY ri.purchase_order_item_id", (order_id,))}
+
+
+def recalculate_purchase_order_receipt_status(conn, order_id, actor, now):
+    """Derive fulfillment from posted actual quantities, preserving cancellation."""
+    order, rows = load_purchase_order(conn, order_id)
+    if order["status"] == "cancelled":
+        return "cancelled"
+    history = _purchase_receipt_history(conn, order_id)
+    if rows and all(history.get(row["id"], 0) >= row["ordered_quantity"] for row in rows):
+        status = "received"
+    elif any(history.values()):
+        status = "partially_received"
+    else:
+        status = "draft" if order["status"] == "draft" else "ordered"
+    conn.execute("UPDATE purchase_orders SET status=?, updated_by=?, updated_at=? WHERE id=?",
+                 (status, actor, now, order_id))
+    return status
 
 
 def update_purchase_order(conn, order_id, payload, actor, now) -> None:
