@@ -1,22 +1,24 @@
 {% extends "base.html" %}
 {% block title %}订单生产跟进 - {{ group.order_no }}{% endblock %}
-{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='business-lists.css', v=static_version) }}">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='business-lists.css', v=static_version) }}"><link rel="stylesheet" href="{{ url_for('static', filename='process-card-editor.css', v=static_version) }}">{% endblock %}
 {% macro hidden(order_id) %}<input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}"><input type="hidden" name="return_order_id" value="{{ order_id }}"><input type="hidden" name="filter_q" value="{{ query }}"><input type="hidden" name="filter_customer" value="{{ selected_customer }}"><input type="hidden" name="filter_sort" value="{{ sort }}"><input type="hidden" name="filter_direction" value="{{ direction }}">{% endmacro %}
 {% block content %}
 <div class="erp-page order-progress-page">
 <section class="page-head"><div><h1>订单生产跟进 · {{ group.order_no }}</h1><p>{{ group.customer }} · {{ group.ordered_at }}{% if group.assembly_drawing_no %} · {{ group.assembly_drawing_no }} · {{ group.assembly_set_quantity }} 套{% endif %}</p></div><a class="button secondary" href="{{ url_for('production_followups', q=query, customer=selected_customer, sort=sort, direction=direction) }}">返回订单汇总</a></section>
-<p>填写当前累计完成数，不是本次增加数。工艺进度仅用于生产跟进，不代表成品数量或库存。</p>
+<p>填写当前累计完成数，不是本次增加数；允许超过需求数量，按实际生产数量填写。工艺进度仅用于生产跟进，不代表成品数量或库存。</p>
 {% for item in items %}
-<section class="panel order-progress-item"><div class="section-head"><div><h2>{{ item.drawing_no }} · {{ item.product_name }}</h2><p>规格：{{ item.supplier or '—' }} · 需求数量：{{ item.quantity }} · 工艺进度：{{ (item.progress|string + '%') if item.progress is not none else '未配置工艺' }}</p></div>
+<section class="panel order-progress-item" id="process-card-{{ item.followup.id if item.followup else 'order-' ~ item.id }}" data-process-card><div class="section-head"><div><h2>{{ item.drawing_no }} · {{ item.product_name }}</h2><p>规格：{{ item.supplier or '—' }} · 需求数量：{{ item.quantity }} · 工艺进度：{{ (item.progress|string + '%') if item.progress is not none else '未配置工艺' }}</p></div>
 {% if item.followup %}<a class="button secondary" href="{{ url_for('preview_production_process_card', followup_id=item.followup.id) }}">工艺卡</a>{% elif can_manage_production_followups %}<form method="post" action="{{ url_for('start_order_production', order_id=item.id) }}">{{ hidden(item.id) }}<button>开始跟进</button></form>{% endif %}</div>
 {% if item.followup %}
+{% if can_manage_production_followups %}<form id="process-edit-{{ item.followup.id }}" data-process-save method="post" action="{{ url_for('save_production_followup_process_card', followup_id=item.followup.id) }}">{{ hidden(item.id) }}<input type="hidden" name="card_revision" value="{{ process_card_revision(item.processes) }}"><button>保存本规格</button><span>统一保存本规格；工艺名称及增删、排序同步到产品资料，供后续订单沿用</span></form>{% endif %}
+<p data-process-status role="status" aria-live="polite"></p>
 <div class="table-wrap"><table class="order-progress-table"><thead><tr><th>工艺</th><th>累计完成数量 / 需求数量</th><th>进度</th><th>备注</th>{% if can_manage_production_followups %}<th>操作</th>{% endif %}</tr></thead><tbody>
-{% for step in item.processes %}<tr><td>{{ step.name }}</td><td>{{ step.completed_quantity }} / {{ item.quantity }}
-{% if can_manage_production_followups %}<form method="post" action="{{ url_for('set_order_process_quantity', followup_id=item.followup.id, step_id=step.id) }}">{{ hidden(item.id) }}<input type="hidden" name="version" value="{{ step.version }}"><label class="sr-only" for="qty-{{ step.id }}">{{ step.name }}累计完成数量</label><input id="qty-{{ step.id }}" name="quantity" type="number" min="0" max="{{ item.quantity }}" step="1" required value="{{ step.completed_quantity }}"><button>保存数量</button></form>{% endif %}</td>
+{% for step in item.processes %}<tr><td>{% if can_manage_production_followups %}<input form="process-edit-{{ item.followup.id }}" type="hidden" name="step_id" value="{{ step.id }}"><input data-process-edit id="process-name-{{ step.id }}" form="process-edit-{{ item.followup.id }}" name="process_name" value="{{ step.name }}" required maxlength="100" aria-label="{{ step.name }}工艺名称">{% else %}{{ step.name }}{% endif %}</td><td>{{ step.completed_quantity }} / {{ item.quantity }}
+{% if can_manage_production_followups %}<label class="sr-only" for="qty-{{ step.id }}">{{ step.name }}累计完成数量</label><input data-process-edit form="process-edit-{{ item.followup.id }}" id="qty-{{ step.id }}" name="process_quantity" type="number" min="0" step="1" required value="{{ step.completed_quantity }}">{% endif %}</td>
 <td><progress max="100" value="{{ step.percent }}"></progress><span>{{ step.percent }}% · {{ step.status }}</span>{% if step.completed_at %}<small>{{ step.completed_at }} {{ step.completed_by }}</small>{% endif %}</td>
-<td>{% if can_manage_production_followups %}<form method="post" action="{{ url_for('update_production_followup_process_remark', followup_id=item.followup.id, step_id=step.id) }}">{{ hidden(item.id) }}<label class="sr-only" for="remark-{{ step.id }}">{{ step.name }}备注</label><textarea id="remark-{{ step.id }}" name="remark" maxlength="1000">{{ step.remark }}</textarea><button class="secondary">保存备注</button></form>{% else %}{{ step.remark }}{% endif %}</td>
+<td>{% if can_manage_production_followups %}<label class="sr-only" for="remark-{{ step.id }}">{{ step.name }}备注</label><textarea data-process-edit form="process-edit-{{ item.followup.id }}" id="remark-{{ step.id }}" name="process_remark" maxlength="1000">{{ step.remark }}</textarea>{% else %}{{ step.remark }}{% endif %}</td>
 {% if can_manage_production_followups %}<td><div class="order-process-actions">
-{% for action, label in [('complete', '全部完成'), ('revert', '确认归零')] %}<form method="post" action="{{ url_for('complete_production_followup_process' if action == 'complete' else 'revert_production_followup_process', followup_id=item.followup.id, step_id=step.id) }}" {% if action == 'revert' %}onsubmit="return confirm('确认将这道工艺的累计完成数量归零？历史记录将保留。')"{% endif %}>{{ hidden(item.id) }}<input type="hidden" name="version" value="{{ step.version }}"><input type="hidden" name="confirm_reset" value="1"><button class="secondary">{{ label }}</button></form>{% endfor %}
+
 {% for direction, label in [('up', '上移'), ('down', '下移')] %}<form method="post" action="{{ url_for('move_production_followup_process', followup_id=item.followup.id, step_id=step.id) }}">{{ hidden(item.id) }}<input type="hidden" name="direction" value="{{ direction }}"><button class="secondary">{{ label }}</button></form>{% endfor %}
 <form method="post" action="{{ url_for('delete_production_followup_process', followup_id=item.followup.id, step_id=step.id) }}" onsubmit="return confirm('确认删除这道工艺？已有完成数量及历史会保留在审计中。')">{{ hidden(item.id) }}<input type="hidden" name="confirm_quantity_delete" value="1"><button class="danger">删除工艺</button></form>
 </div></td>{% endif %}</tr>{% else %}<tr><td colspan="5">未配置工艺，可添加工艺后开始记录。</td></tr>{% endfor %}</tbody></table></div>
@@ -24,3 +26,5 @@
 {% else %}<p>尚未开始跟进，打开本页不会自动创建工艺卡。</p>{% endif %}
 </section>{% endfor %}</div>
 {% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='process-card-editor.js', v=static_version) }}"></script>{% endblock %}

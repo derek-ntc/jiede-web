@@ -1,0 +1,4 @@
+<select aria-label="材料类型" data-field="material_type" data-material-type name="items[{{ row_index }}][material_type]">
+  {% if item.get('id') and not item.get('material_type') %}<option value="" selected>未分类（原有尺寸）</option>{% endif %}
+  {% for value, label in material_types.items() %}<option value="{{ value }}" {% if item.get('material_type', 'plate') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+</select>

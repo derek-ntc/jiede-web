@@ -17,7 +17,7 @@
   {% for row in rows %}<tr data-outbound-row data-lot-id="{{ row.id }}" data-version="{{ row.version }}" data-available="{{ row.available_quantity }}">
     <td><input type="checkbox" data-field="selected" aria-label="选择 {{ row.lot_no }}"></td>
     <td>{{ row.lot_no }}<br>{{ row.order_no }}</td>
-    <td class="outbound-actual">{% for field in actual_fields %}{% if row[field] is not none and row[field] != '' %}<div>{{ field_labels[field] }}：{{ row[field] }}</div>{% endif %}{% endfor %}</td>
+    <td class="outbound-actual">{% for field in actual_fields %}{% if (category == 'raw_material' and field == 'spec') or (row[field] is not none and row[field] != '') %}<div>{{ field_labels[field] }}：{{ material_specification(row) if category == 'raw_material' and field == 'spec' else row[field] }}</div>{% endif %}{% endfor %}</td>
     <td>{{ row.supplier_name }}</td><td>{{ row.location_code }} · {{ row.location_name }}</td>
     <td data-current-quantity>{{ row.available_quantity }}</td>
     <td><input data-field="quantity" type="number" min="1" max="{{ row.available_quantity }}" step="1" inputmode="numeric" aria-label="{{ row.lot_no }} 出库数量"></td>

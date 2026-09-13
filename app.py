@@ -152,6 +152,8 @@ import order_production
 import production_order_views
 from production_processes import (
     load_followup_process_card,
+    process_card_revision,
+    save_followup_process_card,
     add_followup_process_step,
     complete_followup_process_step,
     create_followup_process_snapshot,
@@ -266,7 +268,10 @@ class FactoryRequest(FlaskRequest):
         return min(int(global_limit), shipment_limit)
 
 
+from raw_materials import MATERIAL_TYPES, material_specification
+
 app = Flask(__name__)
+app.jinja_env.globals.update(process_card_revision=process_card_revision, material_types=MATERIAL_TYPES, material_specification=material_specification)
 app.request_class = FactoryRequest
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-env")
 app.config["WRITE_LOCK_PATH"] = str(_configured_write_lock_path)
@@ -9893,6 +9898,23 @@ def production_process_action_result(followup_id, action, success_message):
     return production_followup_redirect()
 
 
+@app.route("/admin/production-followups/<int:followup_id>/processes/save", methods=["POST"])
+@permission_required("production_followups_manage")
+def save_production_followup_process_card(followup_id):
+    def save(conn):
+        fields = [request.form.getlist(key) for key in
+                  ('step_id', 'process_name', 'process_remark')]
+        quantities = request.form.getlist('process_quantity')
+        if len({len(values) for values in fields}) != 1 or (quantities and len(quantities) != len(fields[0])):
+            raise ValueError('请完整提交本规格的所有参数')
+        entries = [dict(id=step_id, name=name, remark=remark,
+                        quantity=quantities[index] if quantities else None)
+                   for index, (step_id, name, remark) in enumerate(zip(*fields))]
+        save_followup_process_card(conn, followup_id, entries,
+                                   request.form.get('card_revision', ''), current_admin_username())
+    return production_process_action_result(followup_id, save, '本规格工艺参数已全部保存')
+
+
 @app.route(
     "/admin/production-followups/<int:followup_id>/processes",
     methods=["POST"],
@@ -12015,6 +12037,8 @@ def purchase_page_context(category):
     if not user_can_view_purchase_prices():
         fields = [field for field in fields if field != "unit_price"]
     labels = dict(PURCHASE_FIELD_LABELS)
+    if category == "raw_material":
+        labels["spec"] = "规格（mm）"
     if category == "carton":
         labels["dimension_text"] = "尺寸说明/历史尺寸"
     if category in {"raw_material", "carton", "outsourcing"}:
@@ -12357,6 +12381,11 @@ def purchase_receipt_context(category):
     context.update(receipt_navigation=True, actual_fields=["item_name", "drawing_no", "material", "dimension_text",
                    "surface", "spec", "unit"] + dimensions.get(category, ["length", "width", "height", "thickness"]),
                    invoice_labels={"not_required": "无需开票", "pending": "待开票", "invoiced": "已开票"})
+    if category == "raw_material":
+        context["actual_fields"] = ["item_name", "drawing_no", "material", "spec", "dimension_text", "surface", "unit"]
+    context["receipt_editor_fields"] = list(context["actual_fields"])
+    if category == "raw_material":
+        context["receipt_editor_fields"].insert(3, "material_type")
     return context
 
 
@@ -12553,6 +12582,8 @@ def purchase_form_response(conn, category, order=None, items=None, error=None, s
             if field in submitted:
                 order[field] = submitted[field]
         visible = set(purchase_page_context(category)["fields"]) | {"id"}
+        if category == "raw_material":
+            visible.update({"length", "width", "height", "thickness"})
         indexed = {}
         for key, value in submitted.items():
             match = re.fullmatch(r"items\[(\d{1,4})\]\[([a-z_]+)\]", key)
@@ -18871,24 +18902,31 @@ def new_order():
         order_no = request.form.get("order_no", "").strip()
         ordered_at = request.form.get("ordered_at", "").strip()
         selected_customer = request.form.get("customer", "").strip()
-        assembly_drawing_no = request.form.get("assembly_drawing_no", "").strip()
-        assembly_set_quantity_text = request.form.get(
-            "assembly_set_quantity", ""
-        ).strip()
-        try:
-            assembly_set_quantity = int(assembly_set_quantity_text or 0)
-        except ValueError:
-            flash("组装数量必须大于 0", "error")
-            return redirect(url_for("new_order"))
-        if bool(assembly_drawing_no) != bool(assembly_set_quantity_text):
-            flash("组装图号和组装数量必须同时填写", "error")
-            return redirect(url_for("new_order"))
-        if assembly_drawing_no and assembly_set_quantity <= 0:
-            flash("组装数量必须大于 0", "error")
-            return redirect(url_for("new_order"))
-        if assembly_set_quantity > MAX_ORDER_QUANTITY:
-            flash(f"组装数量不能超过 {MAX_ORDER_QUANTITY}", "error")
-            return redirect(url_for("new_order"))
+        assemblies = {}
+        for drawing, quantity_text in zip_longest(
+            request.form.getlist("assembly_drawing_no"),
+            request.form.getlist("assembly_set_quantity"), fillvalue=""
+        ):
+            drawing, quantity_text = drawing.strip(), quantity_text.strip()
+            if not drawing and not quantity_text:
+                continue
+            if not drawing or not quantity_text:
+                flash("组装图号和组装数量必须同时填写", "error")
+                return redirect(url_for("new_order"))
+            try:
+                set_quantity = int(quantity_text)
+            except ValueError:
+                set_quantity = 0
+            if set_quantity <= 0:
+                flash("组装数量必须大于 0", "error")
+                return redirect(url_for("new_order"))
+            if set_quantity > MAX_ORDER_QUANTITY:
+                flash(f"组装数量不能超过 {MAX_ORDER_QUANTITY}", "error")
+                return redirect(url_for("new_order"))
+            if drawing.casefold() in assemblies:
+                flash("组装图号不能重复，请合并同一图号的组装数量", "error")
+                return redirect(url_for("new_order"))
+            assemblies[drawing.casefold()] = (drawing, set_quantity)
         manual_ids = request.form.getlist("manual_id")
         quantities = request.form.getlist("quantity")
         planned_ship_dates = request.form.getlist("planned_ship_at")
@@ -18904,8 +18942,17 @@ def new_order():
             flash("请选择客户", "error")
             return redirect(url_for("new_order"))
 
+        item_drawings = request.form.getlist("item_assembly_drawing_no")
+        if not item_drawings:
+            if len(assemblies) > 1:
+                flash("请重新生成多组装图号的配件清单", "error")
+                return redirect(url_for("new_order"))
+            item_drawings = [next(iter(assemblies), "")] * len(manual_ids)
+        if len(item_drawings) != len(manual_ids):
+            flash("配件清单不完整，请重新生成", "error")
+            return redirect(url_for("new_order"))
         items = []
-        for manual_id, quantity, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status in zip_longest(
+        for manual_id, quantity, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status, item_drawing in zip_longest(
             manual_ids,
             quantities,
             planned_ship_dates,
@@ -18913,6 +18960,7 @@ def new_order():
             remarks,
             carton_statuses,
             recent_ship_statuses,
+            item_drawings,
             fillvalue="",
         ):
             manual_id = manual_id.strip()
@@ -18939,7 +18987,11 @@ def new_order():
             if quantity_value > MAX_ORDER_QUANTITY:
                 flash(f"订单数量不能超过 {MAX_ORDER_QUANTITY}", "error")
                 return redirect(url_for("new_order"))
-            items.append((manual_id_value, quantity_value, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status))
+            item_drawing = item_drawing.strip().casefold()
+            if item_drawing and item_drawing not in assemblies:
+                flash("配件所属组装图号已改变，请重新生成配件清单", "error")
+                return redirect(url_for("new_order"))
+            items.append((manual_id_value, quantity_value, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status, item_drawing))
 
         if not items:
             flash("至少需要添加一个产品", "error")
@@ -18947,22 +18999,18 @@ def new_order():
 
         now = datetime.utcnow().isoformat(timespec="seconds")
         with get_db() as conn:
-            if assembly_drawing_no:
-                assembly_options = get_assembly_options_for_customer(
-                    conn, selected_customer
-                )
-                canonical_assembly_drawing_no = next(
-                    (
-                        option
-                        for option in assembly_options
-                        if option.casefold() == assembly_drawing_no.casefold()
-                    ),
-                    None,
-                )
-                if canonical_assembly_drawing_no is None:
+            if assemblies:
+                assembly_options = {
+                    option.casefold(): option
+                    for option in get_assembly_options_for_customer(conn, selected_customer)
+                }
+                if any(key not in assembly_options for key in assemblies):
                     flash("请选择该客户有效的组装图号", "error")
                     return redirect(url_for("new_order"))
-                assembly_drawing_no = canonical_assembly_drawing_no
+                assemblies = {
+                    key: (assembly_options[key], value[1])
+                    for key, value in assemblies.items()
+                }
             manual_rows = conn.execute(
                 f"""
                 SELECT id, customer
@@ -19010,8 +19058,8 @@ def new_order():
                         ordered_at,
                         quantity,
                         selected_customer,
-                        assembly_drawing_no,
-                        assembly_set_quantity,
+                        assemblies.get(item_drawing, ("", 0))[0],
+                        assemblies.get(item_drawing, ("", 0))[1],
                         customer_emails_by_name.get(selected_customer, ""),
                         planned_ship_at,
                         material_stock_status,
@@ -19023,7 +19071,7 @@ def new_order():
                         now,
                         now,
                     )
-                    for manual_id, quantity, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status in items
+                    for manual_id, quantity, planned_ship_at, material_stock_status, remark, carton_status, recent_ship_status, item_drawing in items
                 ],
             )
         flash("产品订单已新增", "success")

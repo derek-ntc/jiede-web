@@ -6,6 +6,8 @@ import re
 from contextlib import contextmanager
 from uuid import uuid4
 
+from raw_materials import normalize_material_dimensions, material_specification
+
 from procurement import (
     PURCHASE_CATEGORIES,
     _purchase_date,
@@ -22,13 +24,14 @@ _PURCHASE_INVENTORY_QUANTITY_MAX = 2_147_483_647
 _CATEGORY_SQL = ",".join(f"'{category}'" for category in sorted(PURCHASE_CATEGORIES))
 
 ACTUAL_FIELDS = ("item_name", "drawing_no", "material", "dimension_text",
-                 "surface", "spec", "unit", "length", "width", "height", "thickness")
+                 "surface", "spec", "unit", "material_type", "length", "width", "height", "thickness")
 INVOICE_STATUSES = {"not_required", "pending", "invoiced"}
 ORDERED_SNAPSHOT_FIELDS = (*ACTUAL_FIELDS, "ordered_quantity", "unit_price_minor")
 
 
 def _ordered_snapshot(item):
-    return json.dumps({key: item[key] for key in ORDERED_SNAPSHOT_FIELDS}, ensure_ascii=False, sort_keys=True)
+    item = dict(item)
+    return json.dumps({key: item.get(key, "" if key == "material_type" else None) for key in ORDERED_SNAPSHOT_FIELDS}, ensure_ascii=False, sort_keys=True)
 
 
 def load_purchase_receipt_document(conn, receipt_id, *, include_prices):
@@ -41,9 +44,12 @@ def load_purchase_receipt_document(conn, receipt_id, *, include_prices):
         "WHERE i.receipt_id=? ORDER BY i.id", (receipt_id,)):
         row = dict(source)
         ordered = json.loads(row.pop("ordered_snapshot_json"))
-        row["ordered"] = {key: ordered.get(key) for key in ORDERED_SNAPSHOT_FIELDS
+        row["ordered"] = {key: ordered.get(key, "" if key == "material_type" else None) for key in ORDERED_SNAPSHOT_FIELDS
                           if include_prices or key != "unit_price_minor"}
         row["differences"] = [key for key in ACTUAL_FIELDS if row[key] != row["ordered"][key]]
+        if (receipt["category"] == "raw_material" and "spec" not in row["differences"]
+                and material_specification(row) != material_specification(row["ordered"])):
+            row["differences"].append("spec")
         rows.append(row)
     return receipt, rows
 
@@ -95,7 +101,13 @@ def _insert_inventory_record(conn, table, values):
 
 def validate_actual_fields_for_category(row, category):
     parse_purchase_category_slug(category)
-    if category in {"raw_material", "carton"}:
+    if category != "raw_material":
+        row["material_type"] = ""
+    if category == "raw_material" and row.get("material_type"):
+        if not row["material"]:
+            raise ValueError("实际材质为必填项")
+        normalize_material_dimensions(row)
+    elif category in {"raw_material", "carton"}:
         dimensions = ("length", "width", "thickness" if category == "raw_material" else "height")
         if not row["material"] or any(row[field] is None for field in dimensions):
             raise ValueError("实际材质、长、宽及厚度（原材料）或高度（纸箱）为必填项")
@@ -104,8 +116,8 @@ def validate_actual_fields_for_category(row, category):
 
 
 def normalize_receipt_row(source, category):
-    row = {name: normalize_purchase_text(source.get(name)) for name in ACTUAL_FIELDS[:7]}
-    row.update({name: parse_optional_positive_decimal(source.get(name)) for name in ACTUAL_FIELDS[7:]})
+    row = {name: normalize_purchase_text(source.get(name)) for name in ACTUAL_FIELDS[:8]}
+    row.update({name: parse_optional_positive_decimal(source.get(name)) for name in ACTUAL_FIELDS[8:]})
     row["actual_quantity"] = parse_purchase_inventory_quantity(source.get("actual_quantity"))
     row["qualified_quantity"] = parse_purchase_inventory_quantity(source.get("qualified_quantity"), allow_zero=True)
     if row["qualified_quantity"] > row["actual_quantity"]:
@@ -780,6 +792,9 @@ def ensure_purchase_inventory_tables(conn) -> None:
         )
         """
     )
+    for table in ("purchase_receipt_items", "purchase_inventory_lots"):
+        if "material_type" not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN material_type TEXT NOT NULL DEFAULT ''")
     # Old receipts can only be reconstructed from their linked values at migration
     # time. Backfill once; later startup must never overwrite saved snapshots.
     for table, names in (("purchase_receipts", ("order_no", "category", "supplier_name")),
@@ -894,6 +909,8 @@ def ensure_purchase_inventory_tables(conn) -> None:
     )
 
     outbound_columns = {row[1] for row in conn.execute("PRAGMA table_info(purchase_inventory_outbound_items)")}
+    if "material_type" not in outbound_columns:
+        conn.execute("ALTER TABLE purchase_inventory_outbound_items ADD COLUMN material_type TEXT NOT NULL DEFAULT ''")
     for field in ("length", "width", "height", "thickness"):
         if field not in outbound_columns:
             conn.execute(f"ALTER TABLE purchase_inventory_outbound_items ADD COLUMN {field} REAL")

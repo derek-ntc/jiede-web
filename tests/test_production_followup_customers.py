@@ -275,6 +275,7 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
             this.dataset = {productionProcessConfirm: message};
             this.listeners = {};
           }
+          closest() { return null; }
           addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
           emit(type) {
             let prevented = false;
@@ -336,8 +337,8 @@ class ProductionFollowupCustomerTests(unittest.TestCase):
         html = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
-        self.assertLess(html.index("<strong>激光</strong>"), html.index("<strong>折弯</strong>"))
-        self.assertLess(html.index("<strong>折弯</strong>"), html.index("<strong>焊接</strong>"))
+        self.assertLess(html.index('name="process_name" value="激光"'), html.index('name="process_name" value="折弯"'))
+        self.assertLess(html.index('name="process_name" value="折弯"'), html.index('name="process_name" value="焊接"'))
         with app.get_db() as conn:
             marker = conn.execute(
                 "SELECT process_snapshot_created FROM production_followups WHERE id = 4"

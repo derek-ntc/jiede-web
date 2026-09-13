@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ '编辑' if order.id else '新建' }}{{ category_labels[category] }}{% endblock %}
-{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css', v=static_version) }}">{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='purchase-orders.css', v=static_version) }}"><link rel="stylesheet" href="{{ url_for('static', filename='raw-materials.css', v=static_version) }}">{% endblock %}
 {% block content %}
 {% include "purchase_tabs.html" %}
 <h1>{{ '编辑' if order.id else '新建' }}{{ category_labels[category] }}</h1>
@@ -20,8 +20,8 @@
   {% if 'unit_price' in fields %}<p>币种：RMB／人民币。留空表示未录价，金额由服务器计算。</p>{% endif %}
   <p>原材料／纸箱须填写材质；外协须填写物品名称或图号；其他采购须填写物品名称。</p>
   <div class="table-wrap"><table class="purchase-editor"><thead><tr>{% for field in fields %}<th>{{ field_labels[field] }}</th>{% if field == 'unit_price' %}<th>金额（RMB）</th>{% endif %}{% endfor %}<th>行操作</th></tr></thead>
-  <tbody data-purchase-rows>{% for item in items %}{% set row_index = loop.index0 %}{% set legacy = item.get('legacy_source') is not none or item.get('legacy_id') is not none %}<tr data-purchase-row data-legacy-source="{{ item.get('legacy_source') or '' }}" data-legacy-id="{{ item.get('legacy_id') if item.get('legacy_id') is not none else '' }}">
-    {% for field in fields %}<td>{% if field == 'remark' %}<textarea aria-label="{{ field_labels[field] }}" data-field="{{ field }}" name="items[{{ row_index }}][{{ field }}]" rows="2">{{ item.get(field) or '' }}</textarea>{% else %}<input aria-label="{{ field_labels[field] }}" data-field="{{ field }}" name="items[{{ row_index }}][{{ field }}]" value="{{ item.get(field, '') if item.get(field) is not none else '' }}" {% if field == 'expected_at' %}type="date" required{% elif field == 'quantity' %}type="number" min="1" step="1" required{% elif field in ['length','width','height','thickness','unit_price'] %}type="number" min="{{ '0' if field == 'unit_price' else '0.000000001' }}" step="{{ '0.01' if field == 'unit_price' else 'any' }}"{% else %}type="text"{% endif %}>{% endif %}</td>{% if field == 'unit_price' %}<td><output data-line-amount>{{ item.get('line_total') or '未录价' }}</output></td>{% endif %}{% endfor %}
+  <tbody data-purchase-rows>{% for item in items %}{% set row_index = loop.index0 %}{% set legacy = item.get('legacy_source') is not none or item.get('legacy_id') is not none %}<tr {% if category == 'raw_material' %}data-material-row{% endif %} data-purchase-row data-legacy-source="{{ item.get('legacy_source') or '' }}" data-legacy-id="{{ item.get('legacy_id') if item.get('legacy_id') is not none else '' }}">
+    {% for field in fields %}<td data-label="{{ field_labels[field] }}">{% if category == 'raw_material' and field == 'material_type' %}{% include 'raw_material_type.html' %}{% elif category == 'raw_material' and field == 'spec' %}{% include 'raw_material_spec.html' %}{% elif field == 'remark' %}<textarea aria-label="{{ field_labels[field] }}" data-field="{{ field }}" name="items[{{ row_index }}][{{ field }}]" rows="2">{{ item.get(field) or '' }}</textarea>{% else %}<input aria-label="{{ field_labels[field] }}" data-field="{{ field }}" name="items[{{ row_index }}][{{ field }}]" value="{{ item.get(field, '') if item.get(field) is not none else '' }}" {% if field == 'expected_at' %}type="date" required{% elif field == 'quantity' %}type="number" min="1" step="1" required{% elif field in ['length','width','height','thickness','unit_price'] %}type="number" min="{{ '0' if field == 'unit_price' else '0.000000001' }}" step="{{ '0.01' if field == 'unit_price' else 'any' }}"{% else %}type="text"{% endif %}>{% endif %}</td>{% if field == 'unit_price' %}<td><output data-line-amount>{{ item.get('line_total') or '未录价' }}</output></td>{% endif %}{% endfor %}
     <td><input type="hidden" data-field="id" name="items[{{ row_index }}][id]" value="{{ item.get('id', '') }}"><div class="purchase-row-actions"><button type="button" data-row-action="up">上移</button><button type="button" data-row-action="down">下移</button><button type="button" data-row-action="remove" {% if legacy %}disabled{% endif %}>删除</button><span data-legacy-note {% if not legacy %}hidden{% endif %}>历史来源（不可删除）</span></div></td>
   </tr>{% endfor %}</tbody></table></div>
   <p><button type="button" data-add-row>新增明细行</button></p>
@@ -43,4 +43,4 @@
   <script type="application/json" data-supplier-data>{{ supplier_data|tojson }}</script>
 </form>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='purchase-orders.js', v=static_version) }}" defer></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='raw-materials.js', v=static_version) }}" defer></script><script src="{{ url_for('static', filename='purchase-orders.js', v=static_version) }}" defer></script>{% endblock %}

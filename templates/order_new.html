@@ -43,19 +43,25 @@
             {% endfor %}
           </select>
         </label>
-        <label>
-          组装图号（可选）
-          <select name="assembly_drawing_no" data-order-assembly-drawing disabled>
-            <option value="">先选择客户</option>
-          </select>
-        </label>
-        <label>
-          组装数量（套）
-          <input type="number" name="assembly_set_quantity" min="1" max="2147483647" step="1" data-order-assembly-quantity disabled>
-        </label>
+      </div>
+      <div data-order-assemblies>
+        <div class="grid-form" data-order-assembly-row>
+          <label>
+            组装图号（可选）
+            <select name="assembly_drawing_no" data-order-assembly-drawing disabled>
+              <option value="">先选择客户</option>
+            </select>
+          </label>
+          <label>
+            组装数量（套）
+            <input type="number" name="assembly_set_quantity" min="1" max="2147483647" step="1" data-order-assembly-quantity disabled>
+          </label>
+          <div class="form-actions"><button class="secondary" type="button" data-remove-assembly disabled>删除组装图号</button></div>
+        </div>
       </div>
 
       <div class="form-actions">
+        <button class="secondary" type="button" data-add-assembly disabled>添加组装图号</button>
         <button class="secondary" type="button" data-generate-assembly-order disabled>生成配件清单</button>
         <span class="empty-text" data-assembly-order-status aria-live="polite">选择客户和组装图号后，可按套数自动生成配件数量。</span>
       </div>
@@ -79,6 +85,8 @@
           <tbody data-order-items>
             <tr data-order-item>
               <td data-label="产品图号">
+                <input type="hidden" name="item_assembly_drawing_no" value="">
+                <small data-item-assembly-label></small>
                 <select name="manual_id" data-product-select data-product-drawing-select required>
                   <option value="" data-product-name="" data-customer="">请选择产品图号</option>
                   {% for product in products %}

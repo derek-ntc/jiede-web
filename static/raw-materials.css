@@ -1,0 +1,11 @@
+.raw-material-dimensions { display: flex; gap: .5rem; align-items: end; }
+.raw-material-dimensions label { display: grid; gap: .3rem; font-size: .85rem; white-space: nowrap; }
+.raw-material-dimensions [hidden] { display: none; }
+.raw-material-dimensions input { width: 6rem !important; min-width: 6rem !important; padding: .55rem .5rem; }
+.raw-material-preview { display: block; margin-top: .4rem; white-space: normal; color: #526570; }
+[data-material-type] { width: 10rem; min-width: 10rem; }
+.receipt-editor:has([data-material-row]) { table-layout: auto; width: max-content; min-width: 100%; }
+@media (max-width: 760px) {
+  .raw-material-dimensions { flex-wrap: wrap; }
+  [data-material-type] { width: 100%; min-width: 0; }
+}

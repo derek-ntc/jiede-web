@@ -22,6 +22,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from procurement import PURCHASE_CATEGORY_LABELS, PURCHASE_STATUS_LABELS
+from raw_materials import MATERIAL_TYPES, material_specification
 
 
 @dataclass(frozen=True)
@@ -86,7 +87,12 @@ def purchase_document_view(order, items, *, include_prices):
     """Whitelist presentation fields; hidden-price models never contain amounts."""
     order = dict(order)
     category = order["category"]
-    columns = [column for column in CATEGORY_DOCUMENT_COLUMNS[category]
+    items = [dict(item) for item in items]
+    document_columns = CATEGORY_DOCUMENT_COLUMNS[category]
+    if category == "raw_material" and any(item.get("material_type") for item in items):
+        document_columns = (Column("item_name", "物品名称", 20), _MATERIAL,
+                            Column("spec", "规格（mm）", 40), Column("surface", "表面", 14), *_TAIL, *_END)
+    columns = [column for column in document_columns
                if include_prices or column.kind != "money"]
     rows = []
     for source in items:
@@ -99,6 +105,8 @@ def purchase_document_view(order, items, *, include_prices):
         for column in columns:
             if column.key == "identity":
                 value = _join(item.get("item_name"), item.get("drawing_no" if category == "outsourcing" else "spec"))
+            elif category == "raw_material" and column.key == "spec":
+                value = material_specification(item)
             elif column.key == "details":
                 value = details
             elif column.kind == "money":
@@ -409,6 +417,8 @@ _ACTUAL_LABELS = (("item_name", "名称"), ("drawing_no", "图号"), ("material"
 
 
 def _snapshot_description(item):
+    if item.get("material_type") in MATERIAL_TYPES:
+        item = dict(item, spec=material_specification(item), length=None, width=None, height=None, thickness=None)
     return "\n".join(f"{label}：{_text(item[key])}" for key, label in _ACTUAL_LABELS
                      if item.get(key) not in (None, ""))
 

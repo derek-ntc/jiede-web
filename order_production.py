@@ -87,9 +87,7 @@ def set_process_quantity(conn, followup_id, step_id, quantity, expected_version,
             WHERE id=? AND followup_id=?''', (step_id, followup_id)).fetchone()
         if step is None:
             raise ValueError('工艺不属于当前订单工艺卡')
-        if quantity > order['quantity']:
-            raise ValueError(f"累计完成数量不能超过订单需求 {order['quantity']}")
-        completed = quantity == order['quantity'] and quantity > 0
+        completed = quantity >= order['quantity'] and quantity > 0
         completed_at = (step['completed_at'] or now) if completed else ''
         completed_by = (step['completed_by'] or operator) if completed else ''
         updated = conn.execute('''UPDATE production_followup_process_steps
@@ -112,7 +110,8 @@ def validate_order_production_change(conn, order_id, manual_id, quantity):
         raise ValueError('已关联订单工艺卡，不能更换产品')
     maximum = conn.execute('''SELECT COALESCE(MAX(completed_quantity), 0)
         FROM production_followup_process_steps WHERE followup_id=?''', (card['id'],)).fetchone()[0]
-    if int(quantity) < maximum:
+    current = conn.execute('SELECT quantity FROM product_orders WHERE id=?', (order_id,)).fetchone()[0]
+    if int(quantity) < min(maximum, current):
         raise ValueError(f'订单数量不能小于工艺已完成数量 {maximum}')
 
 
@@ -127,7 +126,7 @@ def refresh_order_production_demand(conn, order_id, previous_quantity, now, oper
     if previous_quantity == order['quantity']:
         return
     for step in load_followup_process_card(conn, card['id']):
-        completed = step['completed_quantity'] == order['quantity'] and order['quantity'] > 0
+        completed = step['completed_quantity'] >= order['quantity'] and order['quantity'] > 0
         stamp = (step['completed_at'] or now) if completed else ''
         conn.execute('''UPDATE production_followup_process_steps SET version=version+1,
             completed_at=?, completed_by=?, updated_at=? WHERE id=?''',
@@ -157,6 +156,6 @@ def decorate_order_processes(conn, order):
     demand = order['quantity']
     for step in item['processes']:
         step['percent'] = round(step['completed_quantity'] * 100 / demand, 1) if demand else 0
-        step['status'] = '已完成' if step['completed_quantity'] == demand and demand else ('进行中' if step['completed_quantity'] else '未开始')
-    item['progress'] = round(sum(s['completed_quantity'] for s in item['processes']) * 100 / (demand * len(item['processes'])), 1) if demand and item['processes'] else None
+        step['status'] = ('超额完成' if step['completed_quantity'] > demand else '已完成') if step['completed_quantity'] >= demand and demand else ('进行中' if step['completed_quantity'] else '未开始')
+    item['progress'] = round(sum(min(s['completed_quantity'], demand) for s in item['processes']) * 100 / (demand * len(item['processes'])), 1) if demand and item['processes'] else None
     return item

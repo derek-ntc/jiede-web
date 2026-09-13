@@ -284,6 +284,15 @@ def save_manual_process_template(conn, manual_id, names, *, now=None):
     return load_manual_process_template(conn, manual_id)
 
 
+def sync_followup_product_processes(conn, followup_id, timestamp):
+    """Persist reusable process names/order without copying order progress."""
+    followup = conn.execute('SELECT manual_id FROM production_followups WHERE id=?',
+                            (followup_id,)).fetchone()
+    if followup and followup['manual_id'] is not None:
+        names = [row['name'] for row in load_followup_process_card(conn, followup_id)]
+        save_manual_process_template(conn, followup['manual_id'], names, now=timestamp)
+
+
 def load_followup_process_card(conn, followup_id):
     return [
         dict(row)
@@ -447,7 +456,11 @@ def complete_followup_process_step(
         from order_production import linked_order, set_process_quantity
         order = linked_order(conn, followup_id)
         if order is not None:
-            return set_process_quantity(conn, followup_id, step_id, order['quantity'],
+            step = conn.execute('SELECT completed_quantity FROM production_followup_process_steps WHERE id=? AND followup_id=?',
+                                (step_id, followup_id)).fetchone()
+            if step is None:
+                raise ValueError('工艺不属于当前订单工艺卡')
+            return set_process_quantity(conn, followup_id, step_id, max(order['quantity'], step['completed_quantity']),
                 expected_version, operator, timestamp)
         card = load_followup_process_card(conn, followup_id)
         step = _card_action(card, step_id)
@@ -530,6 +543,7 @@ def add_followup_process_step(conn, followup_id, name, *, now=None):
             """,
             (timestamp, followup_id),
         )
+        sync_followup_product_processes(conn, followup_id, timestamp)
     return load_followup_process_card(conn, followup_id)
 
 
@@ -590,6 +604,7 @@ def delete_followup_process_step(conn, followup_id, step_id, *, now=None,
         )
         _renumber_followup_process_steps(conn, followup_id, timestamp)
         _project_legacy_completion(conn, followup_id, step["name"], "", timestamp)
+        sync_followup_product_processes(conn, followup_id, timestamp)
     return load_followup_process_card(conn, followup_id)
 
 
@@ -632,4 +647,61 @@ def move_followup_process_step(
             (step["sort_order"], timestamp, target["id"], followup_id),
         )
         _update_followup_timestamp(conn, followup_id, timestamp)
+        sync_followup_product_processes(conn, followup_id, timestamp)
     return load_followup_process_card(conn, followup_id)
+
+
+def process_card_revision(rows):
+    """Ignore presentation fields when comparing an entire editable card."""
+    import hashlib
+    import json
+    keys = ('id', 'name', 'sort_order', 'remark', 'completed_quantity',
+            'version', 'completed_at', 'completed_by', 'updated_at')
+    payload = [{key: row.get(key) for key in keys} for row in rows]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def save_followup_process_card(conn, followup_id, entries, expected_revision, operator, now=None):
+    from order_production import linked_order, set_process_quantity, _integer
+    timestamp = now or _beijing_now()
+    with _savepoint(conn, 'save_process_card'):
+        rows = load_followup_process_card(conn, followup_id)
+        if process_card_revision(rows) != expected_revision:
+            raise ValueError('工艺卡已被更新，请刷新页面后重试')
+        ids = [_integer(entry['id'], '工艺编号') for entry in entries]
+        if len(set(ids)) != len(ids) or set(ids) != {row['id'] for row in rows}:
+            raise ValueError('请完整提交本规格的所有工艺')
+        names = _normalize_process_names([entry['name'] for entry in entries])
+        if len(names) != len(entries):
+            raise ValueError('工艺名称不能为空')
+        order = linked_order(conn, followup_id)
+        updates = {}
+        for step_id, name, entry in zip(ids, names, entries):
+            remark = str(entry.get('remark') or '').strip()
+            if len(remark) > MAX_PROCESS_REMARK_LENGTH:
+                raise ValueError('工艺备注不能超过1000字')
+            quantity = _integer(entry.get('quantity'), '累计完成数量') if order else None
+            updates[step_id] = (name, remark, quantity)
+        for row in rows:
+            name, remark, quantity = updates[row['id']]
+            if order and quantity != row['completed_quantity']:
+                set_process_quantity(conn, followup_id, row['id'], quantity, row['version'], operator, timestamp)
+        # Temporary unique names allow two existing processes to exchange names.
+        for row in rows:
+            if updates[row['id']][0] != row['name']:
+                conn.execute('UPDATE production_followup_process_steps SET name=? WHERE id=?',
+                             ('__rename_' + uuid.uuid4().hex, row['id']))
+        for row in rows:
+            name, remark, _ = updates[row['id']]
+            if name != row['name'] or remark != row['remark']:
+                conn.execute('''UPDATE production_followup_process_steps
+                    SET name=?, remark=?, version=version+1, updated_at=? WHERE id=?''',
+                    (name, remark, timestamp, row['id']))
+        if any(updates[row['id']][0] != row['name'] for row in rows):
+            sync_followup_product_processes(conn, followup_id, timestamp)
+        result = load_followup_process_card(conn, followup_id)
+        for name in DEFAULT_PROCESS_NAMES:
+            completed_at = next((row['completed_at'] for row in result if row['name'] == name), '')
+            _project_legacy_completion(conn, followup_id, name, completed_at, timestamp)
+        _update_followup_timestamp(conn, followup_id, timestamp)
+    return result

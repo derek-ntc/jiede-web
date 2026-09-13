@@ -138,6 +138,43 @@ class OrderEntryPageTests(unittest.TestCase):
             ],
         )
 
+    def test_multiple_assemblies_keep_shared_components_separate(self):
+        self.configure_component(self.product_a, "ASM-100", 2)
+        self.configure_component(self.product_a, "ASM-200", 3)
+        response = self.client.post("/admin/orders/new", data={
+            "order_no": "MULTI-001", "ordered_at": "2026-09-13",
+            "customer": "客户A",
+            "assembly_drawing_no": ["ASM-100", "asm-200"],
+            "assembly_set_quantity": ["10", "5"],
+            "manual_id": [str(self.product_a)] * 3,
+            "quantity": ["20", "16", "7"],
+            "planned_ship_at": ["2026-10-01"] * 3,
+            "item_assembly_drawing_no": ["ASM-100", "ASM-200", ""],
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.get_db() as conn:
+            rows = conn.execute("SELECT quantity, assembly_drawing_no, assembly_set_quantity FROM product_orders WHERE order_no = 'MULTI-001' ORDER BY id").fetchall()
+        self.assertEqual([tuple(row) for row in rows], [
+            (20, "ASM-100", 10), (16, "ASM-200", 5), (7, "", 0),
+        ])
+
+    def test_invalid_second_assembly_rejects_entire_order(self):
+        self.configure_component(self.product_a, "ASM-100", 2)
+        for drawing, quantity in [("UNKNOWN", "5"), ("ASM-100", "0")]:
+            with self.subTest(drawing=drawing, quantity=quantity):
+                self.client.post("/admin/orders/new", data={
+                    "order_no": "INVALID-MULTI", "ordered_at": "2026-09-13",
+                    "customer": "客户A",
+                    "assembly_drawing_no": ["ASM-100", drawing],
+                    "assembly_set_quantity": ["10", quantity],
+                    "manual_id": [str(self.product_a)] * 2,
+                    "quantity": ["20", "5"],
+                    "planned_ship_at": ["2026-10-01"] * 2,
+                    "item_assembly_drawing_no": ["ASM-100", drawing],
+                })
+                with app.get_db() as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM product_orders WHERE order_no = 'INVALID-MULTI'").fetchone()[0], 0)
+
     def test_assembly_order_rejects_non_positive_set_quantity(self):
         self.configure_component(self.product_a, "ASM-100", 2)
 

@@ -1,0 +1,6 @@
+[data-process-save] { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:12px 0; }
+[data-process-save] span, [data-process-status] { font-size:14px; }
+[data-process-status]:empty { display:none; }
+[data-process-status].error { color:#a32121; }
+[data-process-edit] { box-sizing:border-box; max-width:100%; }
+input[name="process_name"] { min-width:7rem; width:11rem; }

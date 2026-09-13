@@ -1,0 +1,9 @@
+<div class="raw-material-dimensions" data-material-dimensions>
+  {% for key, label in [('length','长度'),('width','宽度'),('height','边长 B'),('thickness','厚度')] %}
+  <label data-material-dimension="{{ key }}" {% if key == 'height' and item.get('material_type') != 'square_tube' %}hidden{% endif %}><span data-dimension-label>{{ label }}</span>
+    <input type="number" data-field="{{ key }}" name="items[{{ row_index }}][{{ key }}]" value="{{ item.get(key) if item.get(key) is not none else '' }}" min="0.000000001" step="any" aria-label="{{ label }}">
+  </label>
+  {% endfor %}
+</div>
+<input type="hidden" data-field="spec" name="items[{{ row_index }}][spec]" value="{{ item.get('spec') or '' }}">
+<small class="raw-material-preview" data-material-preview></small>

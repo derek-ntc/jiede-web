@@ -1,7 +1,7 @@
 (() => {
   document.querySelectorAll("[data-production-process-confirm]").forEach((form) => {
     form.addEventListener("submit", (event) => {
-      if (!window.confirm(form.dataset.productionProcessConfirm)) {
+      if (!form.closest("[data-process-card]") && !window.confirm(form.dataset.productionProcessConfirm)) {
         event.preventDefault();
       }
     });

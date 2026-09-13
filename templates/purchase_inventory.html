@@ -31,7 +31,7 @@
   <td>{{ row.lot_no }}</td><td>{{ row.supplier_name }}</td>
   <td>{{ row.order_no }}<br>{% if can_receive_purchases %}<a href="{{ url_for('purchase_receipt_detail', receipt_id=row.receipt_id) }}">{{ row.receipt_no }}</a>{% else %}{{ row.receipt_no }}{% endif %}</td>
   <td>{{ row.received_at }}<br>{{ row.created_at }}</td>
-  {% for field in actual_fields %}<td>{{ row[field] if row[field] is not none else '-' }}</td>{% endfor %}
+  {% for field in actual_fields %}<td>{{ material_specification(row) if category == 'raw_material' and field == 'spec' else (row[field] if row[field] is not none else '-') }}</td>{% endfor %}
   <td>{{ row.opening_quantity }}</td><td><strong>{{ row.available_quantity }}</strong></td><td>{{ row.location_code }} · {{ row.location_name }}</td><td>{{ invoice_labels[row.invoice_status] }}</td>
   {% if can_view_purchase_prices %}<td>{{ '%.2f'|format(row.unit_price_minor / 100) if row.unit_price_minor is not none else '未录价' }} {{ row.currency }}</td><td>{{ '%.2f'|format(row.amount_minor / 100) if row.amount_minor is not none else '-' }}</td>{% endif %}
   <td class="purchase-stock-actions">{% if can_adjust_purchase_inventory %}<a href="{{ url_for('purchase_inventory_transfer', lot_id=row.id, category=category) }}">移库</a><a href="{{ url_for('purchase_inventory_adjust', lot_id=row.id, category=category) }}">数量调整</a>{% endif %}{% if can_receive_purchases %}<a href="{{ url_for('purchase_inventory_invoice_status', lot_id=row.id, category=category) }}">开票状态</a>{% endif %}</td>

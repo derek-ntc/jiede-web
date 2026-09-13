@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
+from raw_materials import normalize_material_dimensions
+
 from pricing import line_total_minor, parse_money_minor
 
 
@@ -17,7 +19,7 @@ _PURCHASE_ORDER_ITEM_COLUMNS = """
     id, purchase_order_id, sort_order, item_name, drawing_no, material,
     dimension_text, surface, spec, unit, length, width, height, thickness,
     expected_at, remark, ordered_quantity, unit_price_minor, line_total_minor,
-    legacy_source, legacy_id, created_at, updated_at
+    legacy_source, legacy_id, created_at, updated_at, material_type
 """
 
 
@@ -117,7 +119,7 @@ def next_purchase_order_no(conn, purchased_at: str) -> str:
 
 
 CATEGORY_VISIBLE_FIELDS = {
-    "raw_material": ("item_name", "material", "length", "width", "thickness", "surface"),
+    "raw_material": ("item_name", "material", "material_type", "spec", "surface"),
     "carton": ("item_name", "material", "length", "width", "height", "dimension_text", "unit_price"),
     "outsourcing": ("item_name", "drawing_no", "material", "dimension_text", "thickness", "surface", "unit_price"),
     "other": ("item_name", "spec", "material", "dimension_text", "thickness", "surface", "unit_price"),
@@ -125,7 +127,9 @@ CATEGORY_VISIBLE_FIELDS = {
 PURCHASE_CATEGORY_LABELS = {"raw_material": "原材料采购", "carton": "纸箱采购", "outsourcing": "外协加工", "other": "其他采购"}
 PURCHASE_STATUS_LABELS = {"draft": "草稿", "ordered": "已下单", "partially_received": "部分到货", "received": "已到齐", "cancelled": "已取消"}
 PURCHASE_FIELD_LABELS = {"item_name": "物品名称", "drawing_no": "图号", "material": "材质", "length": "长", "width": "宽", "height": "高", "thickness": "厚度", "surface": "表面", "dimension_text": "尺寸", "spec": "规格", "unit_price": "单价", "quantity": "数量", "unit": "单位", "expected_at": "预计到货日期", "remark": "其他要求"}
-_ITEM_TEXT_FIELDS = ("item_name", "drawing_no", "material", "dimension_text", "surface", "spec", "unit", "remark")
+PURCHASE_FIELD_LABELS["material_type"] = "材料类型"
+
+_ITEM_TEXT_FIELDS = ("material_type", "item_name", "drawing_no", "material", "dimension_text", "surface", "spec", "unit", "remark")
 _DIMENSION_FIELDS = ("length", "width", "height", "thickness")
 _DELIVERY_FIELDS = ("delivery_address", "recipient", "recipient_phone", "remark")
 
@@ -210,6 +214,10 @@ def normalize_purchase_order_payload(payload, *, can_view_prices: bool) -> dict:
             raise ValueError("采购明细无效")
         row = {field: _purchase_text(raw.get(field)) for field in _ITEM_TEXT_FIELDS}
         row.update({field: _purchase_dimension(raw.get(field)) for field in _DIMENSION_FIELDS})
+        if category == "raw_material":
+            normalize_material_dimensions(row)
+        else:
+            row["material_type"] = ""
         row["id"] = _purchase_id(raw["id"]) if raw.get("id") else None
         row["ordered_quantity"] = parse_purchase_quantity(raw.get("quantity"))
         row["expected_at"] = _purchase_date(raw.get("expected_at"))
@@ -420,6 +428,7 @@ def _create_purchase_order_items_table(conn, table_name, if_not_exists=False):
             item_name TEXT NOT NULL,
             drawing_no TEXT NOT NULL,
             material TEXT NOT NULL,
+            material_type TEXT NOT NULL DEFAULT '',
             dimension_text TEXT NOT NULL,
             surface TEXT NOT NULL,
             spec TEXT NOT NULL,
@@ -583,6 +592,8 @@ def ensure_procurement_tables(conn) -> None:
         """
     )
     _create_purchase_order_items_table(conn, "purchase_order_items", if_not_exists=True)
+    if "material_type" not in {row[1] for row in conn.execute("PRAGMA table_info(purchase_order_items)")}:
+        conn.execute("ALTER TABLE purchase_order_items ADD COLUMN material_type TEXT NOT NULL DEFAULT ''")
     if _purchase_order_items_requires_integer_upgrade(conn):
         _upgrade_purchase_order_items_integer_storage(conn)
     # Mark system-owned suppliers explicitly; a matching display name/code is not

@@ -79,6 +79,8 @@ function resetOrderItemRow(row, plannedShipAt = "") {
   });
   const plannedShipDate = row.querySelector('input[name="planned_ship_at"]');
   if (plannedShipDate) plannedShipDate.value = plannedShipAt;
+  const assemblyLabel = row.querySelector("[data-item-assembly-label]");
+  if (assemblyLabel) assemblyLabel.textContent = "";
   syncProductRow(row);
   return row;
 }
@@ -92,7 +94,7 @@ function replaceRowsWithAssembly(
   customer,
 ) {
   const preparedItems = items.map((item) => {
-    const quantity = Number(item.quantity_per_set) * Number(setQuantity);
+    const quantity = Number(item.quantity_per_set) * Number(item.assembly_set_quantity ?? setQuantity);
     if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > MAX_ORDER_QUANTITY) {
       throw new Error(`自动计算的配件数量必须在 1 到 ${MAX_ORDER_QUANTITY} 之间`);
     }
@@ -109,6 +111,11 @@ function replaceRowsWithAssembly(
     if (quantity) {
       quantity.value = String(calculatedQuantity);
     }
+    const assemblyField = row.querySelector('[name="item_assembly_drawing_no"]');
+    if (assemblyField) assemblyField.value = item.assembly_drawing_no || "";
+    const assemblyLabel = row.querySelector("[data-item-assembly-label]");
+    if (assemblyLabel) assemblyLabel.textContent = item.assembly_drawing_no
+      ? `${item.assembly_drawing_no} · ${item.assembly_set_quantity} 套` : "";
     body.appendChild(row);
   });
 }
@@ -137,6 +144,21 @@ function initializeOrderEntry(root = document) {
   const assemblyOptionsUrl = form.dataset?.assemblyOptionsUrl || "";
   const assemblyDefinitionUrl = form.dataset?.assemblyDefinitionUrl || "";
   const rowTemplate = body.querySelector("[data-order-item]").cloneNode(true);
+  const assemblyRows = form.querySelector("[data-order-assemblies]");
+  const addAssemblyButton = form.querySelector("[data-add-assembly]");
+  let availableAssemblies = [];
+  let generatedSelection = null;
+  const controls = () => assemblyRows
+    ? Array.from(assemblyRows.querySelectorAll("[data-order-assembly-row]")).map((row) => ({
+        row,
+        drawing: row.querySelector("[data-order-assembly-drawing]"),
+        quantity: row.querySelector("[data-order-assembly-quantity]"),
+      }))
+    : [{drawing: assemblyDrawing, quantity: assemblyQuantity}];
+  const selection = () => controls().map(({drawing, quantity}) => ({
+    drawing: drawing?.value || "", quantity: quantity?.value || "",
+  }));
+  const selectionKey = () => JSON.stringify([customerFilter?.value, selection()]);
   let assemblyRequestSequence = 0;
   let assemblyGenerationSequence = 0;
 
@@ -158,26 +180,31 @@ function initializeOrderEntry(root = document) {
   }
 
   function updateAssemblyGenerateState() {
-    if (assemblyQuantity) {
-      assemblyQuantity.disabled = !assemblyDrawing?.value;
-      if (assemblyQuantity.disabled) assemblyQuantity.value = "";
-    }
+    const rows = controls();
+    rows.forEach(({row, drawing, quantity}) => {
+      if (quantity) {
+        quantity.disabled = !drawing?.value;
+        if (quantity.disabled) quantity.value = "";
+      }
+      const remove = row?.querySelector("[data-remove-assembly]");
+      if (remove) remove.disabled = rows.length === 1;
+    });
+    if (addAssemblyButton) addAssemblyButton.disabled = availableAssemblies.length === 0;
     if (generateAssemblyButton) {
-      generateAssemblyButton.disabled = !(
-        customerFilter?.value &&
-        assemblyDrawing?.value &&
-        Number.isInteger(Number(assemblyQuantity?.value)) &&
-        Number(assemblyQuantity?.value) > 0 &&
-        Number(assemblyQuantity?.value) <= MAX_ORDER_QUANTITY
-      );
+      generateAssemblyButton.disabled = !(customerFilter?.value && rows.every(({drawing, quantity}) =>
+        drawing?.value && Number.isInteger(Number(quantity?.value)) &&
+        Number(quantity?.value) > 0 && Number(quantity?.value) <= MAX_ORDER_QUANTITY
+      ));
     }
   }
 
   async function loadAssemblyOptions() {
-    if (!assemblyDrawing) return;
+    const drawingSelect = controls()[0]?.drawing;
+    if (!drawingSelect) return;
     const requestSequence = ++assemblyRequestSequence;
-    assemblyDrawing.disabled = true;
-    populateAssemblyOptions(assemblyDrawing, []);
+    availableAssemblies = [];
+    controls().slice(1).forEach(({row}) => row.remove());
+    populateAssemblyOptions(drawingSelect, []);
     updateAssemblyGenerateState();
     if (!customerFilter?.value) {
       setAssemblyStatus("选择客户和组装图号后，可按套数自动生成配件数量。");
@@ -190,10 +217,8 @@ function initializeOrderEntry(root = document) {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "组装图号加载失败");
       if (requestSequence !== assemblyRequestSequence) return;
-      populateAssemblyOptions(
-        assemblyDrawing,
-        payload.assembly_drawing_numbers || [],
-      );
+      availableAssemblies = payload.assembly_drawing_numbers || [];
+      populateAssemblyOptions(drawingSelect, availableAssemblies);
       setAssemblyStatus(
         payload.assembly_drawing_numbers?.length
           ? "请选择组装图号并填写组装数量。"
@@ -201,7 +226,7 @@ function initializeOrderEntry(root = document) {
       );
     } catch (error) {
       if (requestSequence !== assemblyRequestSequence) return;
-      populateAssemblyOptions(assemblyDrawing, []);
+      populateAssemblyOptions(drawingSelect, []);
       setAssemblyStatus(error.message || "组装图号加载失败");
     }
     updateAssemblyGenerateState();
@@ -222,21 +247,31 @@ function initializeOrderEntry(root = document) {
     filterAllProductRows();
     loadAssemblyOptions();
   });
-  assemblyDrawing?.addEventListener("change", () => {
+  function assemblyChanged() {
     assemblyGenerationSequence += 1;
     updateAssemblyGenerateState();
-    if (assemblyDrawing.value) {
-      setAssemblyStatus("填写组装数量后生成配件清单。");
-    }
-  });
-  assemblyQuantity?.addEventListener("input", () => {
-    assemblyGenerationSequence += 1;
-    updateAssemblyGenerateState();
-  });
-  assemblyQuantity?.addEventListener("change", () => {
-    assemblyGenerationSequence += 1;
-    updateAssemblyGenerateState();
-  });
+    setAssemblyStatus("填写各组装图号的数量后，重新生成配件清单。");
+  }
+  if (assemblyRows) {
+    assemblyRows.addEventListener("change", assemblyChanged);
+    assemblyRows.addEventListener("input", assemblyChanged);
+    assemblyRows.addEventListener("click", (event) => {
+      if (!event.target.matches("[data-remove-assembly]")) return;
+      event.target.closest("[data-order-assembly-row]").remove();
+      assemblyChanged();
+    });
+    addAssemblyButton?.addEventListener("click", () => {
+      const row = controls()[0].row.cloneNode(true);
+      populateAssemblyOptions(row.querySelector("[data-order-assembly-drawing]"), availableAssemblies);
+      row.querySelector("[data-order-assembly-quantity]").value = "";
+      assemblyRows.appendChild(row);
+      assemblyChanged();
+    });
+  } else {
+    assemblyDrawing?.addEventListener("change", assemblyChanged);
+    assemblyQuantity?.addEventListener("input", assemblyChanged);
+    assemblyQuantity?.addEventListener("change", assemblyChanged);
+  }
   deliveryDate?.addEventListener("input", () => {
     applyOrderDeliveryDate(body, deliveryDate.value);
   });
@@ -262,17 +297,16 @@ function initializeOrderEntry(root = document) {
 
   generateAssemblyButton?.addEventListener("click", async () => {
     const generationCustomer = customerFilter?.value || "";
-    const generationDrawing = assemblyDrawing?.value || "";
-    const generationSetQuantity = assemblyQuantity?.value || "";
-    const setQuantity = Number(generationSetQuantity);
-    if (
-      !generationCustomer ||
-      !generationDrawing ||
-      !Number.isInteger(setQuantity) ||
-      setQuantity <= 0 ||
-      setQuantity > MAX_ORDER_QUANTITY
-    ) {
+    const generationSelections = selection();
+    const generationKey = selectionKey();
+    if (!generationCustomer || generationSelections.some(({drawing, quantity}) =>
+      !drawing || !Number.isInteger(Number(quantity)) || Number(quantity) <= 0 || Number(quantity) > MAX_ORDER_QUANTITY
+    )) {
       setAssemblyStatus(`请选择客户、组装图号，并填写 1 到 ${MAX_ORDER_QUANTITY} 之间的整数套数。`);
+      return;
+    }
+    if (new Set(generationSelections.map(({drawing}) => drawing.toLowerCase())).size !== generationSelections.length) {
+      setAssemblyStatus("组装图号不能重复，请合并同一图号的组装数量。");
       return;
     }
     if (
@@ -285,34 +319,26 @@ function initializeOrderEntry(root = document) {
     generateAssemblyButton.disabled = true;
     setAssemblyStatus("正在生成配件清单…");
     try {
-      const params = new URLSearchParams({
-        customer: generationCustomer,
-        assembly_drawing_no: generationDrawing,
-      });
-      const response = await fetch(`${assemblyDefinitionUrl}?${params}`);
-      const payload = await response.json();
-      if (
-        generationSequence !== assemblyGenerationSequence ||
-        customerFilter.value !== generationCustomer ||
-        assemblyDrawing.value !== generationDrawing ||
-        assemblyQuantity.value !== generationSetQuantity
-      ) {
+      const assemblies = await Promise.all(generationSelections.map(async ({drawing, quantity}) => {
+        const params = new URLSearchParams({customer: generationCustomer, assembly_drawing_no: drawing});
+        const response = await fetch(`${assemblyDefinitionUrl}?${params}`);
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "配件清单生成失败");
+        if (!payload.items?.length) throw new Error(`${drawing} 没有配置配件`);
+        return payload.items.map((item) => ({...item,
+          assembly_drawing_no: payload.assembly_drawing_no,
+          assembly_set_quantity: Number(quantity),
+        }));
+      }));
+      if (generationSequence !== assemblyGenerationSequence || selectionKey() !== generationKey) {
         setAssemblyStatus("选择已改变，请按当前客户、图号和套数重新生成配件清单。");
         return;
       }
-      if (!response.ok) throw new Error(payload.error || "配件清单生成失败");
-      if (!payload.items?.length) throw new Error("该组装图号没有配置配件");
-      replaceRowsWithAssembly(
-        body,
-        rowTemplate,
-        payload.items,
-        setQuantity,
-        deliveryDate?.value || "",
-        generationCustomer,
-      );
-      assemblyDrawing.value = payload.assembly_drawing_no;
+      const items = assemblies.flat();
+      replaceRowsWithAssembly(body, rowTemplate, items, 1, deliveryDate?.value || "", generationCustomer);
+      generatedSelection = generationKey;
       updateRemoveState();
-      setAssemblyStatus(`已生成 ${payload.items.length} 种配件，可继续修改各行数量。`);
+      setAssemblyStatus(`已生成 ${assemblies.length} 个组装图号、${items.length} 行配件，可继续修改各行数量。`);
     } catch (error) {
       if (generationSequence === assemblyGenerationSequence) {
         setAssemblyStatus(error.message || "配件清单生成失败");
@@ -326,7 +352,12 @@ function initializeOrderEntry(root = document) {
   updateRemoveState();
   updateAssemblyGenerateState();
 
-  form.addEventListener("submit", () => {
+  form.addEventListener("submit", (event) => {
+    if (generatedSelection !== null && generatedSelection !== selectionKey() && hasMeaningfulOrderRows(body)) {
+      event.preventDefault();
+      setAssemblyStatus("组装选择或数量已改变，请重新生成配件清单后保存。");
+      return;
+    }
     body.querySelectorAll("[data-order-item]").forEach((row) => {
       row.querySelectorAll("[data-status-checkbox]").forEach((checkbox) => {
         const target = row.querySelector(`input[type="hidden"][name="${checkbox.dataset.statusTarget}"]`);

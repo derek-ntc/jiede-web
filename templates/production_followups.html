@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}生产跟进{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='process-card-editor.css', v=static_version) }}">{% endblock %}
 {% block content %}
 <nav class="section-actions"><a class="button secondary" href="{{ url_for('production_followups') }}">按订单跟进</a><a class="button" href="{{ url_for('production_followups', view='legacy') }}">历史／独立工艺卡</a></nav>
 <div class="production-followup-page">
@@ -113,7 +114,7 @@
         <tbody>
           {% for item in followups %}
             {% set row = item.row %}
-            <tr class="{% if item.processes and not (item.processes | rejectattr('completed_at') | list) %}order-completed{% endif %}">
+            <tr id="process-card-{{ row.id }}" data-process-card class="{% if item.processes and not (item.processes | rejectattr('completed_at') | list) %}order-completed{% endif %}">
               <td data-label="批次号">{{ row.batch_no }}</td>
               <td data-label="下单时间">{{ row.ordered_at }}</td>
               <td data-label="客户">
@@ -152,12 +153,14 @@
                 </div>
               </td>
               <td data-label="生产工艺">
-                <ol class="production-process-list">
+                {% if can_manage_production_followups %}<form id="process-edit-{{ row.id }}" data-process-save method="post" action="{{ url_for('save_production_followup_process_card', followup_id=row.id) }}">
+<input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}"><input type="hidden" name="filter_q" value="{{ query }}"><input type="hidden" name="filter_customer" value="{{ selected_customer }}"><input type="hidden" name="card_revision" value="{{ process_card_revision(item.processes) }}"><button>保存本规格</button></form>{% endif %}<p data-process-status role="status" aria-live="polite"></p>
+<ol class="production-process-list">
                   {% for step in item.processes %}
                     <li class="production-process-row{% if step.completed_at %} is-complete{% endif %}">
                       <span class="production-process-number">{{ loop.index }}</span>
                       <div class="production-process-summary">
-                        <strong>{{ step.name }}</strong>
+                        {% if can_manage_production_followups %}<input form="process-edit-{{ row.id }}" type="hidden" name="step_id" value="{{ step.id }}"><input data-process-edit id="process-name-{{ step.id }}" form="process-edit-{{ row.id }}" name="process_name" value="{{ step.name }}" maxlength="100" required aria-label="{{ step.name }}工艺名称">{% else %}<strong>{{ step.name }}</strong>{% endif %}
                         {% if step.remark %}<span class="production-process-remark">备注：{{ step.remark }}</span>{% endif %}
                         {% if step.completed_at %}
                           <span class="production-process-meta">已完成 · {{ step.completed_at.replace("T", " ")[:16] }}{% if step.completed_by %} · {{ step.completed_by }}{% endif %}</span>
@@ -169,13 +172,7 @@
                       </div>
                       {% if can_manage_production_followups %}
                         <div class="production-process-actions">
-                          <form method="post" action="{{ url_for('update_production_followup_process_remark', followup_id=row.id, step_id=step.id) }}" class="production-process-remark-form">
-                            <input type="hidden" name="production_followup_csrf_token" value="{{ production_followup_csrf_token }}">
-                            <input type="hidden" name="filter_q" value="{{ query }}">
-                            <input type="hidden" name="filter_customer" value="{{ selected_customer }}">
-                            <textarea name="remark" maxlength="1000" rows="2" placeholder="工艺备注、注意事项" aria-label="{{ step.name }} 备注">{{ step.remark }}</textarea>
-                            <button class="secondary compact-button" type="submit">保存备注</button>
-                          </form>
+                          <textarea data-process-edit id="remark-{{ step.id }}" form="process-edit-{{ row.id }}" name="process_remark" maxlength="1000" rows="2" placeholder="工艺备注、注意事项" aria-label="{{ step.name }} 备注">{{ step.remark }}</textarea>
                           {% if step.completed_at %}
                             {% if step.can_revert %}
                               <form method="post" action="{{ url_for('revert_production_followup_process', followup_id=row.id, step_id=step.id) }}" data-production-process-confirm="确定撤回{{ step.name }}吗？">
@@ -273,5 +270,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="{{ url_for('static', filename='process-card-editor.js', v=static_version) }}"></script>
   <script src="{{ url_for('static', filename='production-followups.js', v=static_version) }}"></script>
 {% endblock %}

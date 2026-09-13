@@ -10,7 +10,7 @@
   <p>状态：{{ '已作废' if outbound.status == 'voided' else '已过账' }}　过账时间：{{ outbound.created_at }}</p>
   {% if outbound.voided_at %}<p>作废人：{{ outbound.voided_by }}　作废时间：{{ outbound.voided_at }}</p>{% endif %}
   <div class="table-wrap"><table><thead><tr><th>物品 / 图号 / 规格尺寸</th><th>供应商</th><th>来源订单 / 批次</th><th>出库库位</th><th>出库数量</th><th>行备注</th></tr></thead><tbody>
-    {% for row in rows %}<tr><td>{% for field in actual_fields %}{% if row[field] is not none and row[field] != '' %}<div>{{ field_labels[field] }}：{{ row[field] }}</div>{% endif %}{% endfor %}</td><td>{{ row.supplier_name }}</td><td>{{ row.order_no }}<br>{{ row.lot_no }}</td><td>{{ row.location_code }} · {{ row.location_name }}</td><td class="outbound-number">{{ row.quantity }}</td><td>{{ row.remark }}</td></tr>{% endfor %}
+    {% for row in rows %}<tr><td>{% for field in actual_fields %}{% if (category == 'raw_material' and field == 'spec') or (row[field] is not none and row[field] != '') %}<div>{{ field_labels[field] }}：{{ material_specification(row) if category == 'raw_material' and field == 'spec' else row[field] }}</div>{% endif %}{% endfor %}</td><td>{{ row.supplier_name }}</td><td>{{ row.order_no }}<br>{{ row.lot_no }}</td><td>{{ row.location_code }} · {{ row.location_name }}</td><td class="outbound-number">{{ row.quantity }}</td><td>{{ row.remark }}</td></tr>{% endfor %}
   </tbody></table></div>
   <p class="outbound-remark">出库备注：{{ outbound.remark }}</p>
 </article>

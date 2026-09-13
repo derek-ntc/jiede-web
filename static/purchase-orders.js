@@ -59,6 +59,9 @@
         element.dataset.legacyId = row.legacy_id || '';
         element.querySelector('[data-row-action="remove"]').disabled = hasLegacySource(row);
         element.querySelector('[data-legacy-note]').hidden = !hasLegacySource(row);
+        const materialType = element.querySelector('[data-material-type]');
+        if (materialType) materialType.value = row.material_type ?? (row.id ? '' : 'plate');
+        root.RawMaterials?.syncRow(element);
         updateAmount(element);
         return element;
       }));

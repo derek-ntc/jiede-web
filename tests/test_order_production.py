@@ -47,7 +47,7 @@ class OrderProductionTests(unittest.TestCase):
             service.set_process_quantity(conn, card, step, '80', '0', 'admin', 't1')
             service.set_process_quantity(conn, card, step, '80', '1', 'admin', 't2')
             before = conn.execute('SELECT COUNT(*) FROM order_production_quantity_audit').fetchone()[0]
-            for qty, version, owner in [('-1', 2, card), ('1.5', 2, card), ('201', 2, card), ('90', 0, card), ('90', 2, other)]:
+            for qty, version, owner in [('-1', 2, card), ('1.5', 2, card), ('9223372036854775808', 2, card), ('90', 0, card), ('90', 2, other)]:
                 with self.assertRaises(ValueError):
                     service.set_process_quantity(conn, owner, step, qty, version, 'admin', 'bad')
             row = conn.execute('SELECT * FROM production_followup_process_steps WHERE id=?', (step,)).fetchone()

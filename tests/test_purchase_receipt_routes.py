@@ -84,10 +84,13 @@ class PurchaseReceiptRouteTests(unittest.TestCase):
         self.assertNotIn("PO-OTHER-SUPPLIER", response.text)
 
     def test_category_dimensions_and_enabled_locations(self):
-        for category, visible, hidden in (("raw_material", "thickness", "height"), ("carton", "height", "thickness"), ("outsourcing", "drawing_no", None), ("other", "item_name", None)):
+        for category, visible, hidden in (("raw_material", "thickness", None), ("carton", "height", "thickness"), ("outsourcing", "drawing_no", None), ("other", "item_name", None)):
             oid = self.order_id if category == "raw_material" else self.create_order(category, order_no=category)[0]
             _, html = self.page_data(f"/admin/purchase-receipts/{category.replace('_', '-')}/{oid}/new")
             self.assertIn(f'data-field="{visible}"', html)
+            if category == "raw_material":
+                self.assertIn('data-material-dimension="height" hidden', html)
+                self.assertIn('data-material-type', html)
             if hidden:
                 self.assertNotIn(f'data-field="{hidden}"', html)
             self.assertIn("原料区", html)
